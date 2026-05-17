@@ -15643,6 +15643,15 @@ HTML = r"""<!doctype html>
       <input type="hidden" name="accel" id="accel" value="off">
       <input type="hidden" name="temporal_mode" id="temporal_mode" value="native">
       <input type="hidden" name="upscale" id="upscale" value="fit_720p">
+      <!-- HQ skip-step optimization (Codex 2026-05-15 finding). Default 0
+           = upstream behavior. Set to 1 by _setCharacterQuality when a
+           character is selected — saves ~54 s (12.6%) on the locked 7 s
+           Q8 HQ recipe with no visible quality cost. See
+           lora-lab/outputs/overnight_2026-05-15/SPEED_RESULTS_CODEX.md
+           for the validation grid. Patches in samplers.py + helper line
+           1625-26 land the value at the HQ pipeline. -->
+      <input type="hidden" name="video_skip_step" id="video_skip_step" value="0">
+      <input type="hidden" name="audio_skip_step" id="audio_skip_step" value="0">
 
       <div id="warnBanner" class="warn-banner"></div>
 
@@ -15859,15 +15868,15 @@ HTML = r"""<!doctype html>
                on save to the final delivery resolution. Hidden by default;
                .show class adds the actual display. -->
           <div class="quality-strip pill-group" id="qualityGroupCharacter" hidden>
-            <button type="button" class="q-chip pill-btn pill-quality char-quality" data-char-quality="draft" data-width="736" data-height="416">
+            <button type="button" class="q-chip pill-btn pill-quality char-quality" data-char-quality="draft" data-width="736" data-height="416" title="Q8 HQ at 736×416 — faster, slightly less per-frame detail. Skip-step optimization enabled (Codex 2026-05-15).">
               <span class="ql-name">Q8 Draft</span>
               <span class="q-spec ql-spec sub">736×416</span>
-              <span class="ql-tier">Q8 HQ · ~3:30 / 5s</span>
+              <span class="ql-tier">Q8 HQ + skip-step · ~3 min / 5s</span>
             </button>
-            <button type="button" class="q-chip pill-btn pill-quality char-quality active" data-char-quality="pro" data-width="1024" data-height="576">
+            <button type="button" class="q-chip pill-btn pill-quality char-quality active" data-char-quality="pro" data-width="1024" data-height="576" title="Q8 HQ at 1024×576 — locked production recipe + Codex skip-step (~12.6% faster, no visible quality cost).">
               <span class="ql-name">Q8 Pro</span>
               <span class="q-spec ql-spec sub">1024×576</span>
-              <span class="ql-tier">Q8 HQ · ~6:00 / 5s · best identity</span>
+              <span class="ql-tier">Q8 HQ + skip-step · ~5 min / 5s · best identity</span>
             </button>
           </div>
         </div>
@@ -23929,6 +23938,14 @@ function _applyCharacterQualityStripVisibility() {
     if (typeof setQuality === 'function') {
       try { setQuality('balanced'); } catch (_) {}
     }
+    // Reset the skip-step opt-in back to upstream conservative defaults
+    // when leaving character mode — non-character T2V renders haven't
+    // been validated against the contact-sheet quality bar, so the
+    // 12.6% wall-time win is character-only for now.
+    const vSkip = document.getElementById('video_skip_step');
+    const aSkip = document.getElementById('audio_skip_step');
+    if (vSkip) vSkip.value = '0';
+    if (aSkip) aSkip.value = '0';
   }
 }
 
@@ -23956,6 +23973,16 @@ function _setCharacterQuality(btn) {
   const vertical = aspect && aspect.value === 'vertical';
   if (wInp) wInp.value = vertical ? h : w;
   if (hInp) hInp.value = vertical ? w : h;
+  // Enable the Codex skip-step optimization on character renders.
+  // Saves ~54 s (12.6%) per 7 s Q8 HQ clip, validated 2026-05-15. See
+  // lora-lab/outputs/overnight_2026-05-15/SPEED_RESULTS_CODEX.md. Both
+  // Q8 Draft and Q8 Pro benefit equally — the savings are in the
+  // sampler's reuse of the last denoised prediction on alternating
+  // outer passes, independent of resolution.
+  const vSkip = document.getElementById('video_skip_step');
+  const aSkip = document.getElementById('audio_skip_step');
+  if (vSkip) vSkip.value = '1';
+  if (aSkip) aSkip.value = '1';
   if (typeof setUpscale === 'function') {
     try { setUpscale('fit_720p'); } catch (_) {}
   }
