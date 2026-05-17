@@ -712,8 +712,21 @@ def _safe_loras_dir() -> Path:
 #     so the existing Now / Queue / Recent / Logs surfaces light up.
 
 TRAIN_DIR = STATE_DIR / "train_character"
-LORA_LAB_ROOT = Path("/Users/salo/AI/projects/lora-lab")
-LORA_LAB_RUN_SH = LORA_LAB_ROOT / "scripts" / "run.sh"
+# Vendored 2026-05-17: lora_lab is now a top-level package shipped with
+# the panel (lora_lab/), so installer-only users get training out of
+# the box without cloning a separate repo. The env shim
+# (scripts/lora_lab_run.sh) sets PYTHONPATH=$PANEL_ROOT so `python -m
+# lora_lab.train_character` resolves the vendored copy.
+#
+# `LTX_LORA_LAB_ROOT` env var still lets a power user point at an
+# external lora-lab checkout (e.g. the AI/projects/lora-lab dev tree)
+# without editing this file — useful while iterating on the lab code
+# without re-vendoring.
+LORA_LAB_ROOT = Path(os.environ.get("LTX_LORA_LAB_ROOT", str(ROOT)))
+LORA_LAB_RUN_SH = Path(
+    os.environ.get("LTX_LORA_LAB_RUN_SH",
+                   str(ROOT / "scripts" / "lora_lab_run.sh"))
+)
 
 # Quality preset → training hyperparams. The lab's train_character.py reads
 # these out of the spec JSON; the values here are the contract surface. The
