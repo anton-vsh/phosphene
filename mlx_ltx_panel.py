@@ -1657,6 +1657,95 @@ def list_characters() -> list[dict]:
     return out
 
 
+def _character_lora_basenames() -> set[str]:
+    """Collect basenames of files that belong to a TRAINED character bundle —
+    face LoRA, audio LoRA, voice clip. Used by the Manual-tab LoRA picker to
+    suppress character files so the picker shows ONLY style/utility LoRAs.
+
+    Two sources, unioned:
+
+      1. Files discovered by `list_characters()` — that's the live truth
+         (the file actually exists AND `_v2.safetensors` glob matched).
+         Picks up `<trigger>_v2.safetensors`, `<trigger>.audio.safetensors`,
+         `<trigger>.voice.<ext>` for every character on disk.
+
+      2. Files declared in `mlx_models/characters/<trigger>/bundle.json`
+         under `face.path`, `voice.path`, `voice.voice_clip`. These are
+         basenames relative to `mlx_models/loras/`. The bundle may name
+         a file that doesn't exist yet (e.g. `bizarrotrn.video.safetensors`
+         on a fresh checkout) — we still suppress that name so when the
+         user drops the weights in, it doesn't surface in the regular
+         picker by accident.
+
+    Returns a set of basenames (just `name.ext`, no path), so the caller
+    can compare with `Path(p).name`.
+    """
+    blocked: set[str] = set()
+
+    # Source 1: live discovery.
+    try:
+        for char in list_characters():
+            for key in ("face_lora_path", "audio_lora_path", "voice_sample"):
+                v = char.get(key)
+                if v:
+                    blocked.add(Path(v).name)
+    except Exception:
+        # Discovery failures shouldn't block the picker — just no exclusions
+        # from this source. The picker stays usable; trained chars might
+        # appear as duplicates next to the Characters card.
+        pass
+
+    # Source 2: bundle.json declarations (may reference yet-missing weights).
+    if _CHARACTERS_CACHE_PATH.is_dir():
+        for child in _CHARACTERS_CACHE_PATH.iterdir():
+            if not child.is_dir():
+                continue
+            bundle_path = child / "bundle.json"
+            if not bundle_path.is_file():
+                continue
+            try:
+                bundle = json.loads(bundle_path.read_text(encoding="utf-8")) or {}
+            except (OSError, json.JSONDecodeError):
+                continue
+            face = bundle.get("face") or {}
+            voice = bundle.get("voice") or {}
+            for v in (face.get("path"), voice.get("path"), voice.get("voice_clip")):
+                if v:
+                    blocked.add(Path(v).name)
+
+    return blocked
+
+
+def _is_character_lora(entry: dict, blocked_names: set[str] | None = None) -> bool:
+    """Heuristic — return True if a LoRA picker entry should be HIDDEN from
+    the Manual-tab style/utility picker because it's part of a trained
+    character bundle (face / audio / voice).
+
+    Rules (any one matches → it's a character file):
+      - sidecar `kind` == "train_character"
+      - basename ends with `.audio.safetensors`
+      - basename ends with `.voice.<ext>` for ext in TRAIN_VOICE_EXTS
+      - basename matches one of `blocked_names` (face / audio / voice
+        files declared by an on-disk bundle.json or `list_characters()`)
+    """
+    if (entry.get("kind") or "") == "train_character":
+        return True
+    name = Path(str(entry.get("path") or entry.get("filename") or "")).name.lower()
+    if not name:
+        return False
+    if name.endswith(".audio.safetensors"):
+        return True
+    for ext in TRAIN_VOICE_EXTS:
+        if name.endswith(f".voice{ext}"):
+            return True
+    if blocked_names:
+        # Compare case-insensitive to be defensive across filesystems.
+        lower = {n.lower() for n in blocked_names}
+        if name in lower:
+            return True
+    return False
+
+
 def _style_dataset_image(trigger: str) -> Path | None:
     """Find the avatar image for a trained style. Mirrors
     `_character_dataset_image` but only checks the panel-owned styles cache —
@@ -4260,6 +4349,61 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             job["params"]["quality_choice"] = _quality_choice
         if _full_prompt_override:
             job["params"]["full_prompt_override"] = _full_prompt_override
+
+    # 2026-05-17 Manual-tab Characters picker — expand character_id into
+    # face + audio LoRA additions. The Characters TAB (top-level)
+    # pre-expands at /characters/<id>/generate so the LoRAs are already
+    # in `loras` by the time make_job runs; the picker on the Manual tab
+    # only sends `character_id` and relies on this expansion. We make the
+    # expansion idempotent (skip if a path is already present) so both
+    # entry points are safe.
+    #
+    # Strength: read from `character_strength` form field, else 1.0.
+    # Bounded to [0, 2.0] same as parse_loras_from_form for any user-picked
+    # LoRA — overriding to 0 effectively disables a character without
+    # forcing the user to clear the picker.
+    if _character_id:
+        try:
+            char_strength = float(f("character_strength", "1.0") or "1.0")
+        except (TypeError, ValueError):
+            char_strength = 1.0
+        char_strength = max(0.0, min(2.0, char_strength))
+        try:
+            chars_by_id = {c["id"]: c for c in list_characters()}
+        except Exception:
+            chars_by_id = {}
+        char_rec = chars_by_id.get(_character_id)
+        if char_rec:
+            existing_paths = {
+                str((entry or {}).get("path") or "")
+                for entry in (job["params"].get("loras") or [])
+            }
+            face_p = char_rec.get("face_lora_path")
+            audio_p = char_rec.get("audio_lora_path")
+            additions: list[dict] = []
+            if face_p and face_p not in existing_paths:
+                additions.append({"path": face_p, "strength": char_strength})
+                existing_paths.add(face_p)
+            if audio_p and audio_p not in existing_paths:
+                additions.append({"path": audio_p, "strength": char_strength})
+                existing_paths.add(audio_p)
+            if additions:
+                # Face/audio LoRAs go FIRST in the stack so they take effect
+                # before any style LoRAs the user stacked on top. Mirrors
+                # the existing /characters/<id>/generate ordering.
+                job["params"]["loras"] = additions + list(
+                    job["params"].get("loras") or []
+                )
+            # Always stamp the character_id on params even when the form
+            # didn't declare source="characters". The Manual-tab picker is
+            # a different entry point — stamping is what lets Load Params
+            # later restore the picker selection.
+            if "character_id" not in job["params"]:
+                job["params"]["character_id"] = _character_id
+            # Persist the strength too so Load Params can restore the
+            # exact slider value (defaults to 1.0 on the picker).
+            job["params"].setdefault("character_strength", char_strength)
+
     lora_artifact_neg = _lora_artifact_negative_prompt(job["params"].get("loras") or [])
     if lora_artifact_neg:
         existing_neg = str(job["params"].get("negative_prompt") or "").strip()
@@ -6876,7 +7020,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/loras":
             # Returns: { user: [user-installed], curated: [Lightricks
             # officials minus hdr_toggle entries], loras_dir: <abs path>,
-            # civitai_auth: bool, mode_filter: <echoed> }.
+            # civitai_auth: bool, mode_filter: <echoed>,
+            # exclude_characters: <echoed> }.
             # The HDR-toggle special-case is filtered out of `curated`
             # because the UI exposes it as a plain checkbox elsewhere —
             # showing it in the picker would just confuse users.
@@ -6886,14 +7031,30 @@ class Handler(BaseHTTPRequestHandler):
             # down to LoRAs whose `compatible_modes` includes the tag
             # OR includes "unknown" (so unclassified LoRAs show up in
             # every filter — better than hiding them).
+            #
+            # Optional `?exclude_characters=1` filter (added 2026-05-17
+            # with the Manual-tab Characters picker). When on, drops every
+            # entry that `_is_character_lora()` flags as part of a trained
+            # character bundle (face / audio / voice or kind=train_character
+            # sidecar). The Manual-tab style picker passes this so the
+            # Characters picker is the only surface where face+audio LoRAs
+            # live — no confusing duplicates in two pickers at once.
             qs = parse_qs(parsed.query)
             mode_filter = (qs.get("mode", [""])[0] or "").strip().lower()
+            exclude_characters_raw = (qs.get("exclude_characters", [""])[0] or "").strip().lower()
+            exclude_characters = exclude_characters_raw in ("1", "true", "yes", "on")
             user_loras = list_user_loras()
             if mode_filter:
                 user_loras = [
                     l for l in user_loras
                     if mode_filter in (l.get("compatible_modes") or [])
                     or "unknown" in (l.get("compatible_modes") or [])
+                ]
+            if exclude_characters:
+                blocked_names = _character_lora_basenames()
+                user_loras = [
+                    l for l in user_loras
+                    if not _is_character_lora(l, blocked_names)
                 ]
             curated = [c for c in list_curated_loras()
                        if not c.get("is_hdr_toggle")]
@@ -6904,6 +7065,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Echo back so the JS picker can verify the server filtered
                 # by the mode it asked for (vs back-compat unfiltered).
                 "mode_filter": mode_filter or None,
+                "exclude_characters": bool(exclude_characters),
                 # True iff a CivitAI key is configured. Source of truth:
                 # the saved panel settings first, falling back to the
                 # env var if a power user prefers shell-level config.
@@ -13924,6 +14086,212 @@ HTML = r"""<!doctype html>
       transition: box-shadow 240ms ease;
     }
 
+    /* ============== MANUAL-TAB CHARACTERS PICKER ==============
+       Sits ABOVE the LoRAs picker in Manual T2V (text mode). Mirrors the
+       LoRAs section aesthetic (panel-2 surface, accent active border)
+       but renders one chip per discovered character with avatar + name +
+       trigger badge + has-voice badge. Single-select; "None" deselects.
+
+       Selecting a character DOESN'T mutate the LoRA picker — the backend
+       expands character_id → face+audio LoRAs at submit. The user can
+       still stack style LoRAs from the regular picker on top.
+
+       Lives only in T2V mode; CSS-collapses on other modes via
+       .chars-section.mode-only logic on the wrapper. */
+    .chars-section {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      background: var(--panel-2);
+      overflow: hidden;
+    }
+    .chars-section > summary { list-style: none; }
+    .chars-section > summary::-webkit-details-marker { display: none; }
+    .chars-summary {
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px;
+      font-size: 13px; font-weight: 600; color: var(--text);
+      transition: background var(--t-fast);
+    }
+    .chars-summary:hover { background: rgba(140,160,255,0.06); }
+    .chars-section[open] .chars-summary {
+      border-bottom: 1px solid var(--border);
+      background: rgba(140,160,255,0.04);
+    }
+    .chars-summary .chars-chevron {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px;
+      color: var(--muted);
+      transform: rotate(-90deg);
+      transition: transform 140ms ease;
+    }
+    .chars-summary .chars-chevron .ph { width: 14px; height: 14px; }
+    .chars-section[open] .chars-summary .chars-chevron {
+      transform: rotate(0deg);
+      color: var(--accent-bright, #93a8ff);
+    }
+    .chars-summary .chars-title {
+      font-size: 13px; font-weight: 600; letter-spacing: 0.01em;
+      color: var(--text);
+    }
+    .chars-summary .chars-meta {
+      margin-left: auto; font-size: 11px; font-weight: 500;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .chars-summary .chars-header-actions {
+      display: inline-flex; gap: 6px; align-items: center;
+      margin-left: 10px;
+    }
+    .chars-summary .chars-icon-btn {
+      width: 28px; height: 28px; padding: 0;
+      border-radius: 6px;
+      border: 1px solid var(--border-strong);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 14px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center;
+      transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+    }
+    .chars-summary .chars-icon-btn:hover {
+      color: var(--accent-bright); border-color: var(--accent);
+      background: rgba(47,129,247,0.14);
+    }
+    .chars-body {
+      display: flex; flex-direction: column;
+      gap: 10px; padding: 12px 14px 14px;
+    }
+    .chars-applied-note {
+      font-size: 11px; color: var(--muted);
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: rgba(47,129,247,0.06);
+      border: 1px dashed rgba(47,129,247,0.30);
+    }
+    .chars-applied-note strong { color: var(--accent-bright); font-weight: 600; }
+    .chars-empty {
+      font-size: 11.5px; color: var(--muted);
+      padding: 4px 0;
+    }
+    .chars-empty code {
+      background: rgba(140, 160, 220, 0.06);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+    .chars-empty a {
+      color: var(--accent-bright);
+      text-decoration: none;
+      border-bottom: 1px dotted currentColor;
+    }
+    .chars-list {
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px;
+    }
+    .chars-chip {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 10px 6px 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border-strong);
+      background: var(--panel);
+      cursor: pointer; user-select: none;
+      transition: border-color var(--t-fast), background var(--t-fast), transform 80ms;
+      max-width: 100%;
+    }
+    .chars-chip:hover {
+      border-color: var(--accent);
+      background: rgba(47,129,247,0.05);
+    }
+    .chars-chip:active { transform: translateY(1px); }
+    .chars-chip.active {
+      border-color: var(--accent-bright);
+      background: rgba(47,129,247,0.14);
+      box-shadow: 0 0 0 1px var(--accent-bright);
+    }
+    .chars-chip.none-chip {
+      /* "None" deselect chip lives at the front of the list — visually
+         distinct so it doesn't get confused with a character avatar. */
+      padding: 6px 12px;
+      font-style: italic;
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+    .chars-chip.none-chip.active {
+      color: var(--text); font-style: normal;
+    }
+    .chars-chip .chars-avatar {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex: none;
+      background: var(--bg-2);
+      display: block;
+    }
+    .chars-chip .chars-avatar-ph {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      flex: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 12px;
+      color: rgba(255,255,255,0.85);
+      background: linear-gradient(135deg,
+        rgba(255, 46, 159, 0.55),
+        rgba(177, 74, 255, 0.55),
+        rgba(94, 234, 255, 0.55));
+    }
+    .chars-chip .chars-info {
+      display: flex; flex-direction: column;
+      align-items: flex-start; gap: 0;
+      min-width: 0;
+    }
+    .chars-chip .chars-name {
+      font-size: 12.5px; font-weight: 600;
+      color: var(--text); line-height: 1.1;
+    }
+    .chars-chip .chars-trigger {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; color: var(--muted);
+      line-height: 1.2;
+      margin-top: 1px;
+    }
+    .chars-chip .chars-badges {
+      display: inline-flex; gap: 4px; align-items: center;
+      margin-left: 4px;
+    }
+    .chars-chip .chars-badge {
+      font-size: 9px; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 1px 5px; border-radius: 999px;
+      border: 1px solid currentColor;
+    }
+    .chars-chip .chars-badge.voice {
+      color: rgba(89, 200, 130, 0.95);
+      background: rgba(89, 200, 130, 0.08);
+    }
+    .chars-chip .chars-badge.silent {
+      color: #ffb84a;
+      background: rgba(255, 168, 0, 0.08);
+    }
+    /* Strength row under the chips — only visible when a character is
+       selected. Same control style as the LoRA strength row inside
+       expanded .lora-row.active so the UI feels consistent. */
+    .chars-strength-row {
+      display: none;
+      align-items: center; gap: 8px;
+      padding-top: 4px;
+    }
+    .chars-strength-row.show { display: flex; }
+    .chars-strength-row label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--muted); width: 70px; flex: none;
+    }
+    .chars-strength-row input[type="range"] {
+      flex: 1; min-width: 0; accent-color: var(--accent);
+    }
+    .chars-strength-row input[type="number"] {
+      width: 54px; padding: 2px 5px; font-size: 11px; text-align: right;
+    }
+
     /* CivitAI browser modal — grid of cards with thumbnail, name,
        creator, downloads, NSFW indicator, and an Install button per
        card. Layered on the .models-modal scaffold. */
@@ -15413,6 +15781,63 @@ HTML = r"""<!doctype html>
         </div>
       </div>
 
+      <!-- ============== CHARACTERS PICKER (Manual tab · T2V) ==============
+           Sits ABOVE the LoRA picker. Single-select; "None" deselects.
+           Selecting a character DOES NOT add chips to the LoRA picker —
+           the backend expands character_id → face+audio LoRAs at submit
+           time (see make_job character_id branch). The user can still
+           stack STYLE LoRAs from the regular picker on top; the regular
+           picker is filtered to hide character files (face/audio/voice)
+           so the Characters picker is the only surface where trained
+           characters live.
+
+           Visible only in T2V mode (the spec's "Text-to-Video flow") —
+           setMode() toggles the .show class. Hidden field
+           #characterIdInput rides the form on submit; #characterStrength
+           defaults to 1.0 (Salo's default 'use the LoRA as recommended'). -->
+      <div class="form-divider mode-only" id="charactersPickerDivider"></div>
+      <div class="mode-only" id="manualCharactersPickerSlot">
+        <details id="charsDetails" open class="chars-section">
+          <summary class="chars-summary">
+            <span class="chars-chevron" aria-hidden="true"><svg class="ph"><use href="#ph-caret-down-bold"/></svg></span>
+            <span class="chars-title">Characters</span>
+            <span class="chars-meta" id="charsSummaryMeta">none selected</span>
+            <span class="chars-header-actions">
+              <button type="button" class="chars-icon-btn"
+                      title="Rescan mlx_models/characters/ for new bundles"
+                      onclick="event.stopPropagation(); event.preventDefault(); refreshManualCharacters()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
+            </span>
+          </summary>
+          <div class="chars-body">
+            <!-- Applied-LoRA explainer — visible only when a character is
+                 selected. Tells the user exactly what's being applied so
+                 selecting Aria doesn't feel like a black box. -->
+            <div class="chars-applied-note" id="charsAppliedNote" hidden></div>
+            <!-- Empty state — when no bundles exist on disk. Points the
+                 user at the Train tab to make their first character. -->
+            <div class="chars-empty" id="charsEmpty" hidden>
+              No trained characters yet — train one in the
+              <a href="#" onclick="workflowSwitch('train'); return false;">Train tab</a>
+              or drop a <code>bundle.json</code> + face/audio LoRAs in
+              <code>mlx_models/characters/&lt;trigger&gt;/</code>.
+            </div>
+            <div class="chars-list" id="charsList"></div>
+            <!-- Strength slider (face + audio LoRAs get the same value
+                 server-side, mirroring /characters/<id>/generate). Hidden
+                 until a character is selected. -->
+            <div class="chars-strength-row" id="charsStrengthRow">
+              <label for="characterStrength">Strength</label>
+              <input type="range" min="0" max="2" step="0.05" value="1.0"
+                     oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(2); document.getElementById('characterStrength').value = this.value">
+              <input type="number" min="0" max="2" step="0.05" value="1.00"
+                     oninput="this.previousElementSibling.value = this.value; document.getElementById('characterStrength').value = this.value">
+            </div>
+          </div>
+        </details>
+      </div>
+      <input type="hidden" name="character_id" id="characterIdInput" value="">
+      <input type="hidden" name="character_strength" id="characterStrength" value="1.0">
+
       <!-- LoRA picker — UNIFIED across video form + Image Studio.
            Lives inside #genForm by default (so the video form's FormData
            picks up the hidden #lorasJson on submit), but on
@@ -15422,6 +15847,11 @@ HTML = r"""<!doctype html>
            hidden #lorasJson field. The picker's library list is
            filtered by /loras?mode=<tag> based on the current (mode +
            engine) selection — see refreshLoras() in JS for the mapping.
+
+           2026-05-17: also filtered by ?exclude_characters=1 (Manual tab)
+           so character face/audio/voice files don't double-appear in
+           both pickers. Image Studio still pulls the unfiltered list
+           since the Characters picker is Manual-T2V only.
 
            Collapsible because most users won't touch it on a given
            session, and inline because hiding it behind a modal makes
@@ -17030,6 +17460,11 @@ function setMode(mode) {
     if (genForm) genForm.style.display = 'none';
     document.querySelectorAll('#modeGroup .pill-btn').forEach(b =>
       b.classList.toggle('active', b.dataset.mode === 'train'));
+    // Manual Characters picker is inside #genForm so it hides with the
+    // form, but ensure the visibility helper is in sync if it ever moves.
+    if (typeof _updateCharsPickerVisibility === 'function') {
+      _updateCharsPickerVisibility('train');
+    }
     // Lazy initialization on first entry — wires drop zone, generates
     // a starter trigger, refreshes the trained-LoRAs list, computes
     // an initial wall-time estimate.
@@ -17041,6 +17476,12 @@ function setMode(mode) {
     if (genForm) genForm.style.display = 'none';
     document.querySelectorAll('#modeGroup .pill-btn').forEach(b =>
       b.classList.toggle('active', b.dataset.mode === 'image'));
+    // Manual Characters picker hides with #genForm in Studio mode, but
+    // keep the helper in sync so it doesn't surface when the user flips
+    // back to a non-T2V video mode that also doesn't show it.
+    if (typeof _updateCharsPickerVisibility === 'function') {
+      _updateCharsPickerVisibility('image');
+    }
     // Portal the unified LoRA picker into the Studio composer slot, so
     // the SAME UI (one chip strip, one library, one + LoRA button) is
     // visible under Image Studio. Re-renders with the engine-aware
@@ -17086,6 +17527,12 @@ function setMode(mode) {
   if (typeof renderLorasList === 'function') renderLorasList();
   document.getElementById('mode').value = mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  // Manual-tab Characters picker is T2V-only (Text-to-Video flow). Other
+  // video modes (I2V, FFLF, Extend) have a different mental model — the
+  // user is anchoring on a frame, not picking an actor.
+  if (typeof _updateCharsPickerVisibility === 'function') {
+    _updateCharsPickerVisibility(mode);
+  }
   // Mode → main-outputs filter auto-set (Videos for video modes).
   if (typeof _autoMainOutputsFilterForMode === 'function') {
     _autoMainOutputsFilterForMode(mode);
@@ -20402,6 +20849,12 @@ async function poll() {
       if (typeof trainRefreshLoraList === 'function') {
         try { trainRefreshLoraList(); } catch (e) {}
       }
+      // Also refresh the Manual-tab Characters picker — a newly-finished
+      // character training drops a bundle.json into mlx_models/characters/,
+      // and the picker should pick it up without a manual page reload.
+      if (typeof refreshManualCharacters === 'function') {
+        try { refreshManualCharacters(); } catch (e) {}
+      }
     }
   }
 }
@@ -21097,14 +21550,75 @@ async function loadParams() {
   if (p.video_path) document.getElementById('video_path').value = p.video_path;
   if (p.label) document.getElementById('preset_label').value = p.label;
 
+  // Manual-tab Characters picker — restore the selection if the sidecar
+  // recorded a character_id (set by make_job when the form carried one).
+  // We do this BEFORE the LoRA-list restore so the face/audio LoRAs that
+  // make_job re-expands on the next submit aren't accidentally surfaced
+  // as plain LoRA chips in the picker too. Strip them out of the loras
+  // list (they'll be re-added by the backend expansion) so the picker
+  // shows only the user-stacked style LoRAs — same shape as the original
+  // submission.
+  let lorasForPicker = Array.isArray(p.loras) ? p.loras : null;
+  if (p.character_id && typeof refreshManualCharacters === 'function') {
+    // Re-pull the list so selectManualCharacter has fresh data, then
+    // pick the saved character if it still exists on disk.
+    (async () => {
+      try { await refreshManualCharacters(); } catch (_) {}
+      try {
+        const exists = (_manualCharacters || []).some(c => c.id === p.character_id);
+        if (exists) {
+          // Set hidden input directly — selectManualCharacter would
+          // also append the trigger word, but loadParams already set
+          // the prompt from the sidecar so re-injecting would duplicate.
+          _selectedCharacterId = p.character_id;
+          const inp = document.getElementById('characterIdInput');
+          if (inp) inp.value = p.character_id;
+          if (typeof _renderManualCharactersList === 'function') {
+            _renderManualCharactersList();
+          }
+        }
+      } catch (_) {}
+    })();
+    // Also restore character_strength if recorded (defaults to 1.0).
+    if (typeof p.character_strength !== 'undefined') {
+      const sval = parseFloat(p.character_strength);
+      if (!Number.isNaN(sval)) {
+        const sInp = document.getElementById('characterStrength');
+        if (sInp) sInp.value = sval;
+        const row = document.getElementById('charsStrengthRow');
+        if (row) {
+          const range = row.querySelector('input[type="range"]');
+          const num = row.querySelector('input[type="number"]');
+          if (range) range.value = sval;
+          if (num) num.value = sval.toFixed(2);
+        }
+      }
+    }
+    // Strip the character's face/audio LoRA paths out of the loras list
+    // so the picker doesn't show duplicate state. The backend will
+    // re-expand on the next submit. We can't read list_characters() from
+    // the client cheaply mid-loadParams, so we use a name heuristic
+    // identical to the server's `_is_character_lora` rule: filename
+    // matches `<trigger>_v2.safetensors` or `<trigger>.audio.safetensors`.
+    if (lorasForPicker) {
+      const trig = String(p.character_id).toLowerCase();
+      lorasForPicker = lorasForPicker.filter(l => {
+        const fname = String(l.path || '').split('/').pop().toLowerCase();
+        if (fname === `${trig}_v2.safetensors`) return false;
+        if (fname === `${trig}.audio.safetensors`) return false;
+        return true;
+      });
+    }
+  }
+
   // Restore the LoRA picker state. Without this, Load Params would silently
   // drop every LoRA the prior render used — prompt + seed + dims all match
   // but `loras=0` would go on the wire and the model would re-render
   // without fusion (no face/style transfer). Wire shape on the sidecar is
   // a list of {path, strength}; we re-decorate with `name` + `trigger_words`
   // from _knownUserLoras when available so the chip renders nicely.
-  if (Array.isArray(p.loras)) {
-    _activeLoras = p.loras.map(l => {
+  if (lorasForPicker) {
+    _activeLoras = lorasForPicker.map(l => {
       const path = l.path;
       const strength = (typeof l.strength === 'number') ? l.strength : 1.0;
       const meta = (Array.isArray(_knownUserLoras)
@@ -22515,9 +23029,15 @@ async function refreshLoras() {
   // in renderLorasList() via _currentLoraModeFilter(), which keeps the
   // round-trip count to one and avoids re-fetching every time the
   // user flips mode/engine.
+  //
+  // 2026-05-17: pass `exclude_characters=1` so character bundles' face /
+  // audio / voice files don't appear in the regular picker — they live
+  // exclusively in the new Manual-tab Characters picker (and the
+  // top-level Characters tab). Image Studio already hides video LoRAs
+  // via the client-side mode filter, so it doesn't lose anything.
   let data;
   try {
-    data = await (await fetch('/loras')).json();
+    data = await (await fetch('/loras?exclude_characters=1')).json();
   } catch (e) {
     return;
   }
@@ -22949,6 +23469,181 @@ async function deleteLora(path, name) {
   }
 }
 
+// ====== Manual-tab Characters picker ======
+//
+// Single-select character chip strip. Sits above the LoRA picker; visible
+// only in T2V mode. Selecting a character writes its id to the hidden
+// #characterIdInput which rides the form on submit — make_job() expands
+// character_id into face+audio LoRA additions (see the character_id
+// branch in the video make_job path).
+//
+// The Characters TAB (separate top-level workflow) is left untouched —
+// its compose state still works exactly as before, and the bundles it
+// reads come from the SAME /characters endpoint this picker calls.
+let _manualCharacters = [];     // [{id, name, trigger, has_voice, sample_image_url, ...}]
+let _selectedCharacterId = '';  // '' means none selected
+
+function _updateCharsPickerVisibility(mode) {
+  // The picker is Manual-tab T2V only (the spec's "Text-to-Video flow").
+  // Hide on every other mode — including I2V / FFLF / Extend which have
+  // a different mental model (the user is anchoring on a frame, not
+  // picking an actor). Image / Train hide via #genForm display:none
+  // anyway, but the helper stays in sync defensively.
+  const show = (mode === 't2v');
+  const slot = document.getElementById('manualCharactersPickerSlot');
+  const divider = document.getElementById('charactersPickerDivider');
+  if (slot) slot.classList.toggle('show', show);
+  if (divider) divider.classList.toggle('show', show);
+  // When hidden, don't carry a stale selection on submit — clear the
+  // hidden input. The user can re-select when they next visit T2V.
+  if (!show) {
+    _selectedCharacterId = '';
+    const inp = document.getElementById('characterIdInput');
+    if (inp) inp.value = '';
+    _renderCharsAppliedNote();
+  }
+}
+
+async function refreshManualCharacters() {
+  // /characters returns { characters: [...] } — same payload the Characters
+  // tab consumes, so the source of truth stays single.
+  let data;
+  try {
+    data = await (await fetch('/characters')).json();
+  } catch (e) {
+    return;
+  }
+  _manualCharacters = (data && Array.isArray(data.characters)) ? data.characters : [];
+  // If the previously-selected character is no longer on disk (renamed,
+  // deleted), drop the selection silently rather than carrying a stale
+  // id that would 404 the lookup at submit.
+  if (_selectedCharacterId &&
+      !_manualCharacters.some(c => c.id === _selectedCharacterId)) {
+    _selectedCharacterId = '';
+    const inp = document.getElementById('characterIdInput');
+    if (inp) inp.value = '';
+  }
+  _renderManualCharactersList();
+}
+
+function _renderManualCharactersList() {
+  const wrap = document.getElementById('charsList');
+  const empty = document.getElementById('charsEmpty');
+  const meta = document.getElementById('charsSummaryMeta');
+  if (!wrap) return;
+  if (!_manualCharacters.length) {
+    wrap.innerHTML = '';
+    if (empty) empty.hidden = false;
+    if (meta) meta.textContent = 'no bundles on disk';
+    _renderCharsAppliedNote();
+    return;
+  }
+  if (empty) empty.hidden = true;
+  const noneActive = !_selectedCharacterId;
+  const chips = [];
+  // "None" chip — always first, so the deselect is one tap away.
+  chips.push(`
+    <span class="chars-chip none-chip ${noneActive ? 'active' : ''}"
+          onclick="selectManualCharacter('')"
+          title="No character — render with style LoRAs only">
+      None
+    </span>
+  `);
+  for (const c of _manualCharacters) {
+    const active = (c.id === _selectedCharacterId);
+    const name = c.name || c.trigger || c.id;
+    const trigger = c.trigger || c.id || '';
+    // Avatar: small round image when sample_image_url is present, else
+    // an initial-letter placeholder with the same gradient palette the
+    // Characters-tab cards use (visual continuity across the two surfaces).
+    const initial = (name || '?').charAt(0).toUpperCase();
+    const avatar = c.sample_image_url
+      ? `<img class="chars-avatar" src="${escapeHtml(c.sample_image_url)}" alt="">`
+      : `<span class="chars-avatar-ph">${escapeHtml(initial)}</span>`;
+    const hasVoice = !!c.has_voice;
+    const badge = hasVoice
+      ? `<span class="chars-badge voice" title="Has voice LoRA + reference clip">voice</span>`
+      : `<span class="chars-badge silent" title="No audio LoRA on disk — face only">silent</span>`;
+    const idAttr = JSON.stringify(c.id).replace(/"/g, '&quot;');
+    chips.push(`
+      <span class="chars-chip ${active ? 'active' : ''}"
+            onclick="selectManualCharacter(${idAttr})"
+            title="Apply ${escapeHtml(name)} (trigger: ${escapeHtml(trigger)})">
+        ${avatar}
+        <span class="chars-info">
+          <span class="chars-name">${escapeHtml(name)}</span>
+          <span class="chars-trigger">${escapeHtml(trigger)}</span>
+        </span>
+        <span class="chars-badges">${badge}</span>
+      </span>
+    `);
+  }
+  wrap.innerHTML = chips.join('');
+  if (meta) {
+    if (_selectedCharacterId) {
+      const cur = _manualCharacters.find(c => c.id === _selectedCharacterId);
+      meta.textContent = cur ? `selected: ${cur.name || cur.trigger}` : '1 selected';
+    } else {
+      meta.textContent = `${_manualCharacters.length} available`;
+    }
+  }
+  // Strength slider visible only when a character is selected.
+  const strengthRow = document.getElementById('charsStrengthRow');
+  if (strengthRow) strengthRow.classList.toggle('show', !!_selectedCharacterId);
+  _renderCharsAppliedNote();
+}
+
+function _renderCharsAppliedNote() {
+  // Visible only when a character is selected. Tells the user EXACTLY
+  // which files will be applied — no black box. Mirrors the spec:
+  // "display a small note explaining face + audio + voice will be applied".
+  const note = document.getElementById('charsAppliedNote');
+  if (!note) return;
+  if (!_selectedCharacterId) {
+    note.hidden = true;
+    note.innerHTML = '';
+    return;
+  }
+  const c = _manualCharacters.find(x => x.id === _selectedCharacterId);
+  if (!c) {
+    note.hidden = true;
+    note.innerHTML = '';
+    return;
+  }
+  // Build a precise list: face is required (always present in a discovered
+  // character); audio + voice may be absent for "silent" characters.
+  const parts = [`<strong>face LoRA</strong>`];
+  if (c.audio_lora_path) parts.push(`<strong>audio LoRA</strong>`);
+  if (c.voice_sample)    parts.push(`<strong>voice ref</strong>`);
+  const triggerWord = c.trigger
+    ? ` Trigger word <code>${escapeHtml(c.trigger)}</code> — keep it in your prompt for full identity lock.`
+    : '';
+  const silentSuffix = (!c.audio_lora_path)
+    ? ` <em>Silent character — no voice phase will run.</em>`
+    : '';
+  note.innerHTML = `Selecting <strong>${escapeHtml(c.name || c.trigger || c.id)}</strong> applies: ${parts.join(', ')}.${triggerWord}${silentSuffix}`;
+  note.hidden = false;
+}
+
+function selectManualCharacter(id) {
+  // id === '' is the "None" chip — deselects.
+  _selectedCharacterId = id || '';
+  const inp = document.getElementById('characterIdInput');
+  if (inp) inp.value = _selectedCharacterId;
+  // Auto-insert the trigger word into the prompt so the user doesn't
+  // have to remember + retype it. Same UX the LoRA picker uses on
+  // toggle (single biggest source of "I selected it but it didn't fire"
+  // is the trigger missing from the prompt). Idempotent — skips if the
+  // word is already present, case-insensitive.
+  if (_selectedCharacterId) {
+    const c = _manualCharacters.find(x => x.id === _selectedCharacterId);
+    if (c && c.trigger && typeof appendTriggerToPrompt === 'function') {
+      try { appendTriggerToPrompt(c.trigger); } catch (_) {}
+    }
+  }
+  _renderManualCharactersList();
+}
+
 // ====== CivitAI modal ======
 
 let _civitaiCursor = '';
@@ -23245,7 +23940,20 @@ async function civitaiInstall(btn, item) {
 
 // Boot: load the local LoRA list on page load so the picker isn't empty
 // when the user expands it for the first time.
-document.addEventListener('DOMContentLoaded', () => { refreshLoras(); });
+document.addEventListener('DOMContentLoaded', () => {
+  refreshLoras();
+  // Manual-tab Characters picker — load the list once at boot so the
+  // chips are visible immediately when the user opens the section. The
+  // Characters TAB has its own initializer (charactersInit); both read
+  // from /characters so they stay in sync.
+  if (typeof refreshManualCharacters === 'function') {
+    try { refreshManualCharacters(); } catch (e) {}
+  }
+  // Apply initial picker visibility (T2V only) based on the default mode.
+  if (typeof _updateCharsPickerVisibility === 'function') {
+    try { _updateCharsPickerVisibility(currentMode || 't2v'); } catch (e) {}
+  }
+});
 
 // ====== Models modal ======
 // Opens to /models snapshot. While open, the main poll() refreshes the
