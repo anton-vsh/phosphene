@@ -10160,7 +10160,29 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
 
 # ---- HTML --------------------------------------------------------------------
 
+def _resolve_cap_tier() -> str:
+    """Capability tier the Manual surface organizes around.
+
+      "q8" — Comfortable+ machines (>= 48 GB RAM, Q8 weights installable).
+             Manual surface offers character / FFLF / extend / lip-dub.
+             Q4 still available as a per-render compute fallback for
+             plain Text/Image renders.
+      "q4" — Compact tier (< 48 GB). Manual surface only shows what
+             actually works: Text + Image, style LoRAs, HDR, joint audio.
+             Character / FFLF / Extend are hidden entirely because the
+             dev transformer doesn't fit in RAM.
+
+    `LTX_FORCE_CAP_TIER=q4|q8` overrides — useful for testing the Q4
+    surface on a high-RAM dev machine (Salo's M4 Max defaults to q8;
+    `LTX_FORCE_CAP_TIER=q4 ./run.sh` reveals the low-RAM layout)."""
+    override = (os.environ.get("LTX_FORCE_CAP_TIER", "") or "").strip().lower()
+    if override in ("q4", "q8"):
+        return override
+    return "q8" if SYSTEM_CAPS.get("allows_q8") else "q4"
+
+
 def page() -> str:
+    cap_tier = _resolve_cap_tier()
     bootstrap = json.dumps({
         "presets": PRESETS, "aspects": ASPECTS,
         "default_image": str(REFERENCE),
@@ -10178,6 +10200,10 @@ def page() -> str:
             "label": SYSTEM_CAPS["label"],
         },
         "quality_times": SYSTEM_CAPS.get("quality_times", {}),
+        # Capability tier — drives the Q4-vs-Q8 surface split that the
+        # body[data-cap-tier="..."] CSS rules key off of. JS can also read
+        # window.PHOSPHENE_CAP_TIER for any runtime branches.
+        "cap_tier": cap_tier,
     })
     # Profile badge — only visible in the dev panel. Lets Salo tell at a
     # glance which install he's looking at when both panels are open.
@@ -10188,7 +10214,8 @@ def page() -> str:
     )
     return (HTML
             .replace("__BOOTSTRAP__", bootstrap)
-            .replace("__PROFILE_BADGE__", profile_badge))
+            .replace("__PROFILE_BADGE__", profile_badge)
+            .replace("__CAP_TIER__", cap_tier))
 
 
 HTML = r"""<!doctype html>
@@ -15553,7 +15580,13 @@ HTML = r"""<!doctype html>
     @keyframes phSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   </style>
 </head>
-<body>
+<!-- data-cap-tier is set at request time by page() based on SYSTEM_CAPS.allows_q8
+     (or the LTX_FORCE_CAP_TIER env override). CSS rules
+     `body[data-cap-tier="q4"]` and `body[data-cap-tier="q8"]` switch which
+     intents are visible: q4 hides FFLF / Extend / Character (Q8-only pipeline
+     paths); q8 surfaces all five intents. window.PHOSPHENE_CAP_TIER mirrors
+     this for any runtime JS branches. -->
+<body data-cap-tier="__CAP_TIER__">
 
 <!-- Phosphor Icons (MIT, https://github.com/phosphor-icons/core) — inline symbol library.
      Referenced via <svg class="ph"><use href="#ph-NAME"/></svg>. The symbol set is
@@ -17536,6 +17569,14 @@ const ASPECTS = BOOT.aspects;
 const FPS = BOOT.fps;
 const MODEL_UPSCALE_ENABLED = !!BOOT.model_upscale_enabled;
 const PIPERSR_UPSCALE_ENABLED = !!BOOT.pipersr_upscale_enabled;
+// Capability tier — drives the Q4-vs-Q8 surface split. 'q4' for sub-48GB
+// Macs (Compact tier) where the Q8 dev transformer + two-stage HQ pipeline
+// can't fit; 'q8' for everything 48GB+. Exposed globally so any future
+// runtime check (e.g. fetch warnings, queue filters) can read it without
+// re-reading the body attribute. LTX_FORCE_CAP_TIER=q4 env override on
+// panel launch flips the visible surface to Q4-only on a Q8 dev machine
+// (useful for low-RAM-user testing on Salo's M4 Max).
+window.PHOSPHENE_CAP_TIER = (BOOT.cap_tier || 'q8');
 
 // Apply tier-aware time estimates to the Quality pill subtitles. The HTML
 // ships with the Comfortable-tier (M4 Studio 64 GB) numbers as defaults;
