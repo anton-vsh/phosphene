@@ -12566,6 +12566,44 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border);
       border-radius: var(--r-md);
     }
+    /* Character-quality strip has 2 chips, not 4 — distribute evenly. */
+    #qualityGroupCharacter.quality-strip {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    /* Skip-step boost toggle — small secondary affordance under the
+       character quality chips. Reads as opt-in (not a noisy default
+       chip), keeps the row visually quieter than the main strip. */
+    .char-skipstep-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      padding: 5px 10px;
+      font-size: 11.5px;
+      color: var(--ph-text-faint, var(--muted));
+      cursor: pointer;
+      user-select: none;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      background: transparent;
+      transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+    .char-skipstep-toggle input {
+      accent-color: var(--accent-bright, #5EEAFF);
+      margin: 0;
+      cursor: pointer;
+    }
+    .char-skipstep-toggle:hover { color: var(--text); }
+    .char-skipstep-toggle:has(input:checked) {
+      color: var(--accent-bright, #5EEAFF);
+      border-color: rgba(94, 234, 255, 0.30);
+      background: rgba(94, 234, 255, 0.06);
+    }
+    .char-skipstep-label { font-weight: 500; }
+    .char-skipstep-hint  {
+      opacity: 0.7;
+      font-size: 11px;
+    }
     .quality-strip .q-chip {
       display: flex; flex-direction: column; align-items: center; gap: 2px;
       padding: 7px 4px;
@@ -15868,17 +15906,32 @@ HTML = r"""<!doctype html>
                on save to the final delivery resolution. Hidden by default;
                .show class adds the actual display. -->
           <div class="quality-strip pill-group" id="qualityGroupCharacter" hidden>
-            <button type="button" class="q-chip pill-btn pill-quality char-quality" data-char-quality="draft" data-width="736" data-height="416" title="Q8 HQ at 736×416 — faster, slightly less per-frame detail. Skip-step optimization enabled (Codex 2026-05-15).">
+            <button type="button" class="q-chip pill-btn pill-quality char-quality" data-char-quality="draft" data-width="736" data-height="416" title="Q8 HQ at 736×416 — faster, slightly less per-frame detail.">
               <span class="ql-name">Q8 Draft</span>
               <span class="q-spec ql-spec sub">736×416</span>
-              <span class="ql-tier">Q8 HQ + skip-step · ~3 min / 5s</span>
+              <span class="ql-tier">Q8 HQ · ~3 min / 5s</span>
             </button>
-            <button type="button" class="q-chip pill-btn pill-quality char-quality active" data-char-quality="pro" data-width="1024" data-height="576" title="Q8 HQ at 1024×576 — locked production recipe + Codex skip-step (~12.6% faster, no visible quality cost).">
+            <button type="button" class="q-chip pill-btn pill-quality char-quality active" data-char-quality="pro" data-width="1024" data-height="576" title="Q8 HQ at 1024×576 — locked production recipe, best identity.">
               <span class="ql-name">Q8 Pro</span>
               <span class="q-spec ql-spec sub">1024×576</span>
-              <span class="ql-tier">Q8 HQ + skip-step · ~5 min / 5s · best identity</span>
+              <span class="ql-tier">Q8 HQ · ~5 min / 5s · best identity</span>
             </button>
           </div>
+          <!-- Skip-step boost toggle — character-only opt-in for the Codex
+               2026-05-15 finding: video_skip_step=1, audio_skip_step=1 cuts
+               ~12.6% off the locked Q8 HQ recipe (426 s → 372 s on a 7 s
+               1024×576 clip) with no visible quality cost on contact-
+               sheet validation. Salo flagged it should be a toggle — some
+               LoRAs / prompt content might prove sensitive to the reuse
+               of the last denoised prediction on skipped passes, so this
+               is opt-in even though it's ON by default for character mode.
+               Visible only when a character is selected. -->
+          <label class="char-skipstep-toggle" id="charSkipstepToggleWrap" hidden>
+            <input type="checkbox" id="charSkipstepToggle" checked
+                   onchange="_setSkipStepEnabled(this.checked)">
+            <span class="char-skipstep-label">Skip-step boost</span>
+            <span class="char-skipstep-hint">~12% faster · disable if quality looks off</span>
+          </label>
         </div>
 
         <!-- ============== ORIENTATION (compact, top-level) ==============
@@ -18682,6 +18735,17 @@ async function charactersLoadParams(p) {
   const found = charList.find(c => c.id === p.character_id);
   if (!found) {
     throw new Error(`character ${p.character_id} not in list`);
+  }
+
+  // Restore skip-step toggle BEFORE selecting the character — that way
+  // _setCharacterQuality (called via selectManualCharacter) reads the
+  // restored state and writes the right values into the hidden inputs.
+  // If the sidecar has no skip-step value (older clips, non-Codex
+  // renders) default to ON, matching the new default behavior.
+  const skipToggle = document.getElementById('charSkipstepToggle');
+  if (skipToggle) {
+    const v = String(p.video_skip_step ?? p.audio_skip_step ?? '1');
+    skipToggle.checked = (v !== '0');
   }
 
   // Pre-select character. selectManualCharacter() writes the id to the
@@ -23919,10 +23983,12 @@ function selectManualCharacter(id) {
 function _applyCharacterQualityStripVisibility() {
   const def  = document.getElementById('qualityGroup');
   const char = document.getElementById('qualityGroupCharacter');
+  const skipWrap = document.getElementById('charSkipstepToggleWrap');
   if (!def || !char) return;
   if (_selectedCharacterId) {
     def.hidden = true;
     char.hidden = false;
+    if (skipWrap) skipWrap.hidden = false;
     // Snap to Q8 Pro on first switch — but only if no char-quality
     // chip is currently active (preserves user's choice if they had
     // picked Draft earlier and switched between characters).
@@ -23932,6 +23998,7 @@ function _applyCharacterQualityStripVisibility() {
   } else {
     def.hidden = false;
     char.hidden = true;
+    if (skipWrap) skipWrap.hidden = true;
     // Restore Balanced as the default video preset — the same value
     // the page boots with — so the user lands in a sensible state
     // when they deselect the character.
@@ -23941,11 +24008,9 @@ function _applyCharacterQualityStripVisibility() {
     // Reset the skip-step opt-in back to upstream conservative defaults
     // when leaving character mode — non-character T2V renders haven't
     // been validated against the contact-sheet quality bar, so the
-    // 12.6% wall-time win is character-only for now.
-    const vSkip = document.getElementById('video_skip_step');
-    const aSkip = document.getElementById('audio_skip_step');
-    if (vSkip) vSkip.value = '0';
-    if (aSkip) aSkip.value = '0';
+    // 12.6% wall-time win is character-only for now. _setSkipStepEnabled
+    // is the single source of truth for both inputs.
+    _setSkipStepEnabled(false);
   }
 }
 
@@ -23973,22 +24038,30 @@ function _setCharacterQuality(btn) {
   const vertical = aspect && aspect.value === 'vertical';
   if (wInp) wInp.value = vertical ? h : w;
   if (hInp) hInp.value = vertical ? w : h;
-  // Enable the Codex skip-step optimization on character renders.
-  // Saves ~54 s (12.6%) per 7 s Q8 HQ clip, validated 2026-05-15. See
-  // lora-lab/outputs/overnight_2026-05-15/SPEED_RESULTS_CODEX.md. Both
-  // Q8 Draft and Q8 Pro benefit equally — the savings are in the
-  // sampler's reuse of the last denoised prediction on alternating
-  // outer passes, independent of resolution.
-  const vSkip = document.getElementById('video_skip_step');
-  const aSkip = document.getElementById('audio_skip_step');
-  if (vSkip) vSkip.value = '1';
-  if (aSkip) aSkip.value = '1';
+  // Respect the user's current skip-step toggle state (Codex 2026-05-15
+  // optimization — defaults ON for new character runs but the toggle
+  // lets users disable per-render if they suspect quality drift).
+  const skipToggle = document.getElementById('charSkipstepToggle');
+  const skipOn = skipToggle ? !!skipToggle.checked : true;
+  _setSkipStepEnabled(skipOn);
   if (typeof setUpscale === 'function') {
     try { setUpscale('fit_720p'); } catch (_) {}
   }
   if (typeof updateCustomizeSummary === 'function') {
     try { updateCustomizeSummary(); } catch (_) {}
   }
+}
+
+// Skip-step boost toggle handler. Writes 1/0 into the hidden form
+// inputs that the backend HQ pipeline reads. Standalone function so
+// _setCharacterQuality can re-apply on each chip click + the checkbox
+// onchange handler can call it directly.
+function _setSkipStepEnabled(enabled) {
+  const v = enabled ? '1' : '0';
+  const vSkip = document.getElementById('video_skip_step');
+  const aSkip = document.getElementById('audio_skip_step');
+  if (vSkip) vSkip.value = v;
+  if (aSkip) aSkip.value = v;
 }
 
 // Wire the char-quality chip clicks once at boot. Idempotent — the
