@@ -18652,34 +18652,144 @@ function charactersEscapeAttr(s) { return charactersEscapeHtml(s); }
 //   5. Repopulate the prompt textarea with prompt_body verbatim and
 //      refresh the preview.
 async function charactersLoadParams(p) {
-  workflowSwitch('characters');
-  // charactersInit is idempotent + starts the list load. Wait for the
-  // list to populate so charactersOpenCompose can find the character.
-  if (typeof charactersInit === 'function') {
-    await charactersInit();
+  // 2026-05-17 — Characters is no longer its own workflow tab. Load Params
+  // on a Characters-origin sidecar now restores EVERYTHING into the
+  // Manual tab (T2V mode), pre-selects the character in the Manual chip
+  // strip (which auto-stacks face+audio LoRAs at submit), and snaps the
+  // quality strip to Q8 Draft / Q8 Pro to match the original render.
+  // Salo's intent: "When you click load params, you get everything
+  // exactly the same, so you can replicate clips. Else, what for?"
+  workflowSwitch('manual');
+  if (typeof setMode === 'function') setMode('t2v');
+
+  // Wait for the Manual chip strip to be populated so selectManualCharacter
+  // can find the character. refreshManualCharacters is idempotent + safe
+  // to call multiple times.
+  if (typeof refreshManualCharacters === 'function') {
+    try { await refreshManualCharacters(); } catch (_) {}
   }
-  // If list is still empty (race / refresh failure), bail loudly so the
-  // outer loadParams falls back to Manual rather than silently doing
-  // nothing.
-  if (!Array.isArray(window.CHARACTERS.list) || window.CHARACTERS.list.length === 0) {
-    throw new Error('character list empty after init');
-  }
-  const found = window.CHARACTERS.list.find(c => c.id === p.character_id);
+  const charList = (typeof _manualCharacters !== 'undefined' && Array.isArray(_manualCharacters))
+    ? _manualCharacters : [];
+  const found = charList.find(c => c.id === p.character_id);
   if (!found) {
     throw new Error(`character ${p.character_id} not in list`);
   }
+
+  // Pre-select character. selectManualCharacter() writes the id to the
+  // hidden #characterIdInput, appends the trigger to the prompt
+  // (idempotent), and (via _applyCharacterQualityStripVisibility) swaps
+  // the quality strip to Q8 Draft / Q8 Pro.
+  if (typeof selectManualCharacter === 'function') {
+    selectManualCharacter(p.character_id);
+  }
+
+  // Restore the quality CHIP (Draft vs Pro) by checking the recorded
+  // dimensions. 736×416 = Draft; everything else = Pro. The character-
+  // quality strip's click handler sets quality=high + the right w/h
+  // already; calling _setCharacterQuality bypasses setQuality() so our
+  // exact dims survive.
+  const sidecarW = parseInt(p.width || '0', 10);
+  const sidecarH = parseInt(p.height || '0', 10);
+  const isDraft = (sidecarW === 736 && sidecarH === 416)
+                || (sidecarW === 416 && sidecarH === 736);  // vertical draft
+  const charQualityGroup = document.getElementById('qualityGroupCharacter');
+  if (charQualityGroup) {
+    const sel = isDraft ? '[data-char-quality="draft"]' : '[data-char-quality="pro"]';
+    const btn = charQualityGroup.querySelector(sel);
+    if (btn && typeof _setCharacterQuality === 'function') {
+      _setCharacterQuality(btn);
+    }
+  }
+
+  // Restore aspect (landscape vs vertical). If the sidecar's recorded
+  // h > w, it was a vertical render. setAspect already exists and
+  // re-derives width/height via QUALITY_PRESETS — but for character mode
+  // we want to keep the exact 736×416 / 1024×576 from the sidecar, so
+  // we set the hidden aspect input + active chip ourselves and then
+  // restore w/h verbatim.
+  const aspectInp = document.getElementById('aspect');
+  if (aspectInp) {
+    const wantVertical = sidecarH > sidecarW;
+    aspectInp.value = wantVertical ? 'vertical' : 'landscape';
+    document.querySelectorAll('#aspectGroup .pill-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.aspect === aspectInp.value));
+  }
+  // Now restore the verbatim dims so any later setQuality / setAspect
+  // callbacks don't overwrite them.
+  const wInp = document.getElementById('width');
+  const hInp = document.getElementById('height');
+  if (wInp && sidecarW > 0) wInp.value = sidecarW;
+  if (hInp && sidecarH > 0) hInp.value = sidecarH;
+
+  // Restore frames + duration. Frames is the source of truth for the
+  // render; the duration field is metadata that drives the UI estimate.
+  const sidecarFrames = parseInt(p.frames || '0', 10);
+  if (sidecarFrames > 0) {
+    const framesInp = document.getElementById('frames');
+    if (framesInp) framesInp.value = sidecarFrames;
+    // Compute duration from frames (8k+1 → seconds at 24fps).
+    const durSec = Math.round(((sidecarFrames - 1) / 24) * 10) / 10;
+    const durInp = document.getElementById('duration');
+    if (durInp) durInp.value = durSec;
+  }
+
+  // Restore seed if not -1 (random).
+  if (typeof p.seed !== 'undefined' && String(p.seed) !== '-1') {
+    const seedInp = document.getElementById('seed');
+    if (seedInp) seedInp.value = String(p.seed);
+  }
+
+  // Prompt textarea — verbatim. Use prompt_body if present (legacy
+  // sidecars), else the full prompt.
+  const ta = document.getElementById('prompt');
+  if (ta) {
+    ta.value = (typeof p.prompt_body === 'string' && p.prompt_body)
+      ? p.prompt_body
+      : (p.prompt || '');
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // Restore extra LoRAs (style stacks on top of character). The sidecar
+  // stores `loras` as the FULL stack (face + audio + extras). Filter out
+  // the character's own face/audio paths to recover only the extras.
+  if (Array.isArray(p.loras) && p.loras.length > 0) {
+    const facePath  = (found.face_lora_path  || '');
+    const audioPath = (found.audio_lora_path || '');
+    const extras = p.loras.filter(l => {
+      const lp = l && l.path;
+      return lp && lp !== facePath && lp !== audioPath;
+    });
+    if (extras.length && typeof _activeLoras !== 'undefined') {
+      _activeLoras.length = 0;
+      for (const l of extras) {
+        _activeLoras.push({ path: l.path, strength: l.strength });
+      }
+      if (typeof renderLorasList === 'function') renderLorasList();
+    }
+  }
+
+  // Scroll to top so the user sees the restored state.
+  const formPane = document.querySelector('aside.form-pane');
+  if (formPane) formPane.scrollTop = 0;
+  // Done — early-exit before the old dead-UI code that followed.
+  return;
+
+  // -------- DEAD CODE BELOW (kept temporarily to avoid bigger diff) --------
+  // The block below targeted the now-unreachable Characters tab UI.
+  // Replaced by the Manual-tab restoration above; left in place so the
+  // diff stays narrow while we validate the new path. Will prune in a
+  // follow-up.
+  // eslint-disable-next-line no-unreachable
+  if (typeof charactersInit === 'function') {
+    await charactersInit();
+  }
+  if (!Array.isArray(window.CHARACTERS.list) || window.CHARACTERS.list.length === 0) {
+    throw new Error('character list empty after init');
+  }
   charactersOpenCompose(p.character_id);
-  // Sidecar values → compose state. Falls back to current defaults when a
-  // field is missing (older sidecar shapes). Framing is no longer a UI
-  // control; sidecars with framing still load fine, the value is just
-  // ignored by the simplified composer.
   if (typeof p.duration === 'string' && p.duration) {
     window.CHARACTERS.duration = p.duration;
   }
-  // The form's "quality_choice" is the user-visible chip ("balanced" / "high").
-  // Older sidecars may have only "quality" (the helper-side recipe), which
-  // for Characters today is always 'high' regardless of chip — so we trust
-  // quality_choice when present, otherwise leave the chip alone.
   if (typeof p.quality_choice === 'string' && p.quality_choice) {
     window.CHARACTERS.quality = p.quality_choice;
   }
@@ -18688,9 +18798,9 @@ async function charactersLoadParams(p) {
   // source of truth; we don't try to re-derive a "body" from it.
   // Older sidecars used prompt_body; newer sidecars store the full
   // prompt — fall back to the full prompt if prompt_body is empty.
-  const ta = document.getElementById('charactersPrompt');
-  if (ta) {
-    ta.value = (typeof p.prompt_body === 'string' && p.prompt_body)
+  const taOld = document.getElementById('charactersPrompt');
+  if (taOld) {
+    taOld.value = (typeof p.prompt_body === 'string' && p.prompt_body)
       ? p.prompt_body
       : (typeof p.prompt === 'string' ? p.prompt : '');
   }
