@@ -10698,6 +10698,7 @@ HTML = r"""<!doctype html>
        toggle (Pass 6) for quick non-character drafts. */
     body[data-cap-tier="q4"] #modeGroup [data-mode="keyframe"],
     body[data-cap-tier="q4"] #modeGroup [data-mode="extend"],
+    body[data-cap-tier="q4"] #modeGroup [data-mode="character"],
     body[data-cap-tier="q4"] #manualCharactersPickerSlot,
     body[data-cap-tier="q4"] #charactersPickerDivider,
     body[data-cap-tier="q4"] #qualityGroupCharacter,
@@ -15781,6 +15782,12 @@ HTML = r"""<!doctype html>
          existing setMode() click wiring keeps working unchanged. -->
     <div class="mode-bar pill-group" id="modeGroup">
       <button type="button" class="mode-chip pill-btn" data-mode="t2v">Text<span class="mc-sub sub">prompt → video</span></button>
+      <!-- Character intent — Codex C+ 2026-05-17. Promoted from a chip
+           strip inside T2V to a first-class mode pill so the cascade
+           (character selected → quality flips to Q8, LoRAs auto-stack,
+           audio LoRA fuses) is visible in the mode picker, not a hidden
+           toggle inside another mode. Q8-only — hidden on cap_tier="q4". -->
+      <button type="button" class="mode-chip pill-btn" data-mode="character">Character<span class="mc-sub sub">trained face + voice</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="i2v">Image<span class="mc-sub sub">image + prompt</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
@@ -17819,6 +17826,32 @@ function setMode(mode) {
     if (typeof trainInit === 'function') trainInit();
     return;
   }
+  if (mode === 'character') {
+    // Character is a UI intent, not a backend mode — the hidden #mode
+    // field still ships 't2v' on submit. make_job sees character_id +
+    // routes to Q8 HQ. CSS-only chrome (chip strip + Q8 quality strip)
+    // makes the cascade visible.
+    if (studio) studio.classList.remove('show');
+    if (train) train.classList.remove('show');
+    if (genForm) genForm.style.display = '';
+    document.querySelectorAll('#modeGroup .pill-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === 'character'));
+    // Visibility cascade: shows chip strip, swaps to Q8 quality strip,
+    // forces quality=high if a chip is selected. If no chip is selected
+    // yet, the user lands on the same form but with chip strip visible
+    // so they can pick.
+    if (typeof _updateCharsPickerVisibility === 'function') {
+      _updateCharsPickerVisibility('character');
+    }
+    if (typeof _applyCharacterQualityStripVisibility === 'function') {
+      try { _applyCharacterQualityStripVisibility(); } catch (_) {}
+    }
+    // Mode hidden field still 't2v' — backend doesn't know 'character'
+    // and doesn't need to (character_id is what drives the LoRA stack).
+    const modeInp = document.getElementById('mode');
+    if (modeInp) modeInp.value = 't2v';
+    return;
+  }
   if (mode === 'image') {
     if (studio) studio.classList.add('show');
     if (genForm) genForm.style.display = 'none';
@@ -18874,14 +18907,15 @@ function charactersEscapeAttr(s) { return charactersEscapeHtml(s); }
 //      refresh the preview.
 async function charactersLoadParams(p) {
   // 2026-05-17 — Characters is no longer its own workflow tab. Load Params
-  // on a Characters-origin sidecar now restores EVERYTHING into the
-  // Manual tab (T2V mode), pre-selects the character in the Manual chip
-  // strip (which auto-stacks face+audio LoRAs at submit), and snaps the
-  // quality strip to Q8 Draft / Q8 Pro to match the original render.
+  // on a Characters-origin sidecar restores EVERYTHING into the Manual
+  // tab's NEW Character mode (Codex C+ pass 3: Character is a first-
+  // class mode pill, not a chip strip inside T2V). selectManualCharacter
+  // sets up the rest: chip strip, Q8 quality strip swap, auto-stacked
+  // face+audio LoRAs at submit.
   // Salo's intent: "When you click load params, you get everything
   // exactly the same, so you can replicate clips. Else, what for?"
   workflowSwitch('manual');
-  if (typeof setMode === 'function') setMode('t2v');
+  if (typeof setMode === 'function') setMode('character');
 
   // Wait for the Manual chip strip to be populated so selectManualCharacter
   // can find the character. refreshManualCharacters is idempotent + safe
@@ -23977,12 +24011,14 @@ let _manualCharacters = [];     // [{id, name, trigger, has_voice, sample_image_
 let _selectedCharacterId = '';  // '' means none selected
 
 function _updateCharsPickerVisibility(mode) {
-  // The picker is Manual-tab T2V only (the spec's "Text-to-Video flow").
-  // Hide on every other mode — including I2V / FFLF / Extend which have
-  // a different mental model (the user is anchoring on a frame, not
-  // picking an actor). Image / Train hide via #genForm display:none
-  // anyway, but the helper stays in sync defensively.
-  const show = (mode === 't2v');
+  // 2026-05-17 (Codex C+ pass 3): the chip strip lives in 'character'
+  // mode only — its own pill in the mode bar. T2V no longer hosts it
+  // (clean separation: T2V is for non-character text-to-video; Character
+  // is for the trained-LoRA face/voice cascade).
+  // Hide on every other mode — Image / FFLF / Extend / Train / Studio
+  // hide #genForm or have a different mental model anyway, but the
+  // helper stays in sync defensively.
+  const show = (mode === 'character');
   const slot = document.getElementById('manualCharactersPickerSlot');
   const divider = document.getElementById('charactersPickerDivider');
   if (slot) slot.classList.toggle('show', show);
