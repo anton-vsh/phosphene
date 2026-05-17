@@ -12033,21 +12033,40 @@ HTML = r"""<!doctype html>
       gap: 14px;
     }
     /* Player surface — wraps the <video>/<img> and all overlays.
-       Width fills the stage-pane content area (which is sized by the
-       grid column to be exactly the player's natural 16:9 width at
-       58vh tall). aspect-ratio drives height; no max-height cap so the
-       box is true 16:9 with the video filling it edge-to-edge. */
+       Default is landscape 16:9 filling the stage column width.
+       selectOutput() reads loaded media's natural dimensions and adds
+       data-orient="vertical" + a --media-aspect custom prop so vertical
+       clips render at their true 9:16-ish aspect WITHOUT cropping (the
+       previous hardcoded 16:9 + object-fit:cover cropped the head/feet
+       off vertical videos).
+       Width-driven sizing for landscape; height-driven sizing for
+       vertical (so a tall clip doesn't push the carousel off-screen).
+       object-fit:contain is the safety net — even if JS fails to set
+       aspect, vertical clips letterbox cleanly instead of crop. */
     .player-surface {
       position: relative;
       flex: 0 0 auto;
       width: 100%;
-      aspect-ratio: 16 / 9;
+      aspect-ratio: var(--media-aspect, 16 / 9);
+      margin: 0 auto;
       border-radius: var(--r-lg);
       overflow: hidden;
       background: black;
       border: 1px solid var(--border-strong);
       box-shadow: var(--shadow-2);
       display: flex;
+    }
+    /* Vertical / portrait media: flip to height-driven sizing so the
+       surface stays inside the visible stage area instead of growing
+       past the carousel. Height budget is tighter than landscape — we
+       deliberately leave room for TWO rows of carousel cards (~280px)
+       plus filter + meta chrome (~80px) below the player. Capped at
+       520px so a 4K monitor doesn't get a giant vertical strip either. */
+    .player-surface[data-orient="vertical"] {
+      width: auto;
+      height: min(520px, calc(100vh - 380px));
+      max-width: 100%;
+      max-height: min(520px, calc(100vh - 380px));
     }
     .player-wrap {
       flex: 1 1 auto;
@@ -12060,7 +12079,7 @@ HTML = r"""<!doctype html>
     .player-wrap video,
     .player-wrap img {
       width: 100%; height: 100%;
-      object-fit: cover;
+      object-fit: contain;
       display: block;
     }
     .player-wrap.empty {
@@ -13779,6 +13798,67 @@ HTML = r"""<!doctype html>
     }
     .models-foot { font-size: 11px; color: var(--muted); margin-top: 14px; line-height: 1.4; }
 
+    /* Expand lightbox — fullscreen modal for the active output. Same
+       overlay pattern as .models-modal (fixed position, dark backdrop,
+       z-index above panel chrome) but the stage holds a media element
+       sized to fit the viewport with object-fit: contain so any aspect
+       ratio (vertical / landscape / square) renders without crop.
+       Opened by `display: flex` (set inline in openExpandLightbox()). */
+    .expand-lightbox {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(0,0,0,0.92);
+      display: none;
+      align-items: center; justify-content: center;
+      flex-direction: column;
+      padding: 32px 40px 24px;
+      animation: phos-modal-bg-in 140ms ease-out;
+    }
+    .expand-stage {
+      flex: 1 1 auto;
+      display: flex; align-items: center; justify-content: center;
+      width: 100%;
+      min-height: 0;
+      animation: phos-modal-card-in 200ms cubic-bezier(.2,.8,.2,1);
+    }
+    .expand-stage video,
+    .expand-stage img {
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      border-radius: 8px;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.7);
+      background: black;
+    }
+    .expand-meta {
+      flex: 0 0 auto;
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted, #9aa7c2);
+      text-align: center;
+      max-width: 90vw;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .expand-close {
+      position: absolute;
+      top: 16px; right: 16px;
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: rgba(20,26,58,0.85);
+      border: 1px solid var(--ph-border-strong, rgba(140,160,220,0.16));
+      color: var(--text, #d8e0ee);
+      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: background 120ms ease, transform 120ms ease;
+    }
+    .expand-close:hover {
+      background: rgba(40,50,90,0.95);
+      transform: scale(1.05);
+    }
+
     /* =========================================================
        LINEAR DESIGN PASS — final layer
        =========================================================
@@ -14799,6 +14879,24 @@ HTML = r"""<!doctype html>
           </div>
         </div>
 
+        <!-- ============== ORIENTATION (compact, top-level) ==============
+             Lifted out of the Customize accordion so users don't have to
+             dig for it. Compact 2-pill row reusing the same id="aspect"
+             hidden input + id="aspectGroup" click delegation + id="aspectRow"
+             container that setQuality() hides when quality=quick. -->
+        <div class="mode-only show" id="aspectRow" style="display:flex;align-items:center;gap:10px;margin:6px 0 8px 0;padding:0 2px;">
+          <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">Orientation</span>
+          <div class="pill-group" id="aspectGroup" style="display:flex;gap:4px;flex:0 0 auto;">
+            <button type="button" class="pill-btn active" data-aspect="landscape" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:baseline;">
+              <span>16:9</span><span style="opacity:.55;font-size:10px;">landscape</span>
+            </button>
+            <button type="button" class="pill-btn" data-aspect="vertical" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:baseline;">
+              <span>9:16</span><span style="opacity:.55;font-size:10px;">vertical</span>
+            </button>
+          </div>
+          <input type="hidden" name="aspect" id="aspect" value="landscape">
+        </div>
+
         <div class="mode-only show" id="quickMetricsRow">
           <div class="mini-fields">
             <div class="mf-cell">
@@ -14910,22 +15008,15 @@ HTML = r"""<!doctype html>
             <span class="cz-meta" id="customizeSummary">16:9 · default speed</span>
           </summary>
           <div class="cz-body">
-            <!-- Aspect — only relevant when the active Quality preset has
-                 multiple aspects (Standard / High at 1280×704 vs 704×1280).
-                 Hidden when Quick is active (640×480 is 4:3 only). -->
-            <div id="aspectRow" class="cz-control">
-              <div class="cz-label">Aspect ratio</div>
-              <div class="pill-group cols-2" id="aspectGroup">
-                <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">horizontal</span></button>
-                <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">vertical</span></button>
-              </div>
-              <input type="hidden" id="aspect" value="landscape">
-            </div>
-
             <!-- Width × height. Setting custom dimensions makes the form
                  leave the active preset (the Quality pill stays highlighted
                  but the Customize summary shows "custom" so the user knows
-                 they've deviated). -->
+                 they've deviated). Aspect ratio (16:9 / 9:16) moved
+                 OUT of this accordion 2026-05-17 — now lives as a compact
+                 top-level row right under the Quality picker. Keeps the
+                 same id="aspectRow" / id="aspectGroup" / id="aspect" so all
+                 JS (setAspect, applyAspect, setQuality's quick-mode hide,
+                 Load Params restoration) keeps working unchanged. -->
             <div id="dimsRow" class="cz-control">
               <div class="cz-label">Width × height</div>
               <div class="row">
@@ -20022,6 +20113,36 @@ function selectOutput(path) {
   wrap.innerHTML = isPhoto
     ? `<img src="${playerSrc}" alt="${o ? escapeHtml(o.name) : ''}">`
     : `<video controls autoplay src="${playerSrc}"></video>`;
+  // Surface aspect adapts to actual media dimensions so vertical clips
+  // render vertically (previous hardcoded 16:9 surface + object-fit:cover
+  // cropped head/feet off any 9:16 clip, and also showed horizontal
+  // clips wrong if the surface had been switched). Read intrinsic w/h
+  // on metadata load and set --media-aspect (which the CSS rule reads).
+  // For vertical clips we also flip data-orient so the surface switches
+  // to height-driven sizing rather than overflowing the stage.
+  const surface = wrap.closest('.player-surface');
+  if (surface) {
+    surface.removeAttribute('data-orient');
+    surface.style.removeProperty('--media-aspect');
+    const media = wrap.querySelector(isPhoto ? 'img' : 'video');
+    if (media) {
+      const apply = () => {
+        const w = isPhoto ? media.naturalWidth  : media.videoWidth;
+        const h = isPhoto ? media.naturalHeight : media.videoHeight;
+        if (!w || !h) return;
+        surface.style.setProperty('--media-aspect', `${w} / ${h}`);
+        if (h > w) surface.setAttribute('data-orient', 'vertical');
+        else       surface.removeAttribute('data-orient');
+      };
+      if (isPhoto) {
+        if (media.complete && media.naturalWidth) apply();
+        else media.addEventListener('load', apply, { once: true });
+      } else {
+        if (media.readyState >= 1 && media.videoWidth) apply();
+        else media.addEventListener('loadedmetadata', apply, { once: true });
+      }
+    }
+  }
 
   // Y2.001 — populate the new overlays. The legacy #playerName / #playerMeta
   // are kept hidden but the writes still happen so any test/external code
