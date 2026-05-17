@@ -267,8 +267,30 @@ def crop_and_caption(
     trigger: str,
     caption_strategy: str,
     resolution: int,
+    crop_strategy: str = "center",
 ) -> tuple[list[Path], list[str]]:
-    """Center-crop sources to `resolution`x`resolution`, rename sequentially, write captions.
+    """Scale + (optionally) crop sources to a `resolution`x`resolution` square,
+    rename sequentially, write captions.
+
+    `crop_strategy` ∈ {"center", "letterbox"} controls how non-square sources
+    fit into the square training canvas:
+
+      "center" (default, legacy behavior):
+          Scale so the SHORTER source dim = target, then center-crop the
+          longer dim to target. Image fills the square; content on the
+          longer dim is clipped. Good for character close-ups where the
+          face is centered. Bad for wide shots — long-shot proportions are
+          never seen by the model, which is why generated long shots tend
+          to look mushy / wrong-scale.
+
+      "letterbox":
+          Scale so the LONGER source dim = target, then pad the shorter
+          dim with black to fill the square. Image content keeps its
+          native aspect ratio inside the square. Model learns to ignore
+          the consistent black bars (they're a constant factor across
+          training samples). Trade-off: ~30% pixel-budget waste on bars
+          for portraits/landscapes, but generated long shots / wide
+          shots reproduce real proportions.
 
     Returns (renamed_image_paths, caption_strings) in matching order.
 
@@ -283,7 +305,13 @@ def crop_and_caption(
     captions_dir.mkdir(parents=True, exist_ok=True)
     images_renamed_dir.mkdir(parents=True, exist_ok=True)
 
-    emit("crop_start", total=len(source_files))
+    if crop_strategy not in ("center", "letterbox"):
+        raise ValueError(
+            f"unknown crop_strategy: {crop_strategy!r} "
+            f"(want 'center' or 'letterbox')"
+        )
+
+    emit("crop_start", total=len(source_files), crop_strategy=crop_strategy)
 
     out_paths: list[Path] = []
     out_captions: list[str] = []
@@ -292,21 +320,40 @@ def crop_and_caption(
         try:
             img = Image.open(src).convert("RGB")
             src_w, src_h = img.size
-
-            # Scale-and-center-crop to a SQUARE at `resolution`. Mirrors the
-            # logic in preprocess_images._load_image_as_1frame_tensor (square
-            # crop is the right call for char training — the preprocessor will
-            # re-crop to whatever target_h/target_w is configured downstream;
-            # we keep this square + lossless so the same source can be reused
-            # for any preset).
             target = resolution
-            scale = max(target / src_w, target / src_h)
-            new_w = int(round(src_w * scale))
-            new_h = int(round(src_h * scale))
-            scaled = img.resize((new_w, new_h), Image.LANCZOS)
-            left = (new_w - target) // 2
-            top = (new_h - target) // 2
-            cropped_full = scaled.crop((left, top, left + target, top + target))
+
+            if crop_strategy == "letterbox":
+                # Scale so the LONGER source dim = target. Pad the shorter
+                # dim with black bars to fill the square. Trainer sees a
+                # uniform (target × target) canvas across all samples —
+                # preprocess + dataloader unchanged — but each image
+                # retains its native aspect ratio. Model learns the bars
+                # as a constant feature (they're identical across every
+                # training sample) and the actual subject geometry stays
+                # uncompressed.
+                scale = min(target / src_w, target / src_h)
+                new_w = int(round(src_w * scale))
+                new_h = int(round(src_h * scale))
+                scaled = img.resize((new_w, new_h), Image.LANCZOS)
+                cropped_full = Image.new("RGB", (target, target), (0, 0, 0))
+                paste_x = (target - new_w) // 2
+                paste_y = (target - new_h) // 2
+                cropped_full.paste(scaled, (paste_x, paste_y))
+            else:
+                # "center" — scale-and-center-crop to a SQUARE at
+                # `resolution`. Mirrors the logic in preprocess_images.
+                # _load_image_as_1frame_tensor (square crop is the right
+                # call for character training — the preprocessor will
+                # re-crop to whatever target_h/target_w is configured
+                # downstream; we keep this square + lossless so the same
+                # source can be reused for any preset).
+                scale = max(target / src_w, target / src_h)
+                new_w = int(round(src_w * scale))
+                new_h = int(round(src_h * scale))
+                scaled = img.resize((new_w, new_h), Image.LANCZOS)
+                left = (new_w - target) // 2
+                top = (new_h - target) // 2
+                cropped_full = scaled.crop((left, top, left + target, top + target))
 
             stem = f"char_{i:03d}"
             png_path = images_renamed_dir / f"{stem}.png"
@@ -660,12 +707,13 @@ def run_pipeline(spec_path: Path) -> int:
         )
 
     crop_strategy = advanced.get("crop_strategy") or "center"
-    if crop_strategy != "center":
+    if crop_strategy not in ("center", "letterbox"):
         emit(
             "warning",
             stage="crop",
             message=f"crop_strategy={crop_strategy!r} not implemented; using center",
         )
+        crop_strategy = "center"
 
     # Validate resolution.
     resolution = int(cfg["resolution"])
@@ -715,6 +763,7 @@ def run_pipeline(spec_path: Path) -> int:
             trigger=trigger,
             caption_strategy=caption_strategy,
             resolution=resolution,
+            crop_strategy=crop_strategy,
         )
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc(file=sys.stderr)

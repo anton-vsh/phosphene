@@ -4123,6 +4123,22 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         resolution = _int_or("resolution", cfg["resolution"])
         caption_strategy = (f("caption_strategy", "trigger_simple")
                             or "trigger_simple").lower()
+        # Crop strategy for the training preprocess.
+        #   "center"    — current behavior, scale + center-crop to a square.
+        #                 Best for tightly-framed character close-ups; biases
+        #                 the model toward those framings.
+        #   "letterbox" — preserve native aspect, pad with black bars to a
+        #                 square. Captures wide-shot / long-shot proportions
+        #                 the center-crop path destroys, at the cost of
+        #                 ~30% pixel-budget waste on bars for non-square
+        #                 sources. Salo flagged 2026-05-17: medium-long
+        #                 shots from center-crop-trained LoRAs come out
+        #                 blurry because the model never saw those
+        #                 proportions during training.
+        crop_strategy = (f("crop_strategy", "center")
+                         or "center").lower()
+        if crop_strategy not in ("center", "letterbox"):
+            crop_strategy = "center"
         eta_sec = _train_estimate_seconds(preset, image_count,
                                           steps_override=steps,
                                           is_style=is_style)
@@ -4169,6 +4185,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "lr": lr,
                 "resolution": resolution,
                 "caption_strategy": caption_strategy,
+                "crop_strategy": crop_strategy,
                 "image_count": image_count,
                 "eta_sec": eta_sec,
                 "ram_peak_gb": cfg["ram_peak_gb"],
@@ -4990,6 +5007,7 @@ def run_train_job_inner(job: dict) -> None:
         "lr": p.get("lr"),
         "resolution": p.get("resolution"),
         "caption_strategy": caption_strategy,
+        "crop_strategy": p.get("crop_strategy", "center"),
         "images_dir": str(images_dir),
         "captions_dir": str(captions_dir),
         "checkpoints_dir": str(dataset_dir / "checkpoints"),
@@ -16763,6 +16781,29 @@ HTML = r"""<!doctype html>
           <button type="button" class="pill-btn" data-train-preset="high"><span>High</span><span class="sub" id="trainPresetHighSub">~2 h 50 min · rank 32 · 5000 steps · 512px</span></button>
         </div>
 
+        <!-- Crop strategy — primary control (not buried in Advanced) because
+             it has a big visible effect on what the model learns. Salo 2026-05-17:
+             "we are using such a limited cropping of the images, all the images
+             are kind of close-up medium close-ups. That's the reason why the
+             medium long shots are so shit and blurry." Letterbox preserves
+             wide-shot proportions at the cost of pixel-budget waste on black
+             bars. The trainer sees a uniform square canvas either way, so
+             this doesn't change wall time or memory. -->
+        <h2 style="margin-top:14px">Crop strategy
+          <span class="h2-hint">how non-square images fit the training canvas</span>
+        </h2>
+        <div class="pill-group cols-2" id="trainCropStrategyGroup">
+          <button type="button" class="pill-btn active" data-train-crop="center">
+            <span>Center crop</span>
+            <span class="sub">scale + crop to square · best for tight portraits</span>
+          </button>
+          <button type="button" class="pill-btn" data-train-crop="letterbox">
+            <span>Letterbox <span class="rec-badge" style="background:rgba(94,234,255,0.18);color:var(--accent-bright)">Preserve aspect</span></span>
+            <span class="sub">pad with black · keeps wide-shot proportions</span>
+          </button>
+        </div>
+        <input type="hidden" name="crop_strategy" id="trainCropStrategy" value="center">
+
         <details class="train-advanced">
           <summary>Advanced</summary>
           <div class="train-advanced-grid">
@@ -19125,6 +19166,19 @@ function trainWirePresetButtons() {
       trainUpdateEstimate();
     });
   });
+  // Crop strategy pills — same click pattern. Updates the hidden
+  // #trainCropStrategy input which rides the form on submit. No estimate
+  // change because letterbox uses the same square canvas as center crop;
+  // wall time + memory are unaffected.
+  document.querySelectorAll('#trainCropStrategyGroup .pill-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      const v = b.dataset.trainCrop;
+      const inp = document.getElementById('trainCropStrategy');
+      if (inp) inp.value = v;
+      document.querySelectorAll('#trainCropStrategyGroup .pill-btn').forEach(x =>
+        x.classList.toggle('active', x === b));
+    });
+  });
 }
 
 function trainWireAdvancedFields() {
@@ -19622,6 +19676,9 @@ async function trainStart() {
   fd.set('preset', TRAIN.preset);
   fd.set('image_count', String(TRAIN.images.length));
   fd.set('caption_strategy', captionStrategy);
+  // Crop strategy chip — center (default) or letterbox.
+  const cropInp = document.getElementById('trainCropStrategy');
+  if (cropInp && cropInp.value) fd.set('crop_strategy', cropInp.value);
   const rank = document.getElementById('trainRank').value;
   if (rank) fd.set('rank', rank);
   const stepsVal = document.getElementById('trainSteps').value;
