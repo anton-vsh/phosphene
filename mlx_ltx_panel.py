@@ -10678,6 +10678,37 @@ HTML = r"""<!doctype html>
     body[data-workflow="train"] #studioSection { display: none !important; }
     body[data-workflow="train"] #trainSection { display: block; }
 
+    /* =========================================================
+       CAPABILITY TIER (Q4 vs Q8) — Codex C+ recommendation, 2026-05-17
+       =========================================================
+       On sub-48GB Macs the Q8 dev transformer doesn't fit, so the
+       Manual surface hides every intent that requires it:
+
+         * FFLF and Extend modes (HQ-only pipelines)
+         * Characters chip strip (character LoRAs are dev-trained, fuse
+           into the wrong base on Q4)
+         * Q8-Draft / Q8-Pro quality chips (HQ pipeline)
+         * Skip-step toggle (res_2s sampler control, Q8-only)
+         * "High" quality chip in the default strip (HQ-only)
+
+       Low-RAM users get a clean Text/Image surface: what they can
+       actually run, no disabled-but-visible controls. Q8 users see
+       everything (no display: none rules apply when cap_tier="q8").
+       Q4 path remains available to Q8 users via the Customize Compute
+       toggle (Pass 6) for quick non-character drafts. */
+    body[data-cap-tier="q4"] #modeGroup [data-mode="keyframe"],
+    body[data-cap-tier="q4"] #modeGroup [data-mode="extend"],
+    body[data-cap-tier="q4"] #manualCharactersPickerSlot,
+    body[data-cap-tier="q4"] #charactersPickerDivider,
+    body[data-cap-tier="q4"] #qualityGroupCharacter,
+    body[data-cap-tier="q4"] #charSkipstepToggleWrap,
+    body[data-cap-tier="q4"] #qualityGroup [data-quality="high"] { display: none !important; }
+    /* Quality strip becomes a 3-col grid (Quick/Balanced/Standard)
+       since the 4th column ("High") is gone. */
+    body[data-cap-tier="q4"] #qualityGroup.quality-strip {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
     /* ===== FORM ===== */
     h2 {
       font-size: 10px; margin: 14px 0 8px; color: var(--muted);
@@ -17750,6 +17781,15 @@ function syncAvoidRowFromValue() {
 }
 
 function setMode(mode) {
+  // Capability guard — Q4 (sub-48GB) tier can't run FFLF or Extend; the
+  // pipeline classes are HQ-only. CSS already hides the chips, but a
+  // stale localStorage or a JS caller could still try to switch. Snap
+  // to t2v with a console warning so we never end up in an unrenderable
+  // mode by accident.
+  if (window.PHOSPHENE_CAP_TIER === 'q4' && (mode === 'keyframe' || mode === 'extend')) {
+    console.warn(`setMode(${mode}): not available on Q4 tier — snapping to t2v`);
+    mode = 't2v';
+  }
   currentMode = mode;
   // The Studio pill swaps the form-pane in place: hide the video form
   // (genForm) and show the inline #studioSection. Right rail (queue,
