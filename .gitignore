@@ -72,3 +72,6 @@ __pycache__/
 .vscode/
 .idea/
 *.swp
+
+# Claude Preview tool config (per-machine, not Phosphene)
+.claude/
