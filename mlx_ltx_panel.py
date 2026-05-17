@@ -3715,6 +3715,48 @@ atexit.register(HELPER.kill)
 atexit.register(caffeinate_off)
 
 
+# ---- auto-caption subprocess state -------------------------------------------
+# Tracks the in-flight `caption_with_gemma.py` worker so:
+#   (a) the UI can poll progress (i / n / current file) via /train/auto-caption/status
+#   (b) we refuse a second auto-caption while one is running (the script
+#       holds ~6 GB of Gemma 3, two at once would OOM under load)
+#   (c) the panel exit handler can SIGTERM the subprocess so a stuck
+#       captioner doesn't outlive its parent.
+# Guarded by LOCK like the rest of STATE-adjacent globals.
+CAPTION_PROC: subprocess.Popen | None = None
+CAPTION_STATE: dict = {
+    "running": False,
+    "train_job_id": None,
+    "trigger": None,
+    "i": 0,
+    "n": 0,
+    "current_file": None,
+    "last_caption": None,
+    "started_at": None,
+    "elapsed_sec": 0.0,
+    "error": None,
+}
+
+
+def _kill_caption_proc() -> None:
+    """Atexit + /stop hook — terminate any running auto-caption subprocess."""
+    global CAPTION_PROC
+    proc = CAPTION_PROC
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception:
+        pass
+
+
+atexit.register(_kill_caption_proc)
+
+
 # ---- generation pipeline -----------------------------------------------------
 
 def compute_pad(w: int, h: int) -> tuple[int, int, str | None]:
@@ -7027,6 +7069,17 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/train/auto-caption/status":
+            # Snapshot of CAPTION_STATE for the Train tab to poll while a
+            # caption run is in flight. Cheap — read under LOCK, return.
+            # The full log still goes through /status; this just surfaces
+            # the structured progress fields (i / n / current_file) so the
+            # UI can render a clean progress bar without parsing log text.
+            with LOCK:
+                snap = dict(CAPTION_STATE)
+            self._json({"ok": True, **snap})
+            return
+
         # ====== Train Character — server-side suggestion for a fresh
         # trigger token. The JS already has its own generator (so the
         # button is instant), but this endpoint exists for agent callers
@@ -8413,6 +8466,175 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "queued_id": job["id"],
                         "train_job_id": train_job_id,
                         "params": job["params"]})
+            return
+
+        if path == "/train/auto-caption":
+            # Auto-caption every image in a Train Character dataset using the
+            # local Gemma 3 12B multimodal model. Same weights the panel
+            # already downloads for prompt enhancement — no extra model fetch.
+            # Spawns caption_with_gemma.py as a subprocess so Gemma's ~6 GB
+            # RSS releases the moment captioning finishes; stdout streams
+            # back as JSON-line events the worker thread pushes into the
+            # log + into CAPTION_STATE for UI polling.
+            train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
+            if not train_job_id:
+                self._json({"error": "train_job_id required"}, 400); return
+            try:
+                train_job_id = _safe_job_id(train_job_id)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
+            ds = _train_dataset_dir(train_job_id)
+            images_dir = ds / "images"
+            if not images_dir.is_dir():
+                self._json({"error": f"dataset not found: {images_dir}"}, 404)
+                return
+            image_files = [x for x in images_dir.iterdir()
+                           if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS]
+            if not image_files:
+                self._json({"error": "no images to caption"}, 400); return
+            # Trigger token defaults to the job_id (which is how new jobs
+            # are minted via _new_train_job_id() — they ARE the trigger).
+            trigger = (form.get("trigger", [""])[0] or train_job_id).strip()
+            if not trigger:
+                self._json({"error": "trigger required"}, 400); return
+
+            # Refuse if another captioning is in flight — two Gemmas in
+            # RAM at the same time would push us into swap.
+            with LOCK:
+                if CAPTION_STATE.get("running"):
+                    self._json({
+                        "error": "auto-caption already running for "
+                                 f"{CAPTION_STATE.get('train_job_id')}",
+                    }, 409)
+                    return
+                # Refuse if a training job is in flight on the same
+                # dataset — captioning would race the training preprocess.
+                cur = STATE.get("current")
+                if cur and cur.get("params", {}).get("mode") == "train":
+                    self._json({
+                        "error": "training is currently running — wait for "
+                                 "it to finish before auto-captioning",
+                    }, 409)
+                    return
+                # Reset state for this run.
+                CAPTION_STATE.update({
+                    "running": True,
+                    "train_job_id": train_job_id,
+                    "trigger": trigger,
+                    "i": 0,
+                    "n": len(image_files),
+                    "current_file": None,
+                    "last_caption": None,
+                    "started_at": time.time(),
+                    "elapsed_sec": 0.0,
+                    "error": None,
+                })
+
+            script_path = ROOT / "caption_with_gemma.py"
+            cmd = [
+                str(HELPER_PYTHON),
+                str(script_path),
+                "--dataset", str(ds),
+                "--trigger", trigger,
+            ]
+            push(f"[caption] $ {' '.join(shlex.quote(c) for c in cmd)}")
+
+            def _runner() -> None:
+                global CAPTION_PROC
+                t_start = time.time()
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        # Own process group so /stop's killpg can take down
+                        # the captioner + any child it spawned.
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    push(f"[caption] failed to spawn: "
+                         f"{type(exc).__name__}: {exc}")
+                    with LOCK:
+                        CAPTION_STATE["running"] = False
+                        CAPTION_STATE["error"] = str(exc)
+                    return
+                with LOCK:
+                    CAPTION_PROC = proc
+                # Stream stdout. Each line is either JSON (a structured
+                # event from caption_with_gemma.py) or plain text (fallback
+                # — surface as-is to the log).
+                assert proc.stdout is not None
+                for raw in proc.stdout:
+                    line = raw.rstrip("\n")
+                    if not line:
+                        continue
+                    payload = None
+                    if line.lstrip().startswith("{"):
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            payload = None
+                    if isinstance(payload, dict):
+                        evt = payload.get("event")
+                        if evt == "loading":
+                            push("[caption] loading Gemma 3 12B (~3s on warm)…")
+                        elif evt == "loaded":
+                            push(f"[caption] Gemma loaded in "
+                                 f"{payload.get('elapsed_sec','?')}s — "
+                                 f"captioning {CAPTION_STATE['n']} images.")
+                        elif evt == "progress":
+                            i = int(payload.get("i") or 0)
+                            n = int(payload.get("n") or CAPTION_STATE["n"])
+                            fname = payload.get("file") or ""
+                            caption = payload.get("caption") or ""
+                            with LOCK:
+                                CAPTION_STATE["i"] = i
+                                CAPTION_STATE["n"] = n
+                                CAPTION_STATE["current_file"] = fname
+                                CAPTION_STATE["last_caption"] = caption
+                                CAPTION_STATE["elapsed_sec"] = round(
+                                    time.time() - t_start, 1)
+                            # One log line per image so users see real
+                            # progress, truncated to keep the pane tidy.
+                            preview = caption[:90] + ("…" if len(caption) > 90 else "")
+                            push(f"[caption] {i}/{n} {fname}: {preview}")
+                        elif evt == "done":
+                            push(f"[caption] done — {payload.get('count')} "
+                                 f"captions in "
+                                 f"{payload.get('elapsed_sec','?')}s")
+                        elif evt == "error":
+                            push(f"[caption] error: {payload.get('message')}")
+                            with LOCK:
+                                CAPTION_STATE["error"] = payload.get("message")
+                        else:
+                            # Unknown event — log the raw line.
+                            push(f"[caption] {line}")
+                    else:
+                        push(f"[caption] {line}")
+                rc = proc.wait()
+                with LOCK:
+                    CAPTION_STATE["running"] = False
+                    CAPTION_STATE["elapsed_sec"] = round(
+                        time.time() - t_start, 1)
+                    if rc != 0 and not CAPTION_STATE.get("error"):
+                        CAPTION_STATE["error"] = (
+                            f"subprocess exited with code {rc}")
+                if rc == 0:
+                    push(f"[caption] subprocess exit 0 — refresh dataset "
+                         "view to see updated captions.")
+                else:
+                    push(f"[caption] subprocess exit {rc}")
+
+            threading.Thread(target=_runner, daemon=True,
+                             name="auto-caption").start()
+            self._json({
+                "ok": True,
+                "train_job_id": train_job_id,
+                "trigger": trigger,
+                "image_count": len(image_files),
+            })
             return
 
         # Remove the (single) voice clip from a pending dataset. Used by
@@ -11398,6 +11620,70 @@ HTML = r"""<!doctype html>
       padding-left: 18px;
     }
     .train-caption-hint-rules li { margin-bottom: 4px; line-height: 1.5; }
+    /* Auto-caption row — Gemma 3 12B captioning button + progress bar.
+       Sits below the caption-format details so the user can read the
+       spec, then click one button to have Gemma write captions in that
+       exact format. Disabled until ≥1 image is uploaded. */
+    .train-autocaption-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .train-autocaption-btn {
+      display: inline-flex;
+      align-items: center;
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      background: linear-gradient(135deg, rgba(177,74,255,0.18), rgba(94,234,255,0.12));
+      border: 1px solid rgba(177,74,255,0.45);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 120ms ease, transform 120ms ease, opacity 120ms ease;
+    }
+    .train-autocaption-btn:hover:not([disabled]) {
+      background: linear-gradient(135deg, rgba(177,74,255,0.28), rgba(94,234,255,0.18));
+      transform: translateY(-1px);
+    }
+    .train-autocaption-btn[disabled] {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .train-autocaption-hint {
+      flex: 1 1 220px;
+      font-size: 11.5px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .train-autocaption-progress {
+      margin-top: 10px;
+      padding: 8px 10px;
+      background: rgba(177,74,255,0.06);
+      border: 1px solid rgba(177,74,255,0.25);
+      border-radius: 6px;
+    }
+    .train-autocaption-bar {
+      width: 100%;
+      height: 4px;
+      background: rgba(0,0,0,0.35);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .train-autocaption-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--ph-grad-pink), var(--ph-grad-cyan));
+      transition: width 200ms ease;
+    }
+    .train-autocaption-status {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.2px;
+    }
     /* Trigger word row — same hairline-input chrome as the rest. */
     .train-trigger-row {
       display: flex;
@@ -15810,6 +16096,32 @@ HTML = r"""<!doctype html>
             </ul>
           </div>
         </details>
+
+        <!-- ============== AUTO-CAPTION (Gemma 3) ============== -->
+        <!-- One click + ~3 sec per image: local Gemma 3 12B reads each
+             image and writes a [VISUAL]: <trigger>, … caption that
+             describes what varies (pose / framing / clothing / lighting)
+             and SKIPS identity features. Same recipe Bizarro v2 was
+             hand-captioned with. Uses the Gemma weights the panel already
+             downloads for prompt enhancement — no extra model fetch.
+             Disabled until ≥1 image is uploaded AND a trigger is set. -->
+        <div class="train-autocaption-row">
+          <button type="button" id="trainAutoCaptionBtn"
+                  class="train-autocaption-btn"
+                  onclick="trainAutoCaption()" disabled>
+            <svg class="ph" aria-hidden="true" style="margin-right:8px;vertical-align:-2px"><use href="#ph-sparkle-fill"/></svg>
+            <span id="trainAutoCaptionLabel">Auto-caption with Gemma 3</span>
+          </button>
+          <span class="train-autocaption-hint" id="trainAutoCaptionHint">
+            Local Gemma 3 12B writes one <code>[VISUAL]:</code> caption per image (~2–3 sec each). Overwrites existing captions.
+          </span>
+        </div>
+        <div class="train-autocaption-progress" id="trainAutoCaptionProgress" hidden>
+          <div class="train-autocaption-bar">
+            <div class="train-autocaption-bar-fill" id="trainAutoCaptionBarFill" style="width:0%"></div>
+          </div>
+          <div class="train-autocaption-status" id="trainAutoCaptionStatus">Starting…</div>
+        </div>
       </div>
 
       <!-- ============== TRIGGER + PRESET ============== -->
@@ -18320,6 +18632,139 @@ async function trainRefreshDataset() {
   } catch (e) { console.warn('train dataset refresh failed', e); }
 }
 
+// ====== Auto-caption (Gemma 3) ======
+//
+// One-click captioning of every image in the current dataset. POSTs to
+// /train/auto-caption which spawns caption_with_gemma.py as a subprocess;
+// progress streams to STATE.log and is mirrored on /train/auto-caption/status
+// (i / n / current file). We poll that status endpoint every 1 sec while a
+// run is active, update the inline progress bar, and refresh the dataset
+// view on completion so the user sees the new captioned count + per-image
+// caption_words update without a manual reload.
+//
+// Memory note: Gemma 3 12B (~6 GB at 4-bit) loads in the subprocess and
+// frees on exit, so it doesn't accumulate on top of the dev transformer
+// the trainer needs next. The backend refuses to start a second run while
+// one is in flight + refuses if a training job is currently running.
+let _trainCaptionPoll = null;
+
+async function trainAutoCaption() {
+  const btn = document.getElementById('trainAutoCaptionBtn');
+  const label = document.getElementById('trainAutoCaptionLabel');
+  const prog = document.getElementById('trainAutoCaptionProgress');
+  const status = document.getElementById('trainAutoCaptionStatus');
+  const fill = document.getElementById('trainAutoCaptionBarFill');
+  if (!btn || btn.disabled) return;
+  if (!TRAIN.jobId) {
+    if (status) status.textContent = 'No dataset yet — drop some images first.';
+    return;
+  }
+  const trig = (document.getElementById('trainTrigger').value || '').trim();
+  if (!trig) {
+    if (status) status.textContent = 'Set a trigger word first.';
+    return;
+  }
+  const n = TRAIN.images.filter(x => !x.uploading).length;
+  // Confirmation if there are already captions — auto-caption OVERWRITES.
+  // We treat any caption count > 0 as "user has invested in captions" and
+  // ask before clobbering. Cheap safety net.
+  const existingCaps = TRAIN.images.filter(x => x.captioned).length;
+  if (existingCaps > 0) {
+    if (!confirm(
+      `Auto-caption will OVERWRITE ${existingCaps} existing caption(s) ` +
+      `for "${trig}". Continue?`
+    )) return;
+  }
+  btn.disabled = true;
+  if (label) label.textContent = 'Captioning…';
+  if (prog) prog.hidden = false;
+  if (fill) fill.style.width = '0%';
+  if (status) status.textContent = `Loading Gemma 3 (~3s)…`;
+  const fd = new FormData();
+  fd.set('train_job_id', TRAIN.jobId);
+  fd.set('trigger', trig);
+  let r;
+  try {
+    r = await fetch('/train/auto-caption', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(fd),
+    });
+  } catch (e) {
+    if (status) status.textContent = 'Network error: ' + (e.message || e);
+    trainAutoCaptionFinish();
+    return;
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    if (status) status.textContent = 'Failed: ' + (j.error || `HTTP ${r.status}`);
+    trainAutoCaptionFinish();
+    return;
+  }
+  // Backend accepted — start polling for progress.
+  _trainCaptionPoll = setInterval(trainAutoCaptionPollOnce, 1000);
+}
+
+async function trainAutoCaptionPollOnce() {
+  let s;
+  try {
+    const r = await fetch('/train/auto-caption/status');
+    s = await r.json();
+  } catch (e) { return; }
+  const status = document.getElementById('trainAutoCaptionStatus');
+  const fill = document.getElementById('trainAutoCaptionBarFill');
+  const i = s.i || 0, n = s.n || 0;
+  if (fill) fill.style.width = (n > 0 ? (i / n) * 100 : 0).toFixed(1) + '%';
+  if (status) {
+    if (s.error) {
+      status.textContent = `Error: ${s.error}`;
+    } else if (s.running) {
+      const f = s.current_file ? ` · ${s.current_file}` : '';
+      status.textContent = `${i} / ${n}${f} · ${s.elapsed_sec}s elapsed`;
+    } else {
+      status.textContent = `Done · ${i} captions in ${s.elapsed_sec}s. Refreshing…`;
+    }
+  }
+  if (!s.running) {
+    if (_trainCaptionPoll) { clearInterval(_trainCaptionPoll); _trainCaptionPoll = null; }
+    // Refresh the dataset so the captioned-count + per-image word_count
+    // updates in the thumb grid, then re-enable the button.
+    await trainRefreshDataset();
+    setTimeout(trainAutoCaptionFinish, 600);
+  }
+}
+
+function trainAutoCaptionFinish() {
+  const btn = document.getElementById('trainAutoCaptionBtn');
+  const label = document.getElementById('trainAutoCaptionLabel');
+  if (btn) btn.disabled = false;
+  if (label) label.textContent = 'Auto-caption with Gemma 3';
+  // Leave the progress strip visible at 100% so the user has a record
+  // of the run; it'll reset to 0% next time the button is clicked.
+  trainUpdateButtonState();
+}
+
+// Reflect upload/trigger state into the auto-caption button. Called from
+// the existing trainUpdateButtonState() so we don't add another mutation
+// observer.
+function trainUpdateAutoCaptionState() {
+  const btn = document.getElementById('trainAutoCaptionBtn');
+  if (!btn) return;
+  const n = TRAIN.images.filter(x => !x.uploading).length;
+  const trig = (document.getElementById('trainTrigger').value || '').trim();
+  // Don't toggle while a run is in flight — the runner manages the button.
+  if (_trainCaptionPoll) return;
+  const ok = n >= 1 && trig.length >= 3 && trig.length <= 32;
+  btn.disabled = !ok;
+  if (!ok) {
+    if (n < 1) btn.title = 'Drop at least one image first.';
+    else if (trig.length < 3) btn.title = 'Trigger word must be 3+ characters.';
+    else btn.title = 'Trigger word is too long (max 32).';
+  } else {
+    btn.title = `Run Gemma 3 on all ${n} image(s) — ~${(2.5 * n).toFixed(0)}s`;
+  }
+}
+
 function trainEffectiveSteps() {
   const v = (document.getElementById('trainSteps').value || '').trim();
   if (!v) return null;
@@ -18372,6 +18817,12 @@ function trainUpdateButtonState() {
   } else {
     btn.title = 'Queue this training job.';
   }
+  // The auto-caption button has a LOWER bar (1 image + 3-char trigger,
+  // versus 15 images for training) so it's tracked separately. Folded
+  // into this same controller so we don't add another mutation observer
+  // — every place that calls trainUpdateButtonState() now also reflects
+  // the auto-caption state.
+  trainUpdateAutoCaptionState();
 }
 
 async function trainStart() {
