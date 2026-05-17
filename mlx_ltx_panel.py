@@ -15965,14 +15965,30 @@ HTML = r"""<!doctype html>
                 </select>
               </div>
             </div>
-            <label class="lbl" style="margin-top:10px">Extend mode</label>
-            <div class="pill-group cols-2" id="extendModeGroup">
-              <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">~16 min · 12 steps · 64 GB safe</span></button>
-              <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">~38 min · 30 steps · 96+ GB</span></button>
+            <!-- Pass 7 (Codex C+ 2026-05-17): renamed from "Fast / Quality"
+                 to "Q8 Draft / Q8 Pro" so the labels match the Character
+                 mode's quality vocabulary. The underlying mechanism stays
+                 the same — Extend uses its own sampler (extend_steps +
+                 extend_cfg) that isn't compatible with the main HQ res_2s
+                 sampler's stage_1/stage_2 step model. Same labels make it
+                 visually clear both intents live in the Q8 family without
+                 forcing the implementation onto the HQ sampler. -->
+            <label class="lbl" style="margin-top:10px">Quality</label>
+            <div class="pill-group cols-2 quality-strip" id="extendModeGroup">
+              <button type="button" class="pill-btn pill-quality active" data-extend-mode="fast">
+                <span class="ql-name">Q8 Draft</span>
+                <span class="q-spec ql-spec sub">12 steps · 64 GB safe</span>
+                <span class="ql-tier">Q8 extend · ~16 min</span>
+              </button>
+              <button type="button" class="pill-btn pill-quality" data-extend-mode="quality">
+                <span class="ql-name">Q8 Pro</span>
+                <span class="q-spec ql-spec sub">30 steps · 96+ GB</span>
+                <span class="ql-tier">Q8 extend · ~38 min · reference</span>
+              </button>
             </div>
             <input type="hidden" name="extend_steps" id="extend_steps" value="12">
             <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
-            <div class="hint">Each latent ≈ 8 frames (~0.33s). Quality mode runs the upstream defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Fast unless you've got more RAM.</div>
+            <div class="hint">Each latent ≈ 8 frames (~0.33s). Q8 Pro runs the upstream Lightricks defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Q8 Draft unless you've got more RAM.</div>
           </div>
         </div>
 
