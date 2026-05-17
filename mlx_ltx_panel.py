@@ -3976,13 +3976,15 @@ def _duration_to_8k_frames(duration_sec: float, fps: float) -> int:
 
 
 def stop_current_job(timeout: float = 5.0) -> None:
-    """Kill the warm helper (and any in-flight ffmpeg mux/upscale). Worker advances."""
+    """Kill the warm helper (and any in-flight ffmpeg mux/upscale + training
+    subprocess). Worker advances."""
     with LOCK:
         cur = STATE["current"]
         mux_pgid = STATE.get("mux_pgid")
+        train_pgid = STATE.get("train_pgid")
     if cur is not None:
         cur["cancel_requested"] = True
-    push("Stop requested — killing helper + ffmpeg post-process to abort current job.")
+    push("Stop requested — killing helper + ffmpeg post-process + training subprocess to abort current job.")
     HELPER.kill()
     # Image-engine subprocesses (HiDream's BF16 helper, mflux's per-family
     # binaries) live outside HELPER. Without this they would run to
@@ -4003,6 +4005,36 @@ def stop_current_job(timeout: float = 5.0) -> None:
             push(f"SIGTERM sent to mux pgid {mux_pgid}")
         except ProcessLookupError:
             pass
+    # Training subprocess (lora_lab.train_character + lora_lab.train_audio)
+    # lives in its own session/pgid (start_new_session=True on both
+    # Popens). Without this, /stop only killed HELPER + mux ffmpeg and the
+    # trainer kept running for hours, blocking the worker — Salo had to
+    # SIGKILL by hand from the terminal. SIGTERM is enough on macOS — MLX
+    # gives up cleanly when the GPU command queue is dropped — but we
+    # follow up with SIGKILL after a short grace period if the trainer
+    # is wedged in a Metal kernel.
+    if train_pgid:
+        try:
+            os.killpg(train_pgid, signal.SIGTERM)
+            push(f"SIGTERM sent to training pgid {train_pgid}")
+        except ProcessLookupError:
+            pass
+        else:
+            # Best-effort SIGKILL fallback for trainers stuck in MLX
+            # kernels that don't observe SIGTERM until the kernel finishes
+            # (can be 60s+ on Q8 + dev transformer loads). Fire-and-forget
+            # in a background thread so /stop returns immediately.
+            def _force_kill_after(grace: float, pgid: int) -> None:
+                time.sleep(grace)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                    push(f"SIGKILL sent to training pgid {pgid} (no SIGTERM ack)")
+                except ProcessLookupError:
+                    pass  # SIGTERM worked
+            threading.Thread(
+                target=_force_kill_after, args=(8.0, train_pgid),
+                daemon=True, name=f"sigkill-train-{train_pgid}",
+            ).start()
 
 
 _JOB_COUNTER = 0
@@ -4975,9 +5007,16 @@ def run_train_job_inner(job: dict) -> None:
             text=True,
             bufsize=1,
             env={**os.environ},
+            # Own process group so /stop can take down the entire trainer
+            # tree (train_character + its lora_lab + LtxvTrainer threads +
+            # any ffmpeg helpers) with a single os.killpg. Without this,
+            # /stop only killed the warm helper + mux ffmpeg and left the
+            # trainer running for hours, blocking the worker.
+            start_new_session=True,
         )
         with LOCK:
             STATE["pid"] = proc.pid
+            STATE["train_pgid"] = os.getpgid(proc.pid)
         # Stream stdout. Each line is either JSON (a structured progress
         # event) or plain text (forwarded as-is to the log).
         assert proc.stdout is not None
@@ -5048,6 +5087,7 @@ def run_train_job_inner(job: dict) -> None:
         proc = None
         with LOCK:
             STATE["pid"] = None
+            STATE["train_pgid"] = None
         if rc != 0:
             raise RuntimeError(
                 f"training exited with code {rc} — see Logs for stack trace")
@@ -5063,6 +5103,7 @@ def run_train_job_inner(job: dict) -> None:
                     pass
             with LOCK:
                 STATE["pid"] = None
+                STATE["train_pgid"] = None
         _TRAIN_LOCK.release()
 
     elapsed = round(time.time() - t0, 2)
@@ -5223,9 +5264,13 @@ def run_train_job_inner(job: dict) -> None:
             text=True,
             bufsize=1,
             env={**os.environ},
+            # Same reasoning as the face trainer above — own pgid so
+            # /stop can SIGTERM the whole audio tree at once.
+            start_new_session=True,
         )
         with LOCK:
             STATE["pid"] = audio_proc.pid
+            STATE["train_pgid"] = os.getpgid(audio_proc.pid)
         assert audio_proc.stdout is not None
         for raw in audio_proc.stdout:
             line = raw.rstrip("\n")
@@ -5292,6 +5337,7 @@ def run_train_job_inner(job: dict) -> None:
         audio_proc = None
         with LOCK:
             STATE["pid"] = None
+            STATE["train_pgid"] = None
         if audio_rc != 0:
             audio_failed_reason = (f"audio trainer exited with code "
                                    f"{audio_rc}")
@@ -5310,6 +5356,7 @@ def run_train_job_inner(job: dict) -> None:
                 except Exception:
                     pass
             with LOCK:
+                STATE["train_pgid"] = None
                 STATE["pid"] = None
 
     if audio_failed_reason or not audio_lora_path.is_file():
