@@ -14836,7 +14836,7 @@ HTML = r"""<!doctype html>
     <nav class="workflow-tabs" id="workflowTabs">
       <button data-workflow="manual" class="active">Manual</button>
       <button data-workflow="characters">Characters<span class="new-badge">NEW</span></button>
-      <button data-workflow="train">Train</button>
+      <button data-workflow="train">Train Character<span class="new-badge">NEW</span></button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
@@ -15582,14 +15582,13 @@ HTML = r"""<!doctype html>
           </div>
 
           <!-- Character LoRA strength. Default 0.8 — slightly under 1.0
-               because Aria/Bizarro/Salo v2 LoRAs are mildly over-trained
-               (5000 steps vs Lightricks-recommended 2000) and bake some
-               training-time visual quirks (sparkles, occasional mesh).
-               At 0.8 the identity still locks but the baked artifacts
-               fade noticeably. The slider is exposed so power users can
-               dial up to 1.0 for max identity or down to 0.5 to escape
-               artifacts when prompts trigger them. v3 retrains with the
-               corrected recipe should let us safely return to 1.0 default. -->
+               because the workshop/copper-pipe/gas-lamp prompt content
+               triggers mesh/sparkle artifacts in the BASE LTX-2.3 model
+               (confirmed via base-only-no-LoRA test 2026-05-17, see
+               lora-lab/STATE.md). At 0.8 the identity still locks and
+               the artifact-prone prompt regions render cleaner. Slider
+               exposed so users can dial up to 1.0 for max identity, or
+               down to 0.5 when a prompt triggers the base-model basin. -->
           <div class="characters-strength-row">
             <label for="charactersStrength" class="characters-strength-label">
               Character LoRA strength
@@ -15830,7 +15829,7 @@ HTML = r"""<!doctype html>
         <div class="pill-group cols-3" id="trainPresetGroup">
           <button type="button" class="pill-btn active" data-train-preset="quick"><span>Quick <span class="rec-badge">Recommended</span></span><span class="sub" id="trainPresetQuickSub">~30 min · rank 8 · 512px</span></button>
           <button type="button" class="pill-btn" data-train-preset="medium"><span>Medium</span><span class="sub" id="trainPresetMediumSub">~2 h · rank 16 · 576px</span></button>
-          <button type="button" class="pill-btn" data-train-preset="high"><span>High</span><span class="sub" id="trainPresetHighSub">~4 h · rank 32 · 768px</span></button>
+          <button type="button" class="pill-btn" data-train-preset="high"><span>High</span><span class="sub" id="trainPresetHighSub">~2 h 50 min · rank 32 · 5000 steps · 512px</span></button>
         </div>
 
         <details class="train-advanced">
@@ -17313,8 +17312,8 @@ const TRAIN = {
               label: 'Quick',  subtitle: '~30 min · rank 8 · 512px' },
     medium: { steps: 3000, rank: 16, resolution: 576, seconds_per_step: 2.2, ram_peak_gb: 18,
               label: 'Medium', subtitle: '~2 h · rank 16 · 576px' },
-    high:   { steps: 5000, rank: 32, resolution: 768, seconds_per_step: 3.0, ram_peak_gb: 28,
-              label: 'High',   subtitle: '~4 h · rank 32 · 768px' },
+    high:   { steps: 5000, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
+              label: 'High',   subtitle: '~2 h 50 min · rank 32 · 5000 steps · 512px' },
   },
   // Mirror of the server-side TRAIN_STYLE_PRESETS. Style table differs from
   // character: quick uses rank 16 (not rank 8), and "high" adds steps not
