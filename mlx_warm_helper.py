@@ -1074,14 +1074,25 @@ def _override_default_negative_prompt(negative_prompt: str):
         yield False
         return
 
-    import ltx_pipelines_mlx.ti2vid_one_stage as one_stage
+    import ltx_pipelines_mlx._base as base_pipeline
+    import ltx_pipelines_mlx.utils.constants as constants
 
-    previous = one_stage.DEFAULT_NEGATIVE_PROMPT
-    one_stage.DEFAULT_NEGATIVE_PROMPT = f"{previous}, {neg}"
+    targets = [
+        mod for mod in (base_pipeline, constants)
+        if hasattr(mod, "DEFAULT_NEGATIVE_PROMPT")
+    ]
+    if not targets:
+        yield False
+        return
+
+    previous = {mod: mod.DEFAULT_NEGATIVE_PROMPT for mod in targets}
+    for mod, value in previous.items():
+        mod.DEFAULT_NEGATIVE_PROMPT = f"{value}, {neg}"
     try:
         yield True
     finally:
-        one_stage.DEFAULT_NEGATIVE_PROMPT = previous
+        for mod, value in previous.items():
+            mod.DEFAULT_NEGATIVE_PROMPT = value
 
 
 def _scalar(x) -> float:
