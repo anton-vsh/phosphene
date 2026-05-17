@@ -12616,6 +12616,11 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border);
       border-radius: var(--r-md);
     }
+    /* The `display: grid` rule above wins specificity over the user-agent
+       `[hidden] { display: none }` style, so my JS-set `hidden` attribute
+       was being ignored and BOTH the default + character quality strips
+       showed at once (Salo screenshot 2026-05-17). Restore intent. */
+    .quality-strip[hidden] { display: none !important; }
     /* Character-quality strip has 2 chips, not 4 — distribute evenly. */
     #qualityGroupCharacter.quality-strip {
       grid-template-columns: repeat(2, 1fr);
