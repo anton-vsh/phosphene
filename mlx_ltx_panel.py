@@ -16085,20 +16085,16 @@ HTML = r"""<!doctype html>
               <span class="ql-tier">Q8 HQ · ~5 min / 5s · best identity</span>
             </button>
           </div>
-          <!-- Skip-step boost toggle — character-only opt-in for the Codex
-               2026-05-15 finding: video_skip_step=1, audio_skip_step=1 cuts
-               ~12.6% off the locked Q8 HQ recipe (426 s → 372 s on a 7 s
-               1024×576 clip) with no visible quality cost on contact-
-               sheet validation. Salo flagged it should be a toggle — some
-               LoRAs / prompt content might prove sensitive to the reuse
-               of the last denoised prediction on skipped passes, so this
-               is opt-in even though it's ON by default for character mode.
-               Visible only when a character is selected. -->
-          <label class="char-skipstep-toggle" id="charSkipstepToggleWrap" hidden>
-            <input type="checkbox" id="charSkipstepToggle" checked
-                   onchange="_setSkipStepEnabled(this.checked)">
-            <span class="char-skipstep-label">Skip-step boost</span>
-            <span class="char-skipstep-hint">~12% faster · disable if quality looks off</span>
+          <!-- 2026-05-17 (Codex C+ pass 6): the character-only skip-step
+               toggle moved out of here into the Customize section as
+               "HQ speed". It's a Q8 sampler control, not a character
+               control — applies equally to Character / FFLF / Extend
+               renders (anything that hits the HQ pipeline). Visible
+               only when quality=high. Old IDs preserved as a hidden
+               legacy stub so any saved-state restore paths that
+               reference `charSkipstepToggle` keep working. -->
+          <label class="char-skipstep-toggle" id="charSkipstepToggleWrap" hidden style="display:none">
+            <input type="checkbox" id="charSkipstepToggle" checked>
           </label>
         </div>
 
@@ -16310,17 +16306,51 @@ HTML = r"""<!doctype html>
               </div>
             </div>
 
-            <!-- Speed — experimental sampler acceleration. Boost/Turbo
-                 skip 2-3 stable middle denoise calls. Off at High quality
-                 (the two-stage HQ sampler doesn't support skipping). -->
-            <div class="cz-control">
-              <div class="cz-label">Speed
-                <span class="cz-label-hint">experimental — skip stable denoise steps</span>
-              </div>
+            <!-- 2026-05-17 (Codex C+ pass 5): the Speed (Boost/Turbo)
+                 acceleration row used to live here. Killed from the public
+                 surface — it's a Q4-distilled-pipeline-only knob; the Q8
+                 HQ pipeline ignores `accel` (and uses TeaCache + skip-step
+                 for its speed wins instead). Keeping the row would mean
+                 either a Q4-only-relevant control showing on Q8 (where it
+                 does nothing) or a control that silently changes meaning
+                 based on tier. The hidden #accel input below survives so
+                 nothing in the queue/sidecar/restore paths breaks.
+                 If a future Q4 lab tool needs the row back, restore it
+                 behind `body[data-cap-tier="q4"]` and wire it explicitly
+                 to the Q4 path. -->
+            <div id="accelRow" class="cz-control" hidden style="display:none">
               <div class="pill-group cols-3" id="accelGroup">
-                <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
-                <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">~10-15% faster</span></button>
-                <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">~20-25% faster</span></button>
+                <button type="button" class="pill-btn active" data-accel="off">Exact</button>
+                <button type="button" class="pill-btn" data-accel="boost">Boost</button>
+                <button type="button" class="pill-btn" data-accel="turbo">Turbo</button>
+              </div>
+            </div>
+
+            <!-- HQ speed — Codex C+ pass 6, 2026-05-17. The Q8 HQ res_2s
+                 sampler honors `video_skip_step` / `audio_skip_step`
+                 (patched into ti2vid_two_stages_hq.py + samplers.py
+                 2026-05-15). At skip_step=1 the sampler reuses the last
+                 denoised prediction on alternating outer passes — 12.6%
+                 wall-time saving on a 7s 1024×576 character clip with
+                 no visible quality cost (Codex contact-sheet sweep,
+                 SPEED_RESULTS_CODEX.md). Fast = skip=1, Exact = skip=0.
+                 Visible only when quality=high (Q8 HQ pipeline active);
+                 hidden CSS rule belongs in the Q8 capability block. -->
+            <div id="hqSpeedRow" class="cz-control" hidden>
+              <div class="cz-label">HQ speed
+                <span class="cz-label-hint">Q8 sampler · skip-step cache reuse</span>
+              </div>
+              <div class="pill-group cols-2" id="hqSpeedGroup">
+                <button type="button" class="pill-btn active" data-hq-speed="fast"
+                        title="TeaCache + skip-step (validated 2026-05-15: ~12% faster, no visible quality cost on character renders)">
+                  <span>Fast</span>
+                  <span class="sub">TeaCache + skip-step · ~12% faster</span>
+                </button>
+                <button type="button" class="pill-btn" data-hq-speed="exact"
+                        title="TeaCache only (no skip-step). Use if a specific LoRA / prompt looks degraded under Fast.">
+                  <span>Exact</span>
+                  <span class="sub">TeaCache only · slower, reference</span>
+                </button>
               </div>
             </div>
 
@@ -20267,6 +20297,9 @@ function setQuality(q) {
   updateAccelAvailability();
   updateTemporalAvailability();
   updateCustomizeSummary();
+  if (typeof _applyHqSpeedRowVisibility === 'function') {
+    try { _applyHqSpeedRowVisibility(); } catch (_) {}
+  }
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
 function setAccel(a) {
@@ -24291,11 +24324,17 @@ function _setCharacterQuality(btn) {
   const vertical = aspect && aspect.value === 'vertical';
   if (wInp) wInp.value = vertical ? h : w;
   if (hInp) hInp.value = vertical ? w : h;
-  // Respect the user's current skip-step toggle state (Codex 2026-05-15
-  // optimization — defaults ON for new character runs but the toggle
-  // lets users disable per-render if they suspect quality drift).
+  // Skip-step state — Pass 6 moved the toggle to Customize "HQ speed",
+  // but the legacy #charSkipstepToggle stub still exists for Load Params
+  // restoration. Read whichever is the current source of truth: prefer
+  // the new HQ-speed pill state (if Fast pill active, skip=on); fall
+  // back to the legacy checkbox; default ON.
+  const hqGroup = document.getElementById('hqSpeedGroup');
+  const fastActive = hqGroup
+    ? hqGroup.querySelector('[data-hq-speed="fast"]')?.classList.contains('active')
+    : true;
   const skipToggle = document.getElementById('charSkipstepToggle');
-  const skipOn = skipToggle ? !!skipToggle.checked : true;
+  const skipOn = (hqGroup ? !!fastActive : (skipToggle ? !!skipToggle.checked : true));
   _setSkipStepEnabled(skipOn);
   if (typeof setUpscale === 'function') {
     try { setUpscale('fit_720p'); } catch (_) {}
@@ -24303,18 +24342,64 @@ function _setCharacterQuality(btn) {
   if (typeof updateCustomizeSummary === 'function') {
     try { updateCustomizeSummary(); } catch (_) {}
   }
+  // Quality is now 'high'; reveal the HQ-speed row.
+  if (typeof _applyHqSpeedRowVisibility === 'function') {
+    try { _applyHqSpeedRowVisibility(); } catch (_) {}
+  }
 }
 
 // Skip-step boost toggle handler. Writes 1/0 into the hidden form
 // inputs that the backend HQ pipeline reads. Standalone function so
 // _setCharacterQuality can re-apply on each chip click + the checkbox
-// onchange handler can call it directly.
+// onchange handler can call it directly. Also keeps the new Customize
+// "HQ speed" pill row in sync (Pass 6 — the toggle moved out of the
+// Character chip area into Customize).
 function _setSkipStepEnabled(enabled) {
   const v = enabled ? '1' : '0';
   const vSkip = document.getElementById('video_skip_step');
   const aSkip = document.getElementById('audio_skip_step');
   if (vSkip) vSkip.value = v;
   if (aSkip) aSkip.value = v;
+  // Mirror state into the new HQ-speed pill row + the legacy checkbox.
+  const group = document.getElementById('hqSpeedGroup');
+  if (group) {
+    const want = enabled ? 'fast' : 'exact';
+    group.querySelectorAll('.pill-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.hqSpeed === want));
+  }
+  const cb = document.getElementById('charSkipstepToggle');
+  if (cb) cb.checked = enabled;
+}
+
+// Wire the new Customize "HQ speed" pills (Fast / Exact). Pill click
+// flips the hidden skip-step inputs via _setSkipStepEnabled — same
+// plumbing the character-only toggle used before, just relocated.
+// Visibility (show only when quality=high) is handled separately by
+// _applyHqSpeedRowVisibility called from setQuality + _setCharacterQuality.
+function _wireHqSpeedPills() {
+  const group = document.getElementById('hqSpeedGroup');
+  if (!group || group.dataset.wired === '1') return;
+  group.dataset.wired = '1';
+  group.querySelectorAll('.pill-btn').forEach(b => {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      _setSkipStepEnabled(b.dataset.hqSpeed === 'fast');
+    });
+  });
+}
+
+// Show the HQ speed row only when the active quality is Q8 HQ.
+// quality=high → show row. Anything else → hide it + also reset
+// skip_step to 0 so we don't ship the optimization on a Q4 render
+// that doesn't support it anyway (the field is ignored by the Q4
+// path but keeping it 0 makes the sidecar honest).
+function _applyHqSpeedRowVisibility() {
+  const row = document.getElementById('hqSpeedRow');
+  if (!row) return;
+  const q = document.getElementById('quality')?.value || '';
+  const show = (q === 'high');
+  row.hidden = !show;
+  if (!show) _setSkipStepEnabled(false);
 }
 
 // Wire the char-quality chip clicks once at boot. Idempotent — the
@@ -24645,10 +24730,18 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof _wireCharacterQualityChips === 'function') {
     try { _wireCharacterQualityChips(); } catch (e) {}
   }
+  // Bind the Customize "HQ speed" pills (Pass 6).
+  if (typeof _wireHqSpeedPills === 'function') {
+    try { _wireHqSpeedPills(); } catch (e) {}
+  }
   // Apply correct quality-strip visibility based on whether a character
   // is already selected (e.g. restored from sidecar / Load Params).
   if (typeof _applyCharacterQualityStripVisibility === 'function') {
     try { _applyCharacterQualityStripVisibility(); } catch (e) {}
+  }
+  // Apply correct HQ-speed-row visibility based on initial quality.
+  if (typeof _applyHqSpeedRowVisibility === 'function') {
+    try { _applyHqSpeedRowVisibility(); } catch (e) {}
   }
 });
 
