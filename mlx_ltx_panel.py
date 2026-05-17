@@ -24405,17 +24405,19 @@ function _wireHqSpeedPills() {
 }
 
 // Show the HQ speed row only when the active quality is Q8 HQ.
-// quality=high → show row. Anything else → hide it + also reset
-// skip_step to 0 so we don't ship the optimization on a Q4 render
-// that doesn't support it anyway (the field is ignored by the Q4
-// path but keeping it 0 makes the sidecar honest).
+// Hiding the row deliberately does NOT touch the skip-step values —
+// the Q4 path ignores `video_skip_step` / `audio_skip_step` anyway,
+// and the HTML's default-active Fast pill is the right boot state.
+// Earlier draft reset skip-step to 0 on hide, which clobbered the
+// HTML-default Fast pill at page load (quality starts balanced →
+// row hidden → skip reset to 0 → entering Character mode then read
+// fastActive=false → first character render ran without the
+// optimization).
 function _applyHqSpeedRowVisibility() {
   const row = document.getElementById('hqSpeedRow');
   if (!row) return;
   const q = document.getElementById('quality')?.value || '';
-  const show = (q === 'high');
-  row.hidden = !show;
-  if (!show) _setSkipStepEnabled(false);
+  row.hidden = (q !== 'high');
 }
 
 // Wire the char-quality chip clicks once at boot. Idempotent — the
@@ -24749,6 +24751,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Bind the Customize "HQ speed" pills (Pass 6).
   if (typeof _wireHqSpeedPills === 'function') {
     try { _wireHqSpeedPills(); } catch (e) {}
+  }
+  // Boot the skip-step inputs to match the HTML's default-active Fast
+  // pill — without this, the inputs stay at "0" while the pill shows
+  // active, and the first character render misses the optimization.
+  if (typeof _setSkipStepEnabled === 'function') {
+    const fastDefault = document.querySelector('#hqSpeedGroup [data-hq-speed="fast"].active');
+    try { _setSkipStepEnabled(!!fastDefault); } catch (e) {}
   }
   // Apply correct quality-strip visibility based on whether a character
   // is already selected (e.g. restored from sidecar / Load Params).
