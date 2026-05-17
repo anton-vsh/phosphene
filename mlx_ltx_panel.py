@@ -15819,7 +15819,16 @@ HTML = r"""<!doctype html>
           <!-- Compact 4-col strip. Each chip carries name + a single spec
                line. Same data-quality wiring as before so setQuality()
                keeps working unchanged. The .pill-btn class is preserved
-               for the click handler that filters by it. -->
+               for the click handler that filters by it.
+               When a character is selected in the Characters chip strip,
+               selectManualCharacter() hides this strip and reveals the
+               character-only strip below — the Q4 distilled paths
+               (Quick / Balanced / Standard) would produce a base-fine-
+               tune mismatch on dev-trained character LoRAs (the LoRA
+               was trained against transformer-dev.safetensors; distilled
+               inference uses transformer-distilled.safetensors and the
+               identity barely locks). Forcing quality=high here means
+               the user can't accidentally ship a Q4 character render. -->
           <div class="quality-strip pill-group" id="qualityGroup">
             <button type="button" class="q-chip pill-btn pill-quality" data-quality="quick">
               <span class="ql-name">Quick</span>
@@ -15840,6 +15849,25 @@ HTML = r"""<!doctype html>
               <span class="ql-name">High</span>
               <span class="q-spec ql-spec sub" id="highSpec">1024×576</span>
               <span class="ql-tier" id="highSub">Q8 not installed</span>
+            </button>
+          </div>
+          <!-- Character-only quality strip — revealed by selectManualCharacter
+               when a character is selected. Both buttons submit quality=high
+               (the only inference path that matches dev-trained character
+               LoRAs); the difference is resolution. Draft renders smaller
+               + faster, Pro renders at the canonical 1024x576. Both upscale
+               on save to the final delivery resolution. Hidden by default;
+               .show class adds the actual display. -->
+          <div class="quality-strip pill-group" id="qualityGroupCharacter" hidden>
+            <button type="button" class="q-chip pill-btn pill-quality char-quality" data-char-quality="draft" data-width="736" data-height="416">
+              <span class="ql-name">Q8 Draft</span>
+              <span class="q-spec ql-spec sub">736×416</span>
+              <span class="ql-tier">Q8 HQ · ~3:30 / 5s</span>
+            </button>
+            <button type="button" class="q-chip pill-btn pill-quality char-quality active" data-char-quality="pro" data-width="1024" data-height="576">
+              <span class="ql-name">Q8 Pro</span>
+              <span class="q-spec ql-spec sub">1024×576</span>
+              <span class="ql-tier">Q8 HQ · ~6:00 / 5s · best identity</span>
             </button>
           </div>
         </div>
@@ -23608,6 +23636,12 @@ function _updateCharsPickerVisibility(mode) {
     const inp = document.getElementById('characterIdInput');
     if (inp) inp.value = '';
     _renderCharsAppliedNote();
+    // Restore the default quality strip when leaving T2V — the
+    // character-only strip should never be visible in I2V / FFLF /
+    // Extend (no character context).
+    if (typeof _applyCharacterQualityStripVisibility === 'function') {
+      try { _applyCharacterQualityStripVisibility(); } catch (_) {}
+    }
   }
 }
 
@@ -23749,6 +23783,89 @@ function selectManualCharacter(id) {
     }
   }
   _renderManualCharactersList();
+  // Swap quality strips: when a character is active, the Q4 distilled
+  // tiers (Quick / Balanced / Standard) don't match the dev-trained
+  // LoRA and produce a soft, generic-Trump-ish render. Only the Q8 HQ
+  // path lines up. Hide the default 4-chip strip + reveal the 2-chip
+  // character-only strip (Q8 Draft / Q8 Pro). When the character is
+  // deselected, restore the default and revert to Balanced. Called
+  // here AND after refreshManualCharacters() boot so the visibility
+  // state is correct even on first paint.
+  _applyCharacterQualityStripVisibility();
+}
+
+// Toggle the visibility of the default vs character-only quality strips
+// based on whether a character is currently selected. Idempotent — safe
+// to call any time the selection state changes.
+function _applyCharacterQualityStripVisibility() {
+  const def  = document.getElementById('qualityGroup');
+  const char = document.getElementById('qualityGroupCharacter');
+  if (!def || !char) return;
+  if (_selectedCharacterId) {
+    def.hidden = true;
+    char.hidden = false;
+    // Snap to Q8 Pro on first switch — but only if no char-quality
+    // chip is currently active (preserves user's choice if they had
+    // picked Draft earlier and switched between characters).
+    const anyActive = char.querySelector('.char-quality.active');
+    const target = anyActive || char.querySelector('[data-char-quality="pro"]');
+    if (target) _setCharacterQuality(target);
+  } else {
+    def.hidden = false;
+    char.hidden = true;
+    // Restore Balanced as the default video preset — the same value
+    // the page boots with — so the user lands in a sensible state
+    // when they deselect the character.
+    if (typeof setQuality === 'function') {
+      try { setQuality('balanced'); } catch (_) {}
+    }
+  }
+}
+
+// Click handler for the character-only quality chips (Q8 Draft / Q8 Pro).
+// Forces quality=high + sets width/height directly. Both chips submit
+// the same `quality=high` so the backend routes to the HQ pipeline; the
+// resolution distinction is the only difference. Skips setQuality() —
+// that helper would re-derive width/height from QUALITY_PRESETS.high and
+// stomp our 736×416 / 1024×576 character-specific values.
+function _setCharacterQuality(btn) {
+  if (!btn) return;
+  const group = document.getElementById('qualityGroupCharacter');
+  if (group) {
+    group.querySelectorAll('.char-quality').forEach(b =>
+      b.classList.toggle('active', b === btn));
+  }
+  const qInp = document.getElementById('quality');
+  const wInp = document.getElementById('width');
+  const hInp = document.getElementById('height');
+  const aspect = document.getElementById('aspect');
+  const w = parseInt(btn.dataset.width || '1024', 10);
+  const h = parseInt(btn.dataset.height || '576', 10);
+  if (qInp) qInp.value = 'high';
+  // Honor the orientation chip — swap w/h for vertical renders.
+  const vertical = aspect && aspect.value === 'vertical';
+  if (wInp) wInp.value = vertical ? h : w;
+  if (hInp) hInp.value = vertical ? w : h;
+  if (typeof setUpscale === 'function') {
+    try { setUpscale('fit_720p'); } catch (_) {}
+  }
+  if (typeof updateCustomizeSummary === 'function') {
+    try { updateCustomizeSummary(); } catch (_) {}
+  }
+}
+
+// Wire the char-quality chip clicks once at boot. Idempotent — the
+// `data-wired` flag prevents double-binding on re-render.
+function _wireCharacterQualityChips() {
+  const group = document.getElementById('qualityGroupCharacter');
+  if (!group || group.dataset.wired === '1') return;
+  group.dataset.wired = '1';
+  group.querySelectorAll('.char-quality').forEach(b => {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      _setCharacterQuality(b);
+    });
+  });
 }
 
 // ====== CivitAI modal ======
@@ -24050,15 +24167,25 @@ async function civitaiInstall(btn, item) {
 document.addEventListener('DOMContentLoaded', () => {
   refreshLoras();
   // Manual-tab Characters picker — load the list once at boot so the
-  // chips are visible immediately when the user opens the section. The
-  // Characters TAB has its own initializer (charactersInit); both read
-  // from /characters so they stay in sync.
+  // chips are visible immediately when the user opens the section.
+  // (The Characters tab UI is no longer reachable from the nav as of
+  // 2026-05-17 — chip strip in Manual is the only character surface.)
   if (typeof refreshManualCharacters === 'function') {
     try { refreshManualCharacters(); } catch (e) {}
   }
   // Apply initial picker visibility (T2V only) based on the default mode.
   if (typeof _updateCharsPickerVisibility === 'function') {
     try { _updateCharsPickerVisibility(currentMode || 't2v'); } catch (e) {}
+  }
+  // Bind the Q8 Draft / Q8 Pro chip clicks for the character-only
+  // quality strip. Idempotent.
+  if (typeof _wireCharacterQualityChips === 'function') {
+    try { _wireCharacterQualityChips(); } catch (e) {}
+  }
+  // Apply correct quality-strip visibility based on whether a character
+  // is already selected (e.g. restored from sidecar / Load Params).
+  if (typeof _applyCharacterQualityStripVisibility === 'function') {
+    try { _applyCharacterQualityStripVisibility(); } catch (e) {}
   }
 });
 
