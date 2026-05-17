@@ -6872,6 +6872,61 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/loras/download":
+            # Stream a user-installed LoRA back to the browser with
+            # Content-Disposition: attachment so the browser pops the save
+            # dialog instead of trying to render the safetensors bytes.
+            # Use case (Salo 2026-05-17): users want to back up NSFW or
+            # personal LoRAs before deleting them from the panel, or move
+            # them to another machine. Path must resolve under the loras
+            # dir and end in .safetensors — same bounds the /loras/delete
+            # POST enforces.
+            qs = parse_qs(parsed.query)
+            try:
+                lp = Path(qs.get("path", [""])[0]).resolve()
+            except Exception:
+                self.send_error(400); return
+            try:
+                base = _safe_loras_dir().resolve()
+            except OSError:
+                self.send_error(500); return
+            if not lp.is_relative_to(base) or not lp.is_file():
+                self.send_error(404); return
+            if lp.suffix.lower() != ".safetensors":
+                self.send_error(400); return
+            try:
+                size = lp.stat().st_size
+            except OSError:
+                self.send_error(404); return
+            # Filename for the Content-Disposition header — keep it ASCII-safe
+            # since the header doesn't survive non-ASCII without RFC 5987
+            # encoding, which most browsers handle but adds noise. The on-disk
+            # name is already URL-safe by virtue of having been written by
+            # us or by CivitAI's slugified filenames.
+            safe_name = lp.name.replace('"', '')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{safe_name}"',
+            )
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            # Stream in 1 MiB chunks so we don't blow RAM on a multi-GB LoRA.
+            CHUNK = 1024 * 1024
+            with lp.open("rb") as fh:
+                while True:
+                    buf = fh.read(CHUNK)
+                    if not buf:
+                        break
+                    try:
+                        self.wfile.write(buf)
+                    except (BrokenPipeError, ConnectionResetError):
+                        # Client closed mid-download — fine, nothing to clean up.
+                        return
+            return
+
         # ====== Characters — discover paired face+audio LoRA bundles =====
         # Each bundle becomes a card in the Characters tab. The user picks
         # a card, types the scene body, picks framing/duration/quality —
@@ -8657,17 +8712,107 @@ class Handler(BaseHTTPRequestHandler):
                 trash_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
                 self._json({"error": f"trash dir unavailable: {e}"}, 500); return
-            # Find related sidecars next to the media: <stem>.<media>.json
-            # is the canonical sidecar shape; also try plain <stem>.json
-            # because older flows wrote that. Dedupe before moving.
-            seen = set()
-            candidates = []
-            for cand in [_resolved, Path(str(_resolved) + ".json"),
-                         _resolved.with_suffix(".json")]:
+
+            # Gather every file that belongs to this clip — not just the one
+            # the user clicked. After an upscale pass, the panel produces a
+            # `<base>_720p.mp4` (the user-visible card) AND keeps the native
+            # `<base>.mp4` on disk but hidden from the gallery (see the
+            # `set_hidden(str(native_target), True)` in the upscale path).
+            # The old delete code only moved the clicked file's stem +
+            # sidecars, so the hidden native variant got orphaned in
+            # mlx_outputs/ forever. Now we collect every companion file we
+            # can find via:
+            #   (a) sidecar JSON of the clicked file (raw_output /
+            #       native_output / output / upscaled_output fields),
+            #   (b) filename heuristic — strip the known upscale-suffix
+            #       (`_720p`, `_v720p`, `_up2x`) from the stem to get the
+            #       raw, and append each suffix to get any companion
+            #       upscaled file that exists.
+            # Each candidate's matching sidecars (`<full>.json` and
+            # `<stem>.json`) come along too.
+            UPSCALE_TAGS = ("720p", "v720p", "up2x")
+
+            def _add(seen: set, candidates: list, cand: Path) -> None:
                 key = str(cand)
-                if key in seen: continue
+                if key in seen:
+                    return
                 seen.add(key)
-                if cand.is_file(): candidates.append(cand)
+                if cand.is_file():
+                    candidates.append(cand)
+
+            def _expand_for_media(media_path: Path,
+                                  seen: set, candidates: list) -> None:
+                # The media file itself.
+                _add(seen, candidates, media_path)
+                # Sidecars next to it: <stem>.<ext>.json (canonical) and
+                # <stem>.json (older shape).
+                _add(seen, candidates, Path(str(media_path) + ".json"))
+                _add(seen, candidates, media_path.with_suffix(".json"))
+
+            def _base_stem(stem: str) -> str:
+                # If this stem ends with `_720p` / `_v720p` / `_up2x`,
+                # return the bare base; else return the stem unchanged.
+                for tag in UPSCALE_TAGS:
+                    suf = f"_{tag}"
+                    if stem.endswith(suf):
+                        return stem[: -len(suf)]
+                return stem
+
+            seen: set = set()
+            candidates: list = []
+
+            # (a) sidecar-driven expansion. Read the sidecar of the clicked
+            # file (if present) and pull every path field that points at a
+            # mp4. Restrict to files under OUTPUT/UPLOADS so a tampered
+            # sidecar can't trick us into trashing arbitrary files.
+            roots = []
+            try:
+                roots = [OUTPUT.resolve(), UPLOADS.resolve()]
+            except OSError:
+                roots = []
+            for sc_cand in (Path(str(_resolved) + ".json"),
+                            _resolved.with_suffix(".json")):
+                if not sc_cand.is_file():
+                    continue
+                try:
+                    meta = json.loads(sc_cand.read_text())
+                except Exception:
+                    continue
+                for fld in ("output", "raw_output", "native_output",
+                            "upscaled_output"):
+                    v = meta.get(fld)
+                    if not v:
+                        continue
+                    try:
+                        p_resolved = Path(str(v)).resolve()
+                    except OSError:
+                        continue
+                    if not any(p_resolved.is_relative_to(r) for r in roots):
+                        continue
+                    _expand_for_media(p_resolved, seen, candidates)
+
+            # (b) filename-pattern expansion. Always include the clicked
+            # file. Then derive base + every known upscale suffix and add
+            # whichever variants exist on disk. This catches the case where
+            # the sidecar is missing or stale.
+            _expand_for_media(_resolved, seen, candidates)
+            stem = _resolved.stem
+            ext = _resolved.suffix  # ".mp4"
+            parent = _resolved.parent
+            base = _base_stem(stem)
+            # Raw / native: <base><ext>
+            _expand_for_media(parent / f"{base}{ext}", seen, candidates)
+            # Upscaled siblings: <base>_<tag><ext> for each tag
+            for tag in UPSCALE_TAGS:
+                _expand_for_media(parent / f"{base}_{tag}{ext}",
+                                  seen, candidates)
+
+            # Refuse to do nothing — if for some reason the clicked file
+            # wasn't is_file() at expansion time, surface that instead of
+            # silently 200ing with an empty trashed list.
+            if not candidates:
+                self._json({"error": "no files to delete"}, 404); return
+
             trashed = []
             ts = time.strftime("%Y%m%d-%H%M%S")
             for c in candidates:
@@ -8679,9 +8824,12 @@ class Handler(BaseHTTPRequestHandler):
                     trashed.append(str(dest))
                 except OSError as e:
                     self._json({"error": f"move to Trash failed: {e}"}, 500); return
-            # Also drop from HIDDEN_PATHS if it was hidden (so we don't
-            # leak orphan entries into panel_hidden.json).
-            set_hidden(str(_resolved), False)
+            # Drop every trashed-original from HIDDEN_PATHS so we don't
+            # leak orphan entries into panel_hidden.json. The native
+            # variant was hidden by the upscale path; the upscaled one
+            # might also have been hidden if the user toggled it.
+            for c in candidates:
+                set_hidden(str(c), False)
             self._json({"ok": True, "trashed": trashed})
             return
 
@@ -8897,6 +9045,54 @@ class Handler(BaseHTTPRequestHandler):
                 if sidecar.exists():
                     sidecar.unlink()
                 self._json({"ok": True, "removed": str(p)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            return
+
+        if path == "/loras/rename":
+            # Update the display name of a user-installed LoRA. We only
+            # touch the sidecar JSON's `name` field — the .safetensors
+            # filename is left alone so any saved job that references the
+            # old path keeps working. Creates a minimal sidecar if one
+            # doesn't exist yet (e.g. for hand-dropped .safetensors files
+            # that have no metadata).
+            target = form.get("path", [""])[0] or form.get("path", "")
+            if isinstance(target, list): target = target[0] if target else ""
+            new_name = form.get("name", [""])[0] or form.get("name", "")
+            if isinstance(new_name, list): new_name = new_name[0] if new_name else ""
+            new_name = str(new_name).strip()
+            if not new_name:
+                self._json({"ok": False, "error": "name is required"}, 400)
+                return
+            # Cap length — UI shows ~30 chars before truncating, 120 leaves
+            # plenty of room for descriptive renames without inviting abuse.
+            if len(new_name) > 120:
+                self._json({"ok": False, "error": "name too long (max 120 chars)"}, 400)
+                return
+            try:
+                p = Path(target).resolve()
+                base = _safe_loras_dir().resolve()
+                if not p.is_relative_to(base) or not p.is_file():
+                    raise RuntimeError("path not inside loras dir")
+                if p.suffix.lower() != ".safetensors":
+                    raise RuntimeError("not a safetensors file")
+                sidecar = p.with_suffix(".json")
+                # Read existing sidecar (merge-update) or start fresh.
+                payload: dict = {}
+                if sidecar.exists():
+                    try:
+                        payload = json.loads(sidecar.read_text()) or {}
+                        if not isinstance(payload, dict):
+                            payload = {}
+                    except Exception:
+                        # Bad JSON on disk — overwrite rather than refuse
+                        # the rename. The user clearly wants this LoRA to
+                        # have a clean name; a corrupt sidecar shouldn't
+                        # block that.
+                        payload = {}
+                payload["name"] = new_name
+                atomic_write_text(sidecar, json.dumps(payload, indent=2))
+                self._json({"ok": True, "name": new_name, "path": str(p)})
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, 400)
             return
@@ -13375,6 +13571,22 @@ HTML = r"""<!doctype html>
     }
     .lora-row .lora-icon-btn.danger:hover {
       color: #ff8a8a; border-color: rgba(220,80,80,0.5);
+    }
+    /* Inline-rename input — sits inside .lora-name when the user clicks
+       the pencil icon. Borrows the row's typography so the swap doesn't
+       jump the layout. Accent ring + transparent background read as
+       "editable text", not "form field". */
+    .lora-row .lora-name input.lora-name-edit {
+      font: inherit;
+      color: var(--text);
+      background: rgba(47,129,247,0.08);
+      border: 1px solid var(--accent-bright, #58a6ff);
+      border-radius: 4px;
+      padding: 1px 6px;
+      margin: -2px 0;
+      width: min(220px, 100%);
+      outline: none;
+      box-shadow: 0 0 0 2px rgba(47,129,247,0.12);
     }
     /* Expanded section (visible only on active rows) — strength slider
        + trigger chips. Shows below the main row. */
@@ -22071,8 +22283,17 @@ function loraRowHtml(r, modeTag) {
   const trigSummary = trigs.length
     ? trigs.slice(0, 4).join(' · ') + (trigs.length > 4 ? ` +${trigs.length - 4}` : '')
     : 'no trigger word';
-  // Corner actions — link to civitai page + delete (or remove for HF/remote).
+  // Corner actions: rename → download → external link → delete.
+  // Order is safe-first, destructive-last so users don't fat-finger the X.
+  // Rename + download are local-only (need an on-disk file), so they're
+  // gated to `user` / `trained` rows; remote (HF) rows skip them.
   const corner = [];
+  if (r.kind === 'user' || r.kind === 'trained') {
+    corner.push(`<button class="lora-icon-btn" type="button" title="Rename (display name only — filename stays the same)"
+                         onclick="event.stopPropagation(); renameLora(${pathAttr}, ${nameAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-pencil-simple"/></svg></button>`);
+    corner.push(`<button class="lora-icon-btn" type="button" title="Download the .safetensors file"
+                         onclick="event.stopPropagation(); downloadLora(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg></button>`);
+  }
   if (r.civitai_url) {
     corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-square-out"/></svg></a>`);
   }
@@ -22171,6 +22392,87 @@ function appendTriggerToPrompt(word) {
   }
   ta.focus();
   ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// Inline rename. Click the pencil icon → the LoRA's name turns into an
+// <input> prefilled with the current name. Enter / blur commits, Escape
+// cancels. Only the sidecar's display-name changes — the .safetensors
+// filename is left alone so anything that references the on-disk path
+// (saved job sidecars, persisted picker selection, etc.) keeps working.
+async function renameLora(path, currentName) {
+  const row = document.querySelector(`.lora-row[data-path="${CSS.escape(path)}"]`);
+  const nameEl = row && row.querySelector('.lora-name');
+  if (!nameEl || nameEl.dataset.editing === '1') return;
+  nameEl.dataset.editing = '1';
+  // Save the rendered HTML (name + badges) so Escape / failure can restore
+  // it byte-for-byte. The badge cluster (HF, Trained, ? unknown-family etc.)
+  // is part of nameEl — preserving the full innerHTML is simpler than
+  // re-rendering it manually.
+  const original = nameEl.innerHTML;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentName || '';
+  input.maxLength = 120;
+  input.className = 'lora-name-edit';
+  input.onclick = (e) => e.stopPropagation();
+  nameEl.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = () => { delete nameEl.dataset.editing; done = true; };
+  const cancel = () => {
+    if (done) return;
+    nameEl.innerHTML = original;
+    finish();
+  };
+  const commit = async () => {
+    if (done) return;
+    const newName = input.value.trim();
+    if (!newName || newName === currentName) { cancel(); return; }
+    finish();  // mark done BEFORE the async hop so blur can't re-fire commit
+    const fd = new FormData();
+    fd.set('path', path);
+    fd.set('name', newName);
+    try {
+      const r = await fetch('/loras/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams(fd),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        nameEl.innerHTML = original;
+        alert('Rename failed: ' + (data.error || `HTTP ${r.status}`));
+        return;
+      }
+      refreshLoras();
+    } catch (e) {
+      nameEl.innerHTML = original;
+      alert('Rename failed: ' + (e.message || e));
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); input.blur(); }
+  });
+  input.addEventListener('blur', commit);
+}
+
+// Trigger the browser's native download dialog for a LoRA's .safetensors.
+// The /loras/download endpoint sets Content-Disposition: attachment so the
+// browser pops Save instead of navigating to the bytes. We use a temp <a>
+// rather than window.location.href to avoid creating a navigation history
+// entry; the `download` attr is a belt-and-braces fallback for the
+// disposition header.
+function downloadLora(path) {
+  const a = document.createElement('a');
+  a.href = '/loras/download?path=' + encodeURIComponent(path);
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 async function deleteLora(path, name) {
