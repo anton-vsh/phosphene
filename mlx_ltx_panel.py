@@ -4062,6 +4062,42 @@ def _new_job_id() -> str:
     return f"j-{int(time.time()*1000):x}-{n:03d}"
 
 
+def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> str | None:
+    """Defense-in-depth: when a character_id is set, the job must route
+    through the Q8 HQ pipeline (quality=high). Q4 distilled inference
+    fuses dev-trained character LoRAs into the wrong base (mismatched
+    sigma schedule) and produces a generic-everyone-looks-vaguely-like
+    -them result — confirmed empirically 2026-05-17 with the Eltrumpo
+    Q4-Balanced runs.
+
+    The UI already prevents the bad combination by swapping the quality
+    strip to Q8-only when a character chip is selected, but a stale
+    form payload, a scripted /queue/batch caller, or a future tab that
+    forgets the chip-swap logic could submit the broken combo. Returning
+    an error keeps the trainer-base contract honest at the API boundary.
+
+    Returns None when valid, or an error string to surface as a 400."""
+    def _f(name: str, default: str = "") -> str:
+        v = form.get(name, default)
+        if isinstance(v, list):
+            v = v[0] if v else default
+        return (v or "").strip()
+    cid = _f("character_id", "")
+    if not cid:
+        return None  # no character; nothing to validate
+    quality = _f("quality", "balanced").lower()
+    if quality != "high":
+        return (
+            f"character {cid!r} requires quality=high (Q8 HQ pipeline). "
+            f"Got quality={quality!r}. Character LoRAs are trained against "
+            f"the Q8 dev transformer's sigma schedule; the Q4 distilled "
+            f"pipeline fuses them into the wrong base and produces "
+            f"identity-mushed output. Pick Q8 Pro or Q8 Draft in the "
+            f"Character quality strip."
+        )
+    return None
+
+
 def make_job(form: dict[str, list[str]] | dict[str, str], *,
              override_prompt: str | None = None) -> dict:
     def f(name: str, default: str = "") -> str:
@@ -8504,6 +8540,9 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(body)
 
         if path in ("/run", "/queue/add"):
+            err = _validate_character_quality(form)
+            if err:
+                self._json({"error": err}, 400); return
             job = make_job(form)
             with QUEUE_COND:
                 STATE["queue"].append(job)
@@ -9144,6 +9183,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/queue/batch":
+            err = _validate_character_quality(form)
+            if err:
+                self._json({"error": err}, 400); return
             raw = (form.get("prompts", [""])[0] or "").strip()
             if not raw:
                 self._json({"error": "no prompts"}, 400); return
