@@ -7588,7 +7588,39 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404); return
             sidecar = path.with_suffix(path.suffix + ".json")
             if not sidecar.exists():
-                self.send_error(404); return
+                # Companion fallback: after an upscale pass the panel writes
+                # the sidecar next to the `<base>_<tag>.mp4` (visible card),
+                # NOT next to the raw `<base>.mp4`. If the user clicks Load
+                # Params on the raw — which is still in the gallery as a
+                # second card — the direct lookup 404s even though a real
+                # sidecar exists on the upscaled sibling.
+                # Walk the same family the /output/delete code walks:
+                # strip / append known upscale tags + check whichever
+                # variant has a `.json`. Bounded to the same OUTPUT/
+                # UPLOADS roots so this can't be tricked into leaking
+                # arbitrary `.json` files.
+                UPSCALE_TAGS = ("720p", "v720p", "up2x")
+                stem = path.stem
+                ext = path.suffix
+                parent = path.parent
+                base = stem
+                for tag in UPSCALE_TAGS:
+                    suf = f"_{tag}"
+                    if base.endswith(suf):
+                        base = base[: -len(suf)]
+                        break
+                candidates = [parent / f"{base}{ext}.json"]
+                for tag in UPSCALE_TAGS:
+                    candidates.append(parent / f"{base}_{tag}{ext}.json")
+                companion = next(
+                    (c for c in candidates
+                     if c.is_file()
+                     and any(c.resolve().is_relative_to(r) for r in roots)),
+                    None,
+                )
+                if companion is None:
+                    self.send_error(404); return
+                sidecar = companion
             self._ok(sidecar.read_bytes(), "application/json")
             return
 
