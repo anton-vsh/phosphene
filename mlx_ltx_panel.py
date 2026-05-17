@@ -11462,6 +11462,19 @@ HTML = r"""<!doctype html>
     body[data-workflow="characters"] #studioSection { display: none !important; }
     body[data-workflow="characters"] #charactersSection { display: block; }
 
+    /* Studio is a top-level workflow tab (was a mode chip inside Manual
+       until 2026-05-17). Hide the Manual chrome — mode strip, video
+       form, models card — so the form-pane is dedicated to Studio.
+       #studioSection's own `show` class is toggled by setMode('image')
+       which workflowSwitch calls when entering this branch. */
+    body[data-workflow="studio"] #modelsInline,
+    body[data-workflow="studio"] #modeGroup,
+    body[data-workflow="studio"] aside.form-pane > h2,
+    body[data-workflow="studio"] #genForm,
+    body[data-workflow="studio"] #trainSection,
+    body[data-workflow="studio"] #charactersSection { display: none !important; }
+    body[data-workflow="studio"] #studioSection { display: block; }
+
     /* ============================================================
        Train Character pane (.train-pane) — same chrome as the
        studio + video form-pane composers. Section labels are h2
@@ -15572,7 +15585,7 @@ HTML = r"""<!doctype html>
          localStorage so the user lands on the same tab next session. -->
     <nav class="workflow-tabs" id="workflowTabs">
       <button data-workflow="manual" class="active">Manual</button>
-      <button data-workflow="characters">Characters<span class="new-badge">NEW</span></button>
+      <button data-workflow="studio">Studio<span class="new-badge">NEW</span></button>
       <button data-workflow="train">Train Character<span class="new-badge">NEW</span></button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
@@ -15614,10 +15627,13 @@ HTML = r"""<!doctype html>
       <button type="button" class="mode-chip pill-btn" data-mode="i2v">Image<span class="mc-sub sub">image + prompt</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
-      <button type="button" class="mode-chip pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2511 multi-ref + others)">Studio<span class="mc-sub sub">stills + library</span></button>
-      <!-- "Train" used to live here as a mode chip; it's been promoted to a
-           workflow tier (top tab strip, alongside Manual / Agentic Flows)
-           because training is a different category than rendering. -->
+      <!-- "Train" used to live here as a mode chip; promoted 2026-05-15 to
+           a workflow tier (top tab strip). "Studio" (image generation) also
+           lived here until 2026-05-17 — Salo flagged that mixing image gen
+           into the video mode strip didn't make sense, so it's been
+           promoted to its own workflow tab as well. setMode('image') is
+           still the entry point; workflowSwitch('studio') just calls it
+           after hiding the other panes. -->
     </div>
 
     <form id="genForm">
@@ -24508,24 +24524,30 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListene
 // prompt + ship), and Train (character LoRA training).
 
 function workflowSwitch(name) {
+  // 2026-05-17 — Characters is no longer its own top-level tab. The
+  // chip strip is integrated into Manual (T2V). If we get a stale
+  // 'characters' value from localStorage, snap to 'manual'.
+  if (name === 'characters') name = 'manual';
   document.querySelectorAll('#workflowTabs button[data-workflow]')
     .forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
   const manual = document.getElementById('genForm');
   const studio = document.getElementById('studioSection');
   const train = document.getElementById('trainSection');
-  const characters = document.getElementById('charactersSection');
+  const characters = document.getElementById('charactersSection');  // dead HTML; hide defensively
   // Set body data attribute so CSS can switch the layout per workflow.
   document.body.setAttribute('data-workflow', name);
-  // Studio is an inline pane inside form-pane — when leaving Manual it
-  // must hide too. Train and Characters are full-pane workflows that
-  // own their own section.
+  // All non-Manual panes start hidden; the active branch re-shows its own.
   if (studio) studio.classList.remove('show');
   if (train) train.classList.remove('show');
   if (characters) characters.classList.remove('show');
-  if (name === 'characters') {
+  if (name === 'studio') {
+    // Studio is its own top-level tab now (was a mode chip inside
+    // Manual). The setMode('image') logic still wires up the studio
+    // pane + portals the LoRA picker into the studio composer; just
+    // hide #genForm + show #studioSection on top of that.
     if (manual) manual.style.display = 'none';
-    if (characters) characters.classList.add('show');
-    if (typeof charactersInit === 'function') charactersInit();
+    if (studio) studio.classList.add('show');
+    if (typeof setMode === 'function') setMode('image');
   } else if (name === 'train') {
     // Train Character is its own workflow tier. Hide the manual render
     // form, show the train section, run its init.
@@ -24533,6 +24555,7 @@ function workflowSwitch(name) {
     if (train) train.classList.add('show');
     if (typeof trainInit === 'function') trainInit();
   } else {
+    // Manual — show the video form, restore the previous video mode.
     if (manual) manual.style.display = '';
   }
   try { localStorage.setItem('phos_workflow', name); } catch(e) {}
@@ -24546,7 +24569,9 @@ document.querySelectorAll('#workflowTabs button[data-workflow]').forEach(b => {
 // Initial workflow tab restore from localStorage.
 try {
   const saved = localStorage.getItem('phos_workflow');
-  if (saved === 'characters' || saved === 'train') {
+  // 2026-05-17 — Characters tab removed; 'characters' now snaps to
+  // 'manual' (workflowSwitch handles the alias). 'studio' is new.
+  if (saved === 'studio' || saved === 'train' || saved === 'characters') {
     workflowSwitch(saved);
   }
   // Clear any stale agent-fullscreen flag from the removed chat surface.
