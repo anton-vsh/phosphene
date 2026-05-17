@@ -24307,12 +24307,19 @@ function _applyCharacterQualityStripVisibility() {
     if (typeof setQuality === 'function') {
       try { setQuality('balanced'); } catch (_) {}
     }
-    // Reset the skip-step opt-in back to upstream conservative defaults
-    // when leaving character mode — non-character T2V renders haven't
-    // been validated against the contact-sheet quality bar, so the
-    // 12.6% wall-time win is character-only for now. _setSkipStepEnabled
-    // is the single source of truth for both inputs.
-    _setSkipStepEnabled(false);
+    // 2026-05-17 bug 1.1 (code-review caught): this branch USED to call
+    // _setSkipStepEnabled(false) here. That was destructive because:
+    //   * at boot, _updateCharsPickerVisibility('t2v') fires this else
+    //     branch (no character selected yet) — and the call clobbered
+    //     the HTML-default-active Fast pill BEFORE the user ever got
+    //     to Character mode. First character render then went out with
+    //     skip_step=0, missing the Codex 12.6% optimization.
+    //   * the HQ-speed pills in Customize are the source of truth for
+    //     skip-step now (Pass 6). The character mode cascade should
+    //     not be touching that state independently.
+    // Leaving skip-step where the user put it is the correct semantic:
+    // a user who picked "Fast" in HQ-speed before selecting a character
+    // gets Fast when they deselect that character too.
   }
 }
 
