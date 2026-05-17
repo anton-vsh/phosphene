@@ -16658,7 +16658,7 @@ HTML = r"""<!doctype html>
 
         <div class="train-voice-controls">
           <label class="train-voice-toggle" id="trainVoiceToggleWrap">
-            <input type="checkbox" id="trainVoiceToggle" disabled onchange="trainVoiceToggleChanged()">
+            <input type="checkbox" id="trainVoiceToggle" checked disabled onchange="trainVoiceToggleChanged()">
             <span class="train-voice-toggle-label">Train voice LoRA</span>
             <span class="train-voice-toggle-hint" id="trainVoiceToggleHint">upload a clip to enable</span>
           </label>
@@ -18086,10 +18086,18 @@ const TRAIN = {
               label: 'High',   subtitle: '~2 h 50 min · rank 32 · 5000 steps · 512px' },
   },
   // Voice (optional) state. `voiceFile` is the server-saved record once
-  // an upload completes; `voiceEnabled` mirrors the toggle. The audio
-  // step presets share the same chip pattern as the face presets.
+  // an upload completes; `voiceEnabled` mirrors the toggle.
+  //
+  // Default voiceEnabled = TRUE so the checkbox reads "audio LoRA: on"
+  // even before the user uploads a clip. The checkbox is still HTML-
+  // disabled until upload, so the user can't actually submit
+  // train_audio=true without a voice file — trainStart() gates on
+  // `voiceEnabled && voiceFile` (line ~19334), so this default is a
+  // visual signal ("we'll train audio if you give us a clip") rather
+  // than a behavioral trap. After upload the disabled flag flips off
+  // and the user can uncheck if they want face-only.
   voiceFile: null,           // {filename, path, size, audioUrl}
-  voiceEnabled: false,        // default OFF; auto-flips ON after upload
+  voiceEnabled: true,         // default ON visually; behaviorally gated on voiceFile
   voicePreset: 'standard',    // 'smoke' | 'standard' | 'long'
   voicePresets: {
     smoke:    { steps: 100, label: 'Smoke',    sub: '~7 min wall' },
