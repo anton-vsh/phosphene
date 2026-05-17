@@ -4289,6 +4289,29 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     _quality_choice = f("quality_choice", "")
     _full_prompt_override = f("full_prompt_override", "")
 
+    # Derive `frames` from `duration` when the caller didn't send frames
+    # explicitly. The Manual-tab JS does this client-side before POSTing
+    # (see trainUpdateEstimate / submitForm in mlx_ltx_panel.py JS), so
+    # the UI never hit this path — but `/queue/batch` accepts any form
+    # field set, and a curl/script submission that sends only
+    # `duration=10` would otherwise silently fall back to the 121-frame
+    # (5 s) default at line 4306. Salo hit this exact bug 2026-05-17
+    # batch-queuing 10 s + 15 s Eltrumpo clips. Now: if `duration` is
+    # present and `frames` isn't, compute frames at the 8k+1 cadence the
+    # trainer expects (LTX 2.x requires `frames % 8 == 1`).
+    _explicit_frames = f("frames", "")
+    if _duration_choice and not _explicit_frames:
+        try:
+            _dur_sec = float(_duration_choice)
+            if _dur_sec > 0:
+                _frames_default = str(_duration_to_8k_frames(_dur_sec, FPS))
+            else:
+                _frames_default = "121"
+        except (ValueError, TypeError):
+            _frames_default = "121"
+    else:
+        _frames_default = "121"
+
     job = {
         "id": _new_job_id(),
         "status": "queued",
@@ -4303,7 +4326,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "negative_prompt": f("negative_prompt", ""),
             "width": max(32, int(f("width", str(default_w)) or default_w)),
             "height": max(32, int(f("height", str(default_h)) or default_h)),
-            "frames": max(1, int(f("frames", "121") or 121)),
+            "frames": max(1, int(f("frames", _frames_default) or _frames_default)),
             "steps": max(1, int(f("steps", "8") or 8)),
             "seed": f("seed", "-1") or "-1",
             "image": f("image", str(REFERENCE)),
