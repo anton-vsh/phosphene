@@ -24,7 +24,7 @@ module.exports = {
         // but without this env the panel reads ~/.cache/huggingface/hub/
         // and reports the weights as missing — the "Qwen models
         // downloaded but engine reports not cached / 'mflux-generate-
-        // qwen-edit not found'" symptom Salo hit. Pinokio's global
+        // qwen-edit not found'" symptom Mr Bizarro hit. Pinokio's global
         // ENVIRONMENT file already sets HF_HOME=./cache/HF_HOME, but
         // shell.run replaces the env wholesale — we have to declare
         // it here for the panel to inherit it.

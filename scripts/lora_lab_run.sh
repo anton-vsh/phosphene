@@ -3,7 +3,7 @@
 # PYTHONPATH + ffmpeg PATH + LTX-2.3 GPU watchdog overrides, then execs
 # whatever command was passed.
 #
-# Was previously sourced from a separate lora-lab repo on Salo's dev
+# Was previously sourced from a separate lora-lab repo on Mr Bizarro's dev
 # machine; vendored into the panel tree 2026-05-17 so an installer-only
 # user gets training out of the box without cloning a second repo.
 #

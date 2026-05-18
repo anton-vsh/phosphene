@@ -1,6 +1,6 @@
 # Phosphene 3.0 launch thread — draft
 
-Twelve tweets. Each ≤ 280 chars. Bracketed `[MEDIA]` notes mark where Salo plugs a clip or screencast. Before/after framing per Salo's brief — everything claimed here is verified against the panel as it ships.
+Twelve tweets. Each ≤ 280 chars. Bracketed `[MEDIA]` notes mark where Mr Bizarro plugs a clip or screencast. Before/after framing per Mr Bizarro's brief — everything claimed here is verified against the panel as it ships.
 
 The thread should run on `@PhospheneAI` (and optionally cross-posted to `@AIBizarrothe`).
 

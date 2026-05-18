@@ -2,7 +2,7 @@
 
 cocktailpeanut offered to feature + post Phosphene from the Pinokio account
 once a fresh-install test passes. These are draft posts in HIS voice (not
-Salo's — Salo's hero thread lives in 02_twitter.md). Pick one or let him
+Mr Bizarro's — Mr Bizarro's hero thread lives in 02_twitter.md). Pick one or let him
 pick.
 
 Attach the X-encoded hero video (`assets/phosphene_hero_x.mp4` after first
@@ -57,7 +57,7 @@ wants the post to feel official-Pinokio rather than personal-cocktailpeanut.
 
 ## Asset to attach
 
-`assets/phosphene_hero_x.mp4` — once Salo lands one good 5-sec generation
+`assets/phosphene_hero_x.mp4` — once Mr Bizarro lands one good 5-sec generation
 from his M4 Mac Studio, re-encode with the X-compatible recipe (yuv420p,
 8 Mbps, faststart) and send him the file.
 
@@ -68,9 +68,9 @@ differentiator only lands when people *hear* it.
 
 ## Coordination plan
 
-1. Salo posts his own hero thread first (02_twitter.md → Variant C "Happy to
+1. Mr Bizarro posts his own hero thread first (02_twitter.md → Variant C "Happy to
    share something I've been building").
 2. cocktailpeanut quote-tweets it from @cocktailpeanut OR posts one of A/B/C
-   from the Pinokio account, with a quote-tweet to Salo's thread underneath.
+   from the Pinokio account, with a quote-tweet to Mr Bizarro's thread underneath.
 3. Both posts pinned for two weeks. Local-AI Twitter discovers things on a
    delay.

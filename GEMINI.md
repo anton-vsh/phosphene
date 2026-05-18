@@ -103,7 +103,7 @@ shared Pinokio fs.link drive so weights aren't duplicated and outputs
 land in one gallery regardless of which panel rendered them.
 
 When a session starts: `git checkout dev` in the dev clone, work, push.
-Promote to main only when Salo gives the explicit green light. See §7.
+Promote to main only when Mr Bizarro gives the explicit green light. See §7.
 
 ---
 
@@ -285,10 +285,10 @@ new patch versions without a venv rebuild — used when we added
 
 **TL;DR for agents — non-negotiable:**
 
-> **Push every commit to `dev`. Never push to `main` unless Salo
+> **Push every commit to `dev`. Never push to `main` unless Mr Bizarro
 > explicitly says "push to main" / "ship to production" / "merge to
 > main".** "It works on my machine" is not permission. "The tests
-> pass" is not permission. Salo has a Phosphene Dev panel in his
+> pass" is not permission. Mr Bizarro has a Phosphene Dev panel in his
 > Pinokio that pulls from `dev`; he tests there, then tells you when
 > to promote.
 
@@ -305,9 +305,9 @@ The why:
   1. Default to working on `dev`. `git checkout dev` at the start of
      any session that touches Phosphene; if you're on `main`, switch.
   2. Commit + push to `origin/dev` whenever a logical change is done.
-  3. **Stop there.** Tell Salo it's on dev. Wait for explicit
+  3. **Stop there.** Tell Mr Bizarro it's on dev. Wait for explicit
      instruction to promote.
-  4. When Salo says push to main: `git checkout main && git merge dev
+  4. When Mr Bizarro says push to main: `git checkout main && git merge dev
      --ff-only && git push origin main`. Then `git checkout dev` so
      subsequent work continues on dev.
   5. If a fast-forward isn't possible (rare — usually a hotfix landed
@@ -321,7 +321,7 @@ The why:
 - The dev panel symlinks `mlx_models/` from the production install
   (saves ~36 GB of duplicate weights). State / outputs / uploads stay
   separate per panel.
-- Hotfixes bypassing dev — only allowed when Salo explicitly authorises
+- Hotfixes bypassing dev — only allowed when Mr Bizarro explicitly authorises
   ("hotfix straight to main" or similar). Otherwise, even one-line
   fixes go via dev → tested in Phosphene Dev panel → merged.
 

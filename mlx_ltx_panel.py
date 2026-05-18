@@ -1589,7 +1589,7 @@ def _character_dataset_image(trigger: str) -> Path | None:
          successful face training (copies the first training image).
          New characters created via the Train tab end up here.
       2. lora-lab/dataset_<stem>_v2/images/<trigger>_001.png — the
-         lora-lab convention Salo set up manually for ariatrn / bizarrotrn
+         lora-lab convention Mr Bizarro set up manually for ariatrn / bizarrotrn
          pre-Train-tab automation. <stem> = trigger with trailing 'trn'
          stripped (ariatrn → aria).
       3. lora-lab/dataset_<stem>*/images/<trigger>_*.png — any glob match
@@ -1865,7 +1865,7 @@ def list_styles() -> list[dict]:
 # Duration in seconds → frames the LTX 2.3 pipeline accepts. The
 # constraint is `frames % 8 == 1`; 121 / 169 / 241 / 361 satisfy that and
 # correspond to 5s / 7s / 10s / 15s at 24 fps. 15s pushes the helper
-# past its usual sweet spot but works fine — Salo measured 9.5min for
+# past its usual sweet spot but works fine — Mr Bizarro measured 9.5min for
 # 10s/241f on Q8 HQ, so 15s/361f extrapolates to ~14min.
 _CHARACTER_DURATION_FRAMES = {
     "5s": 121,
@@ -1875,7 +1875,7 @@ _CHARACTER_DURATION_FRAMES = {
 }
 
 # Quality-to-resolution map for the Characters tab. Nothing else.
-# 2026-05-16 — Salo's call: stop translating the user's request through
+# 2026-05-16 — Mr Bizarro's call: stop translating the user's request through
 # a 25-field "locked recipe" composer. The Characters endpoint is now a
 # thin wrapper around /queue/add that uses identical defaults; the only
 # things the tab adds are the LoRA stack lookup and the duration→frames
@@ -3346,7 +3346,7 @@ def plan_memory_policy(frames: int, *, mode: str, quality: str) -> dict:
     # frames 0..max_full and STREAMED decode for frames max_full+1..end,
     # joining them at the seam. The two paths produce slightly different
     # latent->pixel mappings → visible stretch/stitch artifacts at the
-    # boundary frame. Salo's 2026-05-15 diagnosis: gen #18/#20 (clean,
+    # boundary frame. Mr Bizarro's 2026-05-15 diagnosis: gen #18/#20 (clean,
     # 7s/169f, safe policy, max_full=0) vs panel 19:52 (artifacts, same
     # 169f but Comfortable tier picked max_full=121 → seam at frame 121).
     # Force safe (max_full=0, all streamed) when the requested frame
@@ -4069,7 +4069,7 @@ def stop_current_job(timeout: float = 5.0) -> None:
     # Training subprocess (lora_lab.train_character + lora_lab.train_audio)
     # lives in its own session/pgid (start_new_session=True on both
     # Popens). Without this, /stop only killed HELPER + mux ffmpeg and the
-    # trainer kept running for hours, blocking the worker — Salo had to
+    # trainer kept running for hours, blocking the worker — Mr Bizarro had to
     # SIGKILL by hand from the terminal. SIGTERM is enough on macOS — MLX
     # gives up cleanly when the GPU command queue is dropped — but we
     # follow up with SIGKILL after a short grace period if the trainer
@@ -4215,7 +4215,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         #                 square. Captures wide-shot / long-shot proportions
         #                 the center-crop path destroys, at the cost of
         #                 ~30% pixel-budget waste on bars for non-square
-        #                 sources. Salo flagged 2026-05-17: medium-long
+        #                 sources. Mr Bizarro flagged 2026-05-17: medium-long
         #                 shots from center-crop-trained LoRAs come out
         #                 blurry because the model never saw those
         #                 proportions during training.
@@ -4396,7 +4396,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # the UI never hit this path — but `/queue/batch` accepts any form
     # field set, and a curl/script submission that sends only
     # `duration=10` would otherwise silently fall back to the 121-frame
-    # (5 s) default at line 4306. Salo hit this exact bug 2026-05-17
+    # (5 s) default at line 4306. Mr Bizarro hit this exact bug 2026-05-17
     # batch-queuing 10 s + 15 s Eltrumpo clips. Now: if `duration` is
     # present and `frames` isn't, compute frames at the 8k+1 cadence the
     # trainer expects (LTX 2.x requires `frames % 8 == 1`).
@@ -5323,7 +5323,7 @@ def run_train_job_inner(job: dict) -> None:
         avatar_dir.mkdir(parents=True, exist_ok=True)
         first_img = image_files[0]
         avatar_dst = avatar_dir / f"avatar{first_img.suffix.lower()}"
-        # Only write if missing or stale — don't clobber a Salo-curated avatar.
+        # Only write if missing or stale — don't clobber a Mr Bizarro-curated avatar.
         if (not avatar_dst.is_file()
                 or first_img.stat().st_mtime > avatar_dst.stat().st_mtime):
             avatar_dst.write_bytes(first_img.read_bytes())
@@ -5957,7 +5957,7 @@ def run_job_inner(job: dict) -> None:
     # teacache=2.0) delivers ~5 min wall at 1024×576 121f T2V — same wall as
     # Q4+upscale Balanced, but with the Q8 dev transformer driving the source
     # pixels. Quality eye-checked acceptable on dialog/close-up/medium content
-    # (the model's sweet spot per Salo's feedback).
+    # (the model's sweet spot per Mr Bizarro's feedback).
     #
     # Only the "standard" tier auto-routes: on "high"/"pro" tiers the Q4
     # Balanced is genuinely faster (~3 min on 96 GB), so substituting Q8 Fast
@@ -5992,7 +5992,7 @@ def run_job_inner(job: dict) -> None:
         )
         quality = "high"  # reuses the existing Q8 HQ dispatch
         # Q8 Fast knobs: stage1=10 (cut from 15) is the safe_a denoise win,
-        # stage2=3 is unchanged (cuts here are a quality cliff per Salo's
+        # stage2=3 is unchanged (cuts here are a quality cliff per Mr Bizarro's
         # eye-check), teacache=1.0 keeps us inside the calibrated TeaCache
         # zone — the source comment at ti2vid_two_stages_hq.py:42-45 says
         # 1.0 is the sweet spot (~52% skip, ~2x stage-1 speedup).
@@ -6799,7 +6799,7 @@ def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineCon
 def _descriptive_filename(label: str, prompt: str, *, fallback: str) -> str:
     """Build a descriptive output stem from the user-set label or prompt.
 
-    Salo: 'Additional videos should have the descriptive names instead of
+    Mr Bizarro: 'Additional videos should have the descriptive names instead of
     being mlx text to video resolution all that you can see on the
     information button.' The technical info (mode/quality/dimensions/
     frames/timestamp) lives in the sidecar JSON next to every mp4 and is
@@ -7427,7 +7427,7 @@ class Handler(BaseHTTPRequestHandler):
             # Stream a user-installed LoRA back to the browser with
             # Content-Disposition: attachment so the browser pops the save
             # dialog instead of trying to render the safetensors bytes.
-            # Use case (Salo 2026-05-17): users want to back up NSFW or
+            # Use case (Mr Bizarro 2026-05-17): users want to back up NSFW or
             # personal LoRAs before deleting them from the panel, or move
             # them to another machine. Path must resolve under the loras
             # dir and end in .safetensors — same bounds the /loras/delete
@@ -8216,7 +8216,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ====== Train Character — bulk ZIP dataset upload =================
-        # Salo's "Cinematron" workflow: drop a ZIP containing paired
+        # Mr Bizarro's "Cinematron" workflow: drop a ZIP containing paired
         # image_NNN.png + image_NNN.txt files, get a fully-staged dataset
         # back in one shot. Validates every entry against
         # TRAIN_BUNDLE_NAME_RE (basename only, no subdirs, no traversal),
@@ -8812,7 +8812,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ====== Characters — thin wrapper around /queue/add ================
-        # 2026-05-16 rewrite (Salo): the prior version translated the user's
+        # 2026-05-16 rewrite (Mr Bizarro): the prior version translated the user's
         # request through a 25-field "locked recipe" composer + an auto
         # negative_prompt to fight LoRA-baked artifacts. That made the
         # Characters tab path diverge from /queue/add and introduced its
@@ -8865,7 +8865,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "seed must be an integer"}, 400); return
 
             # Character LoRA strength (applied to BOTH face + audio LoRAs).
-            # Default 0.8: Aria/Bizarro/Salo v2 LoRAs were trained to 5000
+            # Default 0.8: Aria/Bizarro/Mr Bizarro v2 LoRAs were trained to 5000
             # steps (vs Lightricks-recommended 2000), so they over-bake
             # training-time visual quirks at strength 1.0. Dropping to 0.8
             # noticeably reduces sparkles/mesh without hurting identity.
@@ -10592,7 +10592,7 @@ def _resolve_cap_tier() -> str:
              dev transformer doesn't fit in RAM.
 
     `LTX_FORCE_CAP_TIER=q4|q8` overrides — useful for testing the Q4
-    surface on a high-RAM dev machine (Salo's M4 Max defaults to q8;
+    surface on a high-RAM dev machine (Mr Bizarro's M4 Max defaults to q8;
     `LTX_FORCE_CAP_TIER=q4 ./run.sh` reveals the low-RAM layout)."""
     override = (os.environ.get("LTX_FORCE_CAP_TIER", "") or "").strip().lower()
     if override in ("q4", "q8"):
@@ -10624,7 +10624,7 @@ def page() -> str:
         # window.PHOSPHENE_CAP_TIER for any runtime branches.
         "cap_tier": cap_tier,
     })
-    # Profile badge — only visible in the dev panel. Lets Salo tell at a
+    # Profile badge — only visible in the dev panel. Lets Mr Bizarro tell at a
     # glance which install he's looking at when both panels are open.
     profile_badge = (
         '<span class="profile-badge" title="Dev panel · pulls from `dev` branch · port '
@@ -10647,7 +10647,7 @@ HTML = r"""<!doctype html>
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
     :root {
-      /* Phosphene void = #00061a body. Salo flagged the panel reads
+      /* Phosphene void = #00061a body. Mr Bizarro flagged the panel reads
          "too dark, hard to fathom" — every surface above body bg was
          lifted noticeably so the eye actually catches the panel /
          input boundaries instead of squinting through the navy. New
@@ -10821,7 +10821,7 @@ HTML = r"""<!doctype html>
     }
     /* Reconnected — same banner, swapped to a calm success colorway,
        lingers for 3s after we come back online. Gives the user a
-       chance to actually READ what just happened (Salo flagged that
+       chance to actually READ what just happened (Mr Bizarro flagged that
        a too-fast disappear meant he could never see the message). */
     .panel-offline-banner.reconnected {
       background: rgba(8, 28, 14, 0.92);
@@ -11053,7 +11053,7 @@ HTML = r"""<!doctype html>
 
     /* ===== MAIN LAYOUT =====
        Two-column grid: a tight composer on the left, the stage (player
-       + carousel) absorbs the rest. Salo's call (2026-05-15): the
+       + carousel) absorbs the rest. Mr Bizarro's call (2026-05-15): the
        previous layout let the form spread to ~580-700px on a 1440p
        window, which letterboxed the video and left huge black margins.
        New cap is 420px on the left so the right side gets all the
@@ -13154,7 +13154,7 @@ HTML = r"""<!doctype html>
     /* The `display: grid` rule above wins specificity over the user-agent
        `[hidden] { display: none }` style, so my JS-set `hidden` attribute
        was being ignored and BOTH the default + character quality strips
-       showed at once (Salo screenshot 2026-05-17). Restore intent. */
+       showed at once (Mr Bizarro screenshot 2026-05-17). Restore intent. */
     .quality-strip[hidden] { display: none !important; }
     /* Character-quality strip has 2 chips, not 4 — distribute evenly. */
     #qualityGroupCharacter.quality-strip {
@@ -13305,7 +13305,7 @@ HTML = r"""<!doctype html>
          footer's pin position upward by exactly that amount, leaving
          a band of content (LoRA rows, Customize, etc.) RENDERED BELOW
          the footer in viewport — which is the "footer is in the
-         middle of the LoRA list" bug Salo flagged.
+         middle of the LoRA list" bug Mr Bizarro flagged.
          The breathing room the redesign agent intended is now
          provided by margin-top:16px on the footer itself + the natural
          end-of-scroll, not by padding on the scroll container. */
@@ -13578,7 +13578,7 @@ HTML = r"""<!doctype html>
     }
     /* Vertical-media variant (2026-05-18): for portrait clips the player
        surface shrinks to ~9:16 ratio and the action cluster's default
-       top-right anchor lands on top of the subject's head. Salo's call:
+       top-right anchor lands on top of the subject's head. Mr Bizarro's call:
        push the cluster into the empty stage-pane area to the RIGHT of
        the surface instead. Surface gets overflow:visible so the
        cluster can escape its bounds; the inner .player-wrap keeps its
@@ -13720,7 +13720,7 @@ HTML = r"""<!doctype html>
        History:
          · 36vh — ~2 full rows at 1080p, cramped the player
          · 20vh — ~1.3 rows, player breathed but carousel felt thin
-         · 26vh / minmax(160) — Salo 2026-05-15: tighter cards (one
+         · 26vh / minmax(160) — Mr Bizarro 2026-05-15: tighter cards (one
            more per row) + a peek of row 3. */
     .carousel {
       display: grid;
@@ -13791,7 +13791,7 @@ HTML = r"""<!doctype html>
        button + hover chrome ribbon) so they overlay the thumbnail
        only, not the filename caption underneath. Pre-wrap, the chrome
        at `bottom: 0` covered .info on hover and hid the filename;
-       Salo flagged this as the #1 carousel-card frustration. */
+       Mr Bizarro flagged this as the #1 carousel-card frustration. */
     .car-thumb-wrap {
       position: relative;
       width: 100%;
@@ -13853,7 +13853,7 @@ HTML = r"""<!doctype html>
     }
     /* Variants — Animate (photos only) is the primary; Delete is a
        compact icon chip with a NEUTRAL default (white-ghost) that only
-       turns red on hover. Pre-fix it was always-red, which Salo flagged
+       turns red on hover. Pre-fix it was always-red, which Mr Bizarro flagged
        as visually loud in the gallery's neutral grid. */
     .car-card .card-chrome .card-action-photo {
       flex: 1;
@@ -13878,7 +13878,7 @@ HTML = r"""<!doctype html>
     }
 
     /* Open-outputs-folder corner icon. Square 28×28 chip pinned to the
-       right edge of the carousel-head — Salo flagged that the previous
+       right edge of the carousel-head — Mr Bizarro flagged that the previous
        wide pill ("📁 Open folder") was eating row width for a low-
        frequency action. Icon-only, title attribute carries the label. */
     .carousel-head .open-folder-btn {
@@ -13901,7 +13901,7 @@ HTML = r"""<!doctype html>
       width: 14px; height: 14px;
     }
     /* Top-right info "i" — a clean white glyph on a transparent
-       backdrop. Salo flagged the prior pill (dark navy fill + heavy
+       backdrop. Mr Bizarro flagged the prior pill (dark navy fill + heavy
        border) as "ugly + intrusive". Now it's a thin outline icon in
        pure white at 60% opacity by default, surfacing to 100% on
        card-hover, with a faint dark scrim only on direct hover so the
@@ -14859,10 +14859,10 @@ HTML = r"""<!doctype html>
        + applied-note collapse into a one-line meta strip under the row.
        Scrolls horizontally when characters overflow.
 
-       Salo's brief: "either pops up from the prompt area, or small
+       Mr Bizarro's brief: "either pops up from the prompt area, or small
        pictures that don't take too much space, with an 'all' overflow
        for users with many characters." This is the second variant — if
-       Salo prefers the popover instead, the strip → trigger-button
+       Mr Bizarro prefers the popover instead, the strip → trigger-button
        refactor is a 10-line change. */
     #manualCharactersPickerSlot {
       margin: 6px 0 10px;
@@ -15732,7 +15732,7 @@ HTML = r"""<!doctype html>
     /* =========================================================
        LINEAR DESIGN PASS — final layer
        =========================================================
-       Direction picked by Salo on 2026-05-07. This block layers a
+       Direction picked by Mr Bizarro on 2026-05-07. This block layers a
        Linear-style refinement on top of the working panel: hairline
        borders, dense type, monospaced numerics, very subtle
        elevation, and a unified "chip" language across every header.
@@ -15740,7 +15740,7 @@ HTML = r"""<!doctype html>
        NO class renames — every existing JS handler still finds its
        targets.
 
-       Per Salo's feedback: workflow tabs are repositioned to the
+       Per Mr Bizarro's feedback: workflow tabs are repositioned to the
        top-left of the form-pane (instead of full-width centered),
        which keeps the existing user habit but reads cleaner. */
 
@@ -15771,7 +15771,7 @@ HTML = r"""<!doctype html>
     }
 
     /* === TOP HEADER ============================================
-       88px tall (was 62) — Salo flagged the chrome was reading too
+       88px tall (was 62) — Mr Bizarro flagged the chrome was reading too
        small and the brand was getting lost. Logo bumped 48 → 64,
        wordmark 22 → 28, plus a soft halo glow behind the mark so it
        lifts off the void. Second-round bump (2026-05-12) to chrome
@@ -15800,7 +15800,7 @@ HTML = r"""<!doctype html>
     body > header .brand img {
       /* Phosphene brand mark — concentric radiating dashes that go
          pink → magenta → cyan around a yellow core, on transparent
-         background. Provided by Salo (`phospene logo.png` 1254×1254
+         background. Provided by Mr Bizarro (`phospene logo.png` 1254×1254
          RGBA). Glow re-enabled 2026-05-12 — a soft brand-pink halo
          that lifts the mark off the navy void without muddying the
          dashes (uses drop-shadow filter so transparent regions stay
@@ -16110,7 +16110,7 @@ HTML = r"""<!doctype html>
     .form-pane { padding: 0; }
 
     /* === WORKFLOW TABS =========================================
-       Salo asked for these to be moved away from the centered top
+       Mr Bizarro asked for these to be moved away from the centered top
        slot. Now they live at the top-left of the form-pane as a
        small segmented control — same place users have always seen
        them, just visually re-tuned. */
@@ -16130,7 +16130,7 @@ HTML = r"""<!doctype html>
          width:auto each tab stretches to fill the form-pane width, so
          Manual + Agentic Flows + Train all rendered at ~306px each and
          the latter two overflowed the visible nav pill off-screen —
-         that's why Salo saw Train as "hidden" unless he switched to
+         that's why Mr Bizarro saw Train as "hidden" unless he switched to
          Agentic Flows. */
       width: auto;
       flex: 0 0 auto;
@@ -16623,7 +16623,7 @@ HTML = r"""<!doctype html>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
       <!-- "Train" used to live here as a mode chip; promoted 2026-05-15 to
            a workflow tier (top tab strip). "Studio" (image generation) also
-           lived here until 2026-05-17 — Salo flagged that mixing image gen
+           lived here until 2026-05-17 — Mr Bizarro flagged that mixing image gen
            into the video mode strip didn't make sense, so it's been
            promoted to its own workflow tab as well. setMode('image') is
            still the entry point; workflowSwitch('studio') just calls it
@@ -16650,7 +16650,7 @@ HTML = r"""<!doctype html>
       <div id="warnBanner" class="warn-banner"></div>
 
       <!-- ============== CHARACTERS PICKER · COMPACT AVATAR STRIP ==============
-           Redesigned 2026-05-18 (round 2) per Salo's feedback: the flat
+           Redesigned 2026-05-18 (round 2) per Mr Bizarro's feedback: the flat
            card from the morning was still too bulky and visually
            disconnected from the prompt. New shape: a thin row of round
            avatars right ABOVE the prompt, integrated into the composer
@@ -16855,7 +16855,7 @@ HTML = r"""<!doctype html>
             <span class="toggle-dot"></span>
             <span>No music</span>
           </label>
-          <!-- No voice toggle (2026-05-18) — Salo's request: when a
+          <!-- No voice toggle (2026-05-18) — Mr Bizarro's request: when a
                character with a voice LoRA is selected, audio generation
                sometimes produces gibberish speech even when you only
                want visuals. This toggle suppresses voice for THIS
@@ -17709,7 +17709,7 @@ HTML = r"""<!doctype html>
         </div>
 
         <!-- ============== BULK BUNDLE DROP ============== -->
-        <!-- Salo's "Cinematron" workflow: a single ZIP containing paired
+        <!-- Mr Bizarro's "Cinematron" workflow: a single ZIP containing paired
              image_NNN.png + image_NNN.txt files. The server validates each
              entry (no subdirs, no traversal), dedupes by stem, and stages
              everything into one job_id. -->
@@ -17790,7 +17790,7 @@ HTML = r"""<!doctype html>
         </div>
 
         <!-- Crop strategy — primary control (not buried in Advanced) because
-             it has a big visible effect on what the model learns. Salo 2026-05-17:
+             it has a big visible effect on what the model learns. Mr Bizarro 2026-05-17:
              "we are using such a limited cropping of the images, all the images
              are kind of close-up medium close-ups. That's the reason why the
              medium long shots are so shit and blurry." Letterbox preserves
@@ -17961,7 +17961,7 @@ HTML = r"""<!doctype html>
            One-liner pointing the user at the Video tab. The previous
            card showed per-character "Use in T2V / Use in I2V / Copy
            trigger / delete" rows but that duplicated the chip strip on
-           the Video tab itself — Salo flagged it 2026-05-18 as
+           the Video tab itself — Mr Bizarro flagged it 2026-05-18 as
            unnecessary. New version: a single sentence with each
            character name as a link that switches workflow + selects
            the character on the Video tab. -->
@@ -18165,7 +18165,7 @@ HTML = r"""<!doctype html>
           </svg>
         </button>
       </div>
-      <!-- (Salo 2026-05-12: the in-player progress chip was redundant
+      <!-- (Mr Bizarro 2026-05-12: the in-player progress chip was redundant
            with the bottom Now strip, AND it covered the playing video.
            Removed entirely; bottom-pane Now card is the single source of
            truth for live + failed job state.) -->
@@ -18580,7 +18580,7 @@ HTML = r"""<!doctype html>
     <button data-tab="logs">Logs</button>
     <span class="spacer"></span>
     <a class="model-credit" id="modelTag" href="https://github.com/dgrauet/ltx-2-mlx" target="_blank" rel="noopener" title="MLX port by @dgrauet"></a>
-    <!-- (Collapse-this-panel button removed 2026-05-12 — Salo flagged
+    <!-- (Collapse-this-panel button removed 2026-05-12 — Mr Bizarro flagged
          it hid important data (active job progress, queue) and the
          "down arrow that goes up" affordance read as confusing. The
          bottom pane is always visible at its natural height now.) -->
@@ -18655,7 +18655,7 @@ const PIPERSR_UPSCALE_ENABLED = !!BOOT.pipersr_upscale_enabled;
 // runtime check (e.g. fetch warnings, queue filters) can read it without
 // re-reading the body attribute. LTX_FORCE_CAP_TIER=q4 env override on
 // panel launch flips the visible surface to Q4-only on a Q8 dev machine
-// (useful for low-RAM-user testing on Salo's M4 Max).
+// (useful for low-RAM-user testing on Mr Bizarro's M4 Max).
 window.PHOSPHENE_CAP_TIER = (BOOT.cap_tier || 'q8');
 
 // Apply tier-aware time estimates to the Quality pill subtitles. The HTML
@@ -19172,7 +19172,7 @@ function imgStudioRenderSlot(idx) {
 // issue is the prompt: when the user writes "two characters sitting at
 // dinner" with no language anchor pointing each character to a specific
 // reference image, the model blends/conflates them (the smile-woman-
-// fused-to-arms ghost rendering Salo reported on 2026-05-18).
+// fused-to-arms ghost rendering Mr Bizarro reported on 2026-05-18).
 //
 // Both engines respond well to the same explicit pattern:
 //   "the person from reference 1 + the person from reference 2 + scene"
@@ -19857,7 +19857,7 @@ window.CHARACTERS = {
   charStrength: 0.8,
   // Reference audio for i2v_clean_audio mode (character lip-syncs to
   // this clip). Image-to-video deliberately omitted on the Characters
-  // surface per Salo 2026-05-16.
+  // surface per Mr Bizarro 2026-05-16.
   audioPath: null,     // server-side path returned by /upload
   audioName: null,     // original filename for display
   // Extra LoRAs are NOT tracked here — the Characters tab portals the
@@ -20246,7 +20246,7 @@ async function charactersLoadParams(p) {
   // class mode pill, not a chip strip inside T2V). selectManualCharacter
   // sets up the rest: chip strip, Q8 quality strip swap, auto-stacked
   // face+audio LoRAs at submit.
-  // Salo's intent: "When you click load params, you get everything
+  // Mr Bizarro's intent: "When you click load params, you get everything
   // exactly the same, so you can replicate clips. Else, what for?"
   workflowSwitch('manual');
   if (typeof setMode === 'function') setMode('character');
@@ -21449,7 +21449,7 @@ async function trainRefreshLoraList() {
       list.innerHTML = '<div class="hint" style="padding:12px 0">No trained LoRAs yet. Start your first run above.</div>';
       return;
     }
-    // Compact name-only chips (rewritten 2026-05-18 per Salo). Each
+    // Compact name-only chips (rewritten 2026-05-18 per Mr Bizarro). Each
     // chip is a link that switches to the Video tab + drops the LoRA
     // into the picker. The previous per-row "Use in T2V / I2V / Copy
     // trigger / delete" chrome moved off this card; deletion lives in
@@ -22158,7 +22158,7 @@ function _setOfflineBanner(visible, msg) {
     console.warn('[phosphene] offline banner:', text);
   } else if (bar && !bar.classList.contains('reconnected')) {
     // Linger for 3s in a "back online" state instead of removing
-    // instantly. Salo flagged that he saw a banner flash during a
+    // instantly. Mr Bizarro flagged that he saw a banner flash during a
     // restart but couldn't read it before it disappeared — this gives
     // the eye time to register and gives the user a chance to scroll
     // back in window._panelBannerLog if they want details.
@@ -22455,7 +22455,7 @@ async function poll() {
     // We hold the failure visible until the user starts a new job.
     fill.style.width = '0%';
     const last = (s.history || [])[0];
-    // Salo flagged that a stuck "Job failed" card with no close button
+    // Mr Bizarro flagged that a stuck "Job failed" card with no close button
     // is disruptive — once a render fails, the surface holds the message
     // visible until the next job runs, with no way to acknowledge it.
     // _dismissedFailureId remembers which job id the user chose to
@@ -22865,7 +22865,7 @@ async function retryJob(jobId) {
 // (engine swapped to hidream_quality_inline, n=1) and submits to the
 // queue. Used from the photo card hover button.
 //
-// Why no manual confirmation step: Salo's intent is "pick best of 4
+// Why no manual confirmation step: Mr Bizarro's intent is "pick best of 4
 // Fast/Medium previews → bake one at Quality" — adding a dialog would
 // burn a click for no information. The Image Studio form is left
 // pre-filled so the user can tweak + resubmit if they want.
@@ -23004,7 +23004,7 @@ function renderCarousel() {
     // Per-card actions (revealed on hover) — kept deliberately minimal:
     //   * Photos get a small "Animate" chip (turns the still into i2v).
     //   * Everything gets a delete (×) chip.
-    // The previous Hide + Extend buttons were dropped per Salo:
+    // The previous Hide + Extend buttons were dropped per Mr Bizarro:
     //   - Hide was useless (clutter, never used in practice).
     //   - Extend wasn't practical on Mac.
     // Folder-reveal moved to a global button in the carousel header.
@@ -25461,7 +25461,7 @@ function _renderManualCharactersList() {
   }
   if (empty) empty.hidden = true;
   const chips = [];
-  // 2026-05-18 round 3: no more "None" chip. Salo's point — no
+  // 2026-05-18 round 3: no more "None" chip. Mr Bizarro's point — no
   // character is just plain video gen, which is what the Text mode
   // already covers; an explicit None chip was redundant chrome.
   // Deselect is now: click the active avatar again (toggles off).

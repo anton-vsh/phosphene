@@ -111,7 +111,7 @@ module.exports = {
     // setup, which conflicts with our >=1.5.0 floor (transformers 5+,
     // mflux, hf v1 CLI all need hub 1.x). Plain `pip install --upgrade`
     // refuses to resolve and fails the entire update with
-    // ResolutionImpossible — Salo saw this as a "blue screen error
+    // ResolutionImpossible — Mr Bizarro saw this as a "blue screen error
     // flashing for a second every update".
     //
     // Fix: match install.js and use `uv pip install`. uv allows the

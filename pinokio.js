@@ -24,7 +24,7 @@ function getInstallRoot(info) {
   //   - older Pinokio: info.path is a STRING property (the install dir itself)
   //   - newer Pinokio: info.path is a FUNCTION that joins args with install dir
   // cocktailpeanut's working diff uses the function form; some user installs
-  // (Salo's reproduced this) error with TypeError on the function call, then
+  // (Mr Bizarro's reproduced this) error with TypeError on the function call, then
   // Pinokio's outer error handler stat's a bogus path constructed from the
   // error's .errno property — surfacing as "ENOENT ... stat '.../Errno'".
   // Try both shapes; fall back to __dirname which Pinokio sets to the install

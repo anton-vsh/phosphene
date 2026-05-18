@@ -2,7 +2,7 @@
 
 Current `dev` head: `04d2ffd` (May 17 2026, evening) — Codex C+ 7-pass UI restructure (capability tiers, Q4 surface, Character as 5th mode pill, accel kill, HQ-speed move) + Train tab polish (Gemma 3 auto-caption, voice-on default, letterbox crop) + LoRA picker chrome (rename, download, companion-aware delete) + vendored `lora_lab/` for installer-only users + Codex 12.6% skip-step optimization on Q8 HQ.
 
-Latest `main`: still `v2.0.6` — `dev` carries ~30 commits ahead awaiting Salo's ship verdict.
+Latest `main`: still `v2.0.6` — `dev` carries ~30 commits ahead awaiting Mr Bizarro's ship verdict.
 
 Live URL: `https://github.com/mrbizarro/phosphene` · Linear project: `https://linear.app/hairstylemojo/project/phosphene-9c11240704bb`
 
@@ -12,14 +12,14 @@ This doc is the **session-start handoff**. A new Claude window entering this pro
 
 ## 1. Where the code lives
 
-Two clones on Salo's Mac, both managed by Pinokio:
+Two clones on Mr Bizarro's Mac, both managed by Pinokio:
 
 | Path | Branch tracked | Port | Role |
 |---|---|---|---|
 | `/Users/salo/pinokio/api/phosphene-dev.git/` | `dev` | 8199 | Active development. Most edits land here first. |
-| `/Users/salo/pinokio/api/phosphene.git/` | `main` | 8198 | Production / daily driver. Salo's actual usage. |
+| `/Users/salo/pinokio/api/phosphene.git/` | `main` | 8198 | Production / daily driver. Mr Bizarro's actual usage. |
 
-GitHub is the source of truth (memory: `feedback_github_source_of_truth.md`). Branch policy is strict: **NEVER push to `main` without Salo's explicit OK** (memory: `phosphene_dev_workflow.md`). When ready to promote, fast-forward only — `git merge --ff-only dev` from main, never a merge commit.
+GitHub is the source of truth (memory: `feedback_github_source_of_truth.md`). Branch policy is strict: **NEVER push to `main` without Mr Bizarro's explicit OK** (memory: `phosphene_dev_workflow.md`). When ready to promote, fast-forward only — `git merge --ff-only dev` from main, never a merge commit.
 
 State directories that live OUTSIDE the repo via Pinokio's `fs.link`:
 
@@ -28,7 +28,7 @@ State directories that live OUTSIDE the repo via Pinokio's `fs.link`:
 - `panel_uploads/` → user-uploaded reference images for I2V / FFLF.
 - `state/` → `panel_settings.json`, `panel_queue.json`, `panel_hidden.json`. Survives a Pinokio Reset.
 
-A Pinokio Reset wipes the install dir but preserves all four — Salo can Reset → Install without losing renders or settings.
+A Pinokio Reset wipes the install dir but preserves all four — Mr Bizarro can Reset → Install without losing renders or settings.
 
 ## 2. Current capabilities (dev head — pending v2.1 promotion)
 
@@ -308,7 +308,7 @@ phosphene-dev.git/
 **The model's weaknesses (avoid in prompts)**
 - **Hands and held objects** — fingers morph, written text squiggles, pen/needle/cup interactions look off.
 - **High-motion physics** — skater kickflips, water splash, motorcycle blur are out of distribution.
-- **Faces below ~80 px in-frame size** — model fills a face-shape but identity-broken. Wide shots of single characters are unusable in their first/last seconds. ([Salo's discovery May 4](#))
+- **Faces below ~80 px in-frame size** — model fills a face-shape but identity-broken. Wide shots of single characters are unusable in their first/last seconds. ([Mr Bizarro's discovery May 4](#))
 - **Multi-shot continuity is naive-failure** — same prompt + different seed = different person. The mom-kid scene experiment (M1 / M2 / M3 in `mlx_outputs/`) confirmed three different women across three angles despite identical character description.
 
 ### What earns 20 seconds
@@ -320,7 +320,7 @@ phosphene-dev.git/
 
 - **M1/M2/M3 mom-kid trio** (1024×576, Balanced + Turbo + Sharp, ~21 min each): demonstrated multi-shot character drift problem. Three different women across three angles.
 - **N1–N10 cinematographic moments** (May 4): ten 20-sec clips at varying shot scales. Tested medium / wide / two-shot composition with body-language-only prompts (no hands, no held objects). Output quality varied; faces are stable when in the safe pixel range.
-- **E-DRAFT** (May 4): tested low-res draft → high-res commit hypothesis. Same prompt + seed at 640×480 vs 1024×576. Salo: low-res output not usable due to face-distance issue. Premise was flawed because lower res = worse faces.
+- **E-DRAFT** (May 4): tested low-res draft → high-res commit hypothesis. Same prompt + seed at 640×480 vs 1024×576. Mr Bizarro: low-res output not usable due to face-distance issue. Premise was flawed because lower res = worse faces.
 - **E-ANCHOR** (May 4): I2V from M1 frame to test character anchoring. Result was inconclusive in the session; final clip is at `mlx_outputs/` if needed for review.
 - **20-sec single-clip viability** (May 4): confirmed at Balanced 1024×576 + Turbo + Sharp. ~21 min wall, audio synced, characters stable.
 
@@ -348,7 +348,7 @@ The biggest single-day refactor since v2.0.6. Driven by Codex's C+ recommendatio
 - **Train Character High preset subtitle skew** — UI said `~4 h · rank 32 · 768px` while canonical Python preset is `rank 32 · 5000 steps · 512px · ~2h50m`. Fixed HTML + JS copy. Commit `4255f12`.
 - **Dual quality strip rendered on top of each other** — `_applyCharacterQualityStripVisibility()` set `hidden` on the unwanted strip, but `.quality-strip { display: grid }` outranked the user-agent `[hidden] { display: none }` at CSS specificity (0,0,1,0) vs (0,0,0,0). Both strips visible at once. Fixed with `.quality-strip[hidden] { display: none !important }`. Commit `7bd5057`.
 - **Train tab voice toggle defaulted OFF** — even when a voice clip was uploaded, users had to manually click the toggle to enable audio training. Now defaults ON; the disabled state until upload still prevents submission without a clip. Commit `ea2cf02`.
-- **caption_strategy="user_provided" rejected by trainer** — panel auto-fills missing captions then sets `caption_strategy=user_provided`. lora_lab rejected the value ("unknown caption_strategy") and exited code 1 immediately. Salo's Eltrumpo run was the first to hit this (auto-caption produced 37 user .txt files). Fixed in lora-lab (commit `b04eaab` on `feat/train-character-cli`): alias map `'user_provided' → 'class_word'` + `'trigger_simple' → 'class_word'`. Commits in this repo: `8b5a3cf` (the eventual panel-side defense-in-depth).
+- **caption_strategy="user_provided" rejected by trainer** — panel auto-fills missing captions then sets `caption_strategy=user_provided`. lora_lab rejected the value ("unknown caption_strategy") and exited code 1 immediately. Mr Bizarro's Eltrumpo run was the first to hit this (auto-caption produced 37 user .txt files). Fixed in lora-lab (commit `b04eaab` on `feat/train-character-cli`): alias map `'user_provided' → 'class_word'` + `'trigger_simple' → 'class_word'`. Commits in this repo: `8b5a3cf` (the eventual panel-side defense-in-depth).
 - **Q4-distilled inference of dev-trained character LoRAs gave generic-Trump output** — character LoRAs were silently routed through the Q4 pipeline when `quality=balanced`, but their training base is the Q8 dev transformer with full sigma schedule + CFG. Fused into distilled = wrong base = identity barely locks. UI now forces Q8 chips when a character is selected; backend rejects `character_id + quality != high`. Commits `1d7983a`, `8b5a3cf`.
 - **HQ-speed Fast pill was inactive at boot** — the boot cascade ran `_applyCharacterQualityStripVisibility()` with no character selected → else branch fired `_setSkipStepEnabled(false)` → removed `.active` from the HTML-default Fast pill → first character render missed the Codex 12% optimization. Fixed in two commits: `1056c99` (stopped the row-visibility helper from touching skip-step) and `04d2ffd` (stopped the character cascade else branch from touching skip-step too; HQ-speed pill in Customize is now the single source of truth).
 
@@ -474,7 +474,7 @@ Goal: 1-minute final video on M4 Max 64 GB, ~40-60 min wall time acceptable.
 
 Codex deep-research brief drafted; awaiting return for literature review on FreeNoise / FIFO-Diffusion / StreamingT2V applicability.
 
-Salo also has Claude.ai / ChatGPT deep-research running (May 5) on inference speed without quality loss.
+Mr Bizarro also has Claude.ai / ChatGPT deep-research running (May 5) on inference speed without quality loss.
 
 ### Director Mode (agent workflow) — SHIPPED as Agentic Flows
 
@@ -520,15 +520,15 @@ research-grade work on token merging.
 - Personal-account post drafted for `@AIBizarrothe`.
 - Launch copy bundle in `launch/` folder (Pinokio article, X, Reddit, CivitAI).
 - Sample mp4s + frames cached in `/tmp/phos_frames/`, `/tmp/phos_frames2/`, `/tmp/phos_dialogue/`, `/tmp/phos_lab_frames/`, `/tmp/phos_sdk_frames/`.
-- Awaiting Salo's launch timing call.
+- Awaiting Mr Bizarro's launch timing call.
 
 ## 9. Hard constraints (don't violate)
 
 - **Apple Silicon (M1+) only**. No PyTorch, no CUDA, no MPS shim. Native MLX or it doesn't ship.
 - **Joint audio + video must remain**. That's the differentiator vs Wan / Hunyuan / Mochi. We don't drop audio for length.
 - **Existing queue + helper + patch architecture stays intact**. No new microservices.
-- **Branch policy**: dev → main only via fast-forward, only with Salo's explicit OK.
-- **Salo's voice in writing**: copy-edit, don't rewrite. See memory file `feedback_copy_edit_dont_rewrite.md`. Tweets, posts, README copy — fix typos and grammar, never restructure or stack value-prop language.
+- **Branch policy**: dev → main only via fast-forward, only with Mr Bizarro's explicit OK.
+- **Mr Bizarro's voice in writing**: copy-edit, don't rewrite. See memory file `feedback_copy_edit_dont_rewrite.md`. Tweets, posts, README copy — fix typos and grammar, never restructure or stack value-prop language.
 
 ## 10. Memory pointers (for next-Claude)
 
@@ -536,10 +536,10 @@ Files in `/Users/salo/.claude/projects/-Users-salo-AI/memory/`:
 
 - `phosphene_dev_workflow.md` — branch + dev-panel discipline
 - `phosphene_linear_project.md` — Linear project location + credentials
-- `feedback_copy_edit_dont_rewrite.md` — when Salo asks me to look at his writing
+- `feedback_copy_edit_dont_rewrite.md` — when Mr Bizarro asks me to look at his writing
 - `feedback_writing_style.md` — schematic, short, plain
 - `feedback_github_source_of_truth.md` — git fetch first, surface drift
-- `feedback_dont_ask_to_save_memory.md` — when Salo states a fact, save it; don't ask
+- `feedback_dont_ask_to_save_memory.md` — when Mr Bizarro states a fact, save it; don't ask
 - `claudio_repo.md` — shared infra, hosts `.env` with Linear key
 - `ltx_video_setup.md` — older notes from MLX vs Comfy decisions
 
@@ -568,4 +568,4 @@ Issue prefixes are `HAI-NN` because of the team constraint. Active:
 5. Check the dev panel is alive: `curl -s http://127.0.0.1:8199/status | python3 -m json.tool | head -10`
 6. Last 5 commits on dev: `git log --oneline -5 dev`
 
-If you find on-disk state contradicts this doc (paths moved, commits diverged), surface that to Salo before working around it. Updating this doc at session-end is part of the loop.
+If you find on-disk state contradicts this doc (paths moved, commits diverged), surface that to Mr Bizarro before working around it. Updating this doc at session-end is part of the loop.

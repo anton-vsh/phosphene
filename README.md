@@ -173,8 +173,8 @@ Pick a workflow at the top: **Video**, **Images**, **Audio**, or **Train Charact
 - **`mlx_models/`** — weights (~63 GB, fs.link symlink). Persists across Pinokio Reset.
 - **`mlx_outputs/`** — rendered mp4s + sidecar JSON. Persists across Reset.
 
-**MLX ports (Salo's own work):**
-- **HiDream-O1-Image-Dev BF16** — published to `mlx-community/HiDream-O1-Image-Dev-mlx-bf16`. 8B Qwen3-VL backbone, unified pixel-patch transformer (no VAE). MIT. Native edit + multi-reference at 1024 / 1440 / 2048 trained dims. See [/Users/salo/HIDREAM-O1-MLX-LAB-active](https://huggingface.co/Mrbizarro) for the standalone lab.
+**MLX ports (Mr Bizarro's own work):**
+- **HiDream-O1-Image-Dev BF16** — published to [`mlx-community/HiDream-O1-Image-Dev-mlx-bf16`](https://huggingface.co/mlx-community/HiDream-O1-Image-Dev-mlx-bf16). 8B Qwen3-VL backbone, unified pixel-patch transformer (no VAE). MIT. Native edit + multi-reference at 1024 / 1440 / 2048 trained dims.
 - **Qwen-Image-Edit-2511** — runs via mflux (Q6 / Q8). Instruction edit + multi-subject composition.
 
 ---

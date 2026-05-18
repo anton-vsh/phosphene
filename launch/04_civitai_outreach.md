@@ -115,7 +115,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 **First comment (300 words):**
 
-> Hey ProductHunt, I'm Salo (@AIBizarrothe). I built Phosphene because every "run AI video locally" guide assumes you own an RTX card — and the few that do work on Mac are buried in CLI flags, GGUF detours, and audio-as-an-afterthought.
+> Hey ProductHunt, I'm Mr Bizarro (@AIBizarrothe). I built Phosphene because every "run AI video locally" guide assumes you own an RTX card — and the few that do work on Mac are buried in CLI flags, GGUF detours, and audio-as-an-afterthought.
 >
 > LTX-2.3 (Lightricks' open model) is special: it generates **video and audio jointly**, in one pass. The hammer hits on screen are the hammer hits in the audio. The footsteps sync. Most "AI video" you've seen is silent or post-dubbed — this isn't.
 >
@@ -200,7 +200,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 **Draft (GitHub issue or DM, ~110 words):**
 
-> Hey — Salo here (@AIBizarrothe). I built Phosphene, a Mac app that wraps your `ltx-2-mlx` with a one-click Pinokio install, prompt history, LoRA loading, and a few presets. Repo: github.com/mrbizarro/phosphene. The README credits you front-and-center — your port is the load-bearing piece, the panel is just the seatbelt.
+> Hey — Mr Bizarro here (@AIBizarrothe). I built Phosphene, a Mac app that wraps your `ltx-2-mlx` with a one-click Pinokio install, prompt history, LoRA loading, and a few presets. Repo: github.com/mrbizarro/phosphene. The README credits you front-and-center — your port is the load-bearing piece, the panel is just the seatbelt.
 >
 > Two asks: (1) any factual corrections you want me to make in the README before launch — I want to represent what `ltx-2-mlx` does accurately. (2) Want to be tagged in the launch posts (X / ProductHunt / CivitAI article)? Happy to write you in however you prefer, or stay quiet if you'd rather not.
 >
@@ -220,7 +220,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 **Draft (~140 words, send via GitHub Discussions on Lightricks/LTX-2 OR partnerships email):**
 
-> Hi — I'm Salo (@AIBizarrothe). I built **Phosphene**, a free, open-source Mac panel that wraps an MLX port of LTX-2.3 (dgrauet's port) so M-series Mac users can run T2V/I2V with joint audio in one click via Pinokio.
+> Hi — I'm Mr Bizarro (@AIBizarrothe). I built **Phosphene**, a free, open-source Mac panel that wraps an MLX port of LTX-2.3 (dgrauet's port) so M-series Mac users can run T2V/I2V with joint audio in one click via Pinokio.
 >
 > Repo: github.com/mrbizarro/phosphene. Demos: [link]. ~30s install, no CLI, no GGUF.
 >
