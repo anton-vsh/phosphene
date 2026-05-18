@@ -79,13 +79,13 @@ logger = logging.getLogger(__name__)
 # Constants (kept in lockstep with the Phase B audio configs)
 # ----------------------------------------------------------------------
 
-# Same Q4 snapshot the rest of the lab uses (matches preprocess_audio +
-# train_character + configs/char_audio_lora_*.yaml).
-DEFAULT_MODEL_PATH = (
-    "/Users/salo/.cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q4"
-    "/snapshots/53a6f5f39d9c074bc73e6a18ba391f40ddffaa68"
-)
-DEFAULT_TEXT_ENCODER = "mlx-community/gemma-3-12b-it-4bit"
+# Resolved dynamically — see lora_lab/__init__.py. Vendored installs
+# resolve to phosphene-dev.git/mlx_models/ltx-2.3-mlx-q4; the authoring
+# tree falls back to the HF hub cache. ``LTX_MODELS_DIR`` env (set by
+# the Phosphene panel) takes precedence.
+from lora_lab import resolve_default_model_dir, resolve_default_text_encoder
+DEFAULT_MODEL_PATH = resolve_default_model_dir()
+DEFAULT_TEXT_ENCODER = resolve_default_text_encoder()
 
 # The trainer's ``_find_lora_targets`` substring-matches against module paths
 # in LTXModel. These three names cover the audio attention + audio FF paths,

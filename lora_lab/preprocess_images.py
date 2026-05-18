@@ -47,11 +47,11 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-DEFAULT_MODEL_DIR = str(
-    Path.home()
-    / ".cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q4"
-    / "snapshots/53a6f5f39d9c074bc73e6a18ba391f40ddffaa68"
-)
+# Resolved dynamically — see lora_lab/__init__.py for the resolution
+# order. Public Pinokio installs use the vendored mlx_models dir; the
+# authoring tree falls back to the HF hub cache.
+from lora_lab import resolve_default_model_dir
+DEFAULT_MODEL_DIR = resolve_default_model_dir()
 
 
 def _force_eval(*arrays: mx.array) -> None:

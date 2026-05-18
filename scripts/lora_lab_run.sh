@@ -18,16 +18,49 @@ PANEL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LTX_ROOT="$PANEL_ROOT/ltx-2-mlx"
 LTX_PY="$LTX_ROOT/env/bin/python"
 
-# ffmpeg is shipped with Pinokio at this fixed path on the dev machine.
-# Allow override for non-Pinokio installs.
-FFMPEG_DIR="${PHOSPHENE_FFMPEG_DIR:-/Users/salo/pinokio/bin/ffmpeg-env/bin}"
-
 if [[ ! -x "$LTX_PY" ]]; then
     echo "fatal: ltx-2-mlx env python not found at $LTX_PY" >&2
     exit 1
 fi
-if [[ ! -x "$FFMPEG_DIR/ffmpeg" ]]; then
-    echo "fatal: ffmpeg not found at $FFMPEG_DIR/ffmpeg (override with PHOSPHENE_FFMPEG_DIR)" >&2
+
+# Resolve ffmpeg the same way the panel does — in order:
+#   1. $PHOSPHENE_FFMPEG_DIR (explicit override, points at the directory
+#      containing the ffmpeg binary)
+#   2. $LTX_FFMPEG (single-binary path, exported by the panel after
+#      its own resolver picks it)
+#   3. Standard Pinokio install locations (the typical Mac install)
+#   4. System PATH
+# Previously hard-coded to /Users/.../pinokio/bin/ffmpeg-env/bin which
+# only worked on the maintainer's machine — a public install would die
+# on this check before any training ever ran.
+FFMPEG_DIR=""
+if [[ -n "${PHOSPHENE_FFMPEG_DIR:-}" && -x "${PHOSPHENE_FFMPEG_DIR}/ffmpeg" ]]; then
+    FFMPEG_DIR="${PHOSPHENE_FFMPEG_DIR}"
+elif [[ -n "${LTX_FFMPEG:-}" && -x "${LTX_FFMPEG}" ]]; then
+    FFMPEG_DIR="$(dirname "${LTX_FFMPEG}")"
+else
+    for cand in \
+        "${HOME}/pinokio/bin/ffmpeg-env/bin" \
+        "${PANEL_ROOT}/../../bin/ffmpeg-env/bin" \
+        "/Applications/Pinokio.app/Contents/Resources/bin/ffmpeg-env/bin"; do
+        if [[ -x "${cand}/ffmpeg" ]]; then
+            FFMPEG_DIR="${cand}"
+            break
+        fi
+    done
+    if [[ -z "${FFMPEG_DIR}" ]]; then
+        sys_ffmpeg="$(command -v ffmpeg 2>/dev/null || true)"
+        if [[ -n "${sys_ffmpeg}" ]]; then
+            FFMPEG_DIR="$(dirname "${sys_ffmpeg}")"
+        fi
+    fi
+fi
+if [[ -z "${FFMPEG_DIR}" || ! -x "${FFMPEG_DIR}/ffmpeg" ]]; then
+    echo "fatal: ffmpeg not found." >&2
+    echo "  Tried: PHOSPHENE_FFMPEG_DIR, LTX_FFMPEG, ~/pinokio/bin/ffmpeg-env/bin," >&2
+    echo "  Pinokio.app bundle, system PATH." >&2
+    echo "  Install Pinokio (which bundles ffmpeg) or set" >&2
+    echo "  PHOSPHENE_FFMPEG_DIR=/dir/containing/ffmpeg before running this." >&2
     exit 1
 fi
 

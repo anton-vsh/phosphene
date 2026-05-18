@@ -56,11 +56,10 @@ from ltx_trainer_mlx.preprocess import _resolve_model_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_DIR = str(
-    Path.home()
-    / ".cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q4"
-    / "snapshots/53a6f5f39d9c074bc73e6a18ba391f40ddffaa68"
-)
+# Resolved dynamically — see lora_lab/__init__.py for the resolution
+# order. Public Pinokio installs use the vendored mlx_models dir.
+from lora_lab import resolve_default_model_dir
+DEFAULT_MODEL_DIR = resolve_default_model_dir()
 
 AUDIO_SAMPLE_RATE = 16000   # LTX audio VAE expects 16 kHz mono
 

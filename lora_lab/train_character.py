@@ -449,11 +449,14 @@ def run_preprocess(
 # Training (build a temp YAML, hand to the existing trainer wrapper logic)
 # ----------------------------------------------------------------------
 
-DEFAULT_MODEL_PATH = (
-    "/Users/salo/.cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q4"
-    "/snapshots/53a6f5f39d9c074bc73e6a18ba391f40ddffaa68"
-)
-DEFAULT_TEXT_ENCODER = "mlx-community/gemma-3-12b-it-4bit"
+# Resolved dynamically — see lora_lab/__init__.py. The previous hard-
+# coded HF cache snapshot path was correct for the maintainer's machine
+# only; clean Pinokio installs have the model at mlx_models/ltx-2.3-mlx-q4/
+# inside the panel install dir, and ``LTX_MODELS_DIR`` (set by the panel
+# when it spawns this script) points the resolver there.
+from lora_lab import resolve_default_model_dir, resolve_default_text_encoder
+DEFAULT_MODEL_PATH = resolve_default_model_dir()
+DEFAULT_TEXT_ENCODER = resolve_default_text_encoder()
 
 
 def build_trainer_config(
