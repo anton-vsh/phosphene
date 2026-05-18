@@ -156,20 +156,27 @@ module.exports = {
     // step trims existing bloated installs. `rm -f` is silently a no-op
     // if the file is already absent.
     //
-    //   Q4 trim: ~36 GB freed (transformer-distilled-1.1, transformer-dev,
-    //            distilled-lora-384-1.1, x1.5 upscaler, temporal upscaler)
+    //   Q4 trim: ~25 GB freed (transformer-distilled-1.1, distilled-lora-1.1,
+    //            x1.5 upscaler, temporal upscaler)
     //   Q8 trim: ~45 GB freed (transformer-distilled, transformer-distilled-1.1,
     //            distilled-lora-384-1.1, x1.5 upscaler, temporal upscaler)
     //
     // Files chosen are those the panel never references at runtime —
     // see required_files.json for the canonical list of what we DO load.
+    //
+    // IMPORTANT (3.0+): `mlx_models/ltx-2.3-mlx-q4/transformer-dev.safetensors`
+    // is no longer trimmed. Train Character downloads that 11 GB file on
+    // demand into the Q4 dir (see `_train_install_dev_transformer` in
+    // mlx_ltx_panel.py). Removing it here would silently undo the
+    // training install on every panel update — users who clicked
+    // Download Q8 dev for training and then Update would lose 11 GB of
+    // bandwidth and have to re-download.
     {
       method: "shell.run",
       params: {
         message: [
-          "echo 'Y1.024: trimming unused model variants from mlx_models/ (saves up to ~80 GB on bloated pre-Y1.024 installs)…'",
+          "echo 'Trimming unused model variants from mlx_models/ (saves up to ~70 GB on pre-Y1.024 installs)…'",
           "rm -f mlx_models/ltx-2.3-mlx-q4/transformer-distilled-1.1.safetensors",
-          "rm -f mlx_models/ltx-2.3-mlx-q4/transformer-dev.safetensors",
           "rm -f mlx_models/ltx-2.3-mlx-q4/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
           "rm -f mlx_models/ltx-2.3-mlx-q4/spatial_upscaler_x1_5_v1_0.safetensors",
           "rm -f mlx_models/ltx-2.3-mlx-q4/temporal_upscaler_x2_v1_0.safetensors",
@@ -178,7 +185,7 @@ module.exports = {
           "rm -f mlx_models/ltx-2.3-mlx-q8/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
           "rm -f mlx_models/ltx-2.3-mlx-q8/spatial_upscaler_x1_5_v1_0.safetensors",
           "rm -f mlx_models/ltx-2.3-mlx-q8/temporal_upscaler_x2_v1_0.safetensors",
-          "echo 'Y1.024: trim done.'"
+          "echo 'Trim done.'"
         ]
       }
     }
