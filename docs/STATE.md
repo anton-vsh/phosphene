@@ -1,7 +1,9 @@
 # Phosphene — project state, history, open work
 
-Current version: **v2.0.4** on `main` (commit `74c7bd1`, May 5 2026).
-Latest on `dev`: **Agentic Flows + multi-keyframe Layer 2** (May 6 2026, awaiting promotion).
+Current `dev` head: `04d2ffd` (May 17 2026, evening) — Codex C+ 7-pass UI restructure (capability tiers, Q4 surface, Character as 5th mode pill, accel kill, HQ-speed move) + Train tab polish (Gemma 3 auto-caption, voice-on default, letterbox crop) + LoRA picker chrome (rename, download, companion-aware delete) + vendored `lora_lab/` for installer-only users + Codex 12.6% skip-step optimization on Q8 HQ.
+
+Latest `main`: still `v2.0.6` — `dev` carries ~30 commits ahead awaiting Salo's ship verdict.
+
 Live URL: `https://github.com/mrbizarro/phosphene` · Linear project: `https://linear.app/hairstylemojo/project/phosphene-9c11240704bb`
 
 This doc is the **session-start handoff**. A new Claude window entering this project should read this first, then `CLAUDE.md` (architecture), then the relevant Linear issues.
@@ -28,19 +30,71 @@ State directories that live OUTSIDE the repo via Pinokio's `fs.link`:
 
 A Pinokio Reset wipes the install dir but preserves all four — Salo can Reset → Install without losing renders or settings.
 
-## 2. Current capabilities (v2.0.4)
+## 2. Current capabilities (dev head — pending v2.1 promotion)
 
-**Modes**
-- T2V — text → video
-- I2V — image → video
-- FFLF (keyframe) — first/last frame interpolation
+**Workflow tabs (top nav)**
+- Manual — video composer (T2V / Character / I2V / FFLF / Extend)
+- Studio (NEW) — image generation (was a mode chip inside Manual until 2026-05-17, commit `37c9d21`)
+- Train Character (NEW) — dataset → LoRA training, with Gemma 3 auto-caption + letterbox crop
+
+**Modes (inside Manual)**
+- Text — pure text→video
+- Character (NEW, 2026-05-17 commit `e420e3a`) — first-class mode for trained character LoRAs. Submits `mode=t2v` server-side; backend dispatches on `character_id`. Auto-stacks face + audio LoRAs, swaps the quality strip to Q8-only.
+- Image — image→video (I2V)
+- FFLF — first/last frame keyframe interpolation
 - Extend — append seconds onto an existing clip
 
-**Quality dial**
-- Quick · Balanced · Standard · High (Q8 two-stage HQ + TeaCache)
+**Capability tier system (NEW, 2026-05-17 commit `64dad87`)**
+- `body[data-cap-tier="q4|q8"]` set at request time from `SYSTEM_CAPS.allows_q8`.
+- `q4` (sub-48GB Macs): FFLF / Extend / Character mode pills hidden; chip strip hidden; Q8-Draft/Q8-Pro chips hidden; "High" chip in default strip hidden; skip-step toggle hidden. Manual collapses cleanly to Text/Image.
+- `q8` (48GB+): full surface, Q4 still reachable via the default Quality strip for plain T2V/I2V.
+- `LTX_FORCE_CAP_TIER=q4` env override lets a Q8 dev machine view the Q4 surface for testing.
 
-**Speed dial**
-- Exact · Boost · Turbo (adaptive cached denoise)
+**Quality dial** (mode-aware)
+- Non-character T2V / I2V: `Quick · Balanced · Standard · High`. Quick / Balanced / Standard route to Q4 distilled; High routes to Q8 two-stage HQ + TeaCache.
+- Character mode: 2-chip strip `Q8 Draft (736×416) · Q8 Pro (1024×576)`. Both submit `quality=high`. Default strip is hidden — character LoRAs can't fuse into Q4 distilled (mismatched sigma schedule produces identity-mushed output). Backend REJECTS `character_id + quality != high` with a 400 (commit `8b5a3cf`).
+- Extend mode: 2 pills `Q8 Draft (12 steps · 64 GB safe) · Q8 Pro (30 steps · 96+ GB)`. Same labels as Character for vocabulary consistency; mechanism is the Extend-specific sampler (extend_steps + extend_cfg).
+
+**HQ speed dial** (Customize accordion, visible only when quality=high)
+- Fast — TeaCache + skip-step, ~12% faster on Q8 HQ (validated 2026-05-15 Codex contact sheet, ~426s → ~372s on a 7s 1024×576 clip).
+- Exact — TeaCache only, reference quality (use if a specific LoRA / prompt looks degraded under Fast).
+- The legacy Q4-distilled-only `Boost / Turbo` accel pill row was killed from the public surface (commit `e8a7f75`); the hidden `#accel` input survives for sidecar restore compat.
+
+**Sharp upscale**
+- PiperSR on the Apple Neural Engine, optional install via `install_sharp.js`
+
+**Joint audio + video**
+- Synced lip movement, footsteps, ambient bed (mlx 0.31.1 pin holds the audio fix)
+
+**Hardware tier system**
+- Compact / Comfortable / Roomy / Studio with per-tier feature gating
+- Reference benchmarks throughout this doc are on **M4 Max 64 GB** (Comfortable tier)
+
+**Other**
+- CivitAI LoRA browser built-in
+- LoRA picker per-row chrome: rename (sidecar-only, on-disk filename preserved), download (Content-Disposition attachment, streamed in 1 MiB chunks), companion-aware delete (also trashes the upscaled `_720p.mp4` + sidecar). Commit `0dba2dc`.
+- Per-job progress bar (phase-aware, denoise-step-aware)
+- Gallery with cache-bust URLs, no more black-clip race
+- 80+ GB less disk than pre-Y1.024 installs (filtered hf downloads)
+- Spicy mode gate (NSFW LoRAs hidden by default, opt-in toggle in Settings)
+
+**Player + Expand lightbox (2026-05-17 commit `4987022`)**
+- Player surface reads media natural dimensions into a `--media-aspect` CSS custom property on `loadedmetadata`; vertical clips letterbox correctly instead of being head-to-toe cropped by the prior hardcoded 16:9 + object-fit:cover.
+- Expand button is now a real fullscreen modal (was inline-positioned and dumped the `<video>` at native dims inline).
+- Aspect picker promoted out of Customize into a compact "Orientation" pill row under Quality.
+
+**Train Character workflow (significant 2026-05-17 additions)**
+- Gemma 3 auto-caption — one-click `[VISUAL]: <trigger>, <description>` per-image captioning via local `mlx-community/gemma-3-12b-it-4bit` weights (the same Gemma the prompt enhancer already downloads). New `caption_with_gemma.py` subprocess via `mlx-vlm==0.4.4` (pinned with `--no-deps` to avoid upgrading mlx-lm beyond 0.31.1). `POST /train/auto-caption`, `GET /train/auto-caption/status`. End-to-end verified at 87s for a 37-image dataset. Commit `e839bc2`.
+- Letterbox crop strategy — pill row under the Quality preset. Center crop = scale-and-center-crop to square (legacy default, best for tight portraits). Letterbox = scale longer dim to target + pad shorter dim with black bars (preserves wide-shot proportions — addresses "blurry medium-long shots" issue when training on portrait-only crops). Trainer canvas stays a fixed square so the dataloader is unchanged. Commit `7a46b96`.
+- Voice (audio LoRA) toggle defaults ON if a voice clip is uploaded. Commit `ea2cf02`.
+- `/stop` button actually kills the training subprocess now (was a known no-op; trainer survived for hours after Stop, blocking the queue). `start_new_session=True` on both face + audio trainer Popens + SIGTERM via killpg with 8s SIGKILL fallback. Commit `b6d1222`.
+- Vendored `lora_lab/` into the panel — installer-only users get training out of the box. `LTX_LORA_LAB_ROOT` env var still lets a dev iterate against `~/AI/projects/lora-lab/`. Commit `e9ce853`.
+
+**Server-side validation (2026-05-17 commit `8b5a3cf`)**
+- `_validate_character_quality(form)` runs on `/run`, `/queue/add`, `/queue/batch`. Refuses any submission with `character_id` set and `quality != "high"` with a descriptive 400 — defense-in-depth so a stale form or scripted call can't ship the broken Q4+character combination.
+
+**Speed dial (legacy, killed 2026-05-17)**
+- The pre-2026-05-17 `Exact · Boost · Turbo` accel pill row only ever fired on the Q4 distilled path; the HQ pipeline ignored it. Killed from public surface in pass 5 (commit `e8a7f75`) — the hidden `#accel` input survives so saved-state restore paths keep working. If a future Q4 lab tool needs the row back, restore it behind `body[data-cap-tier="q4"]` and wire it explicitly to the Q4 path.
 
 **Sharp upscale**
 - PiperSR on the Apple Neural Engine, optional install via `install_sharp.js`
@@ -280,6 +334,23 @@ phosphene-dev.git/
 - **New clips appeared black for 2–3 minutes**: gallery race + browser cache holding incomplete bytes. Fixed in Y1.039 with in-flight skip + mtime cache-bust + `Cache-Control: no-cache`.
 - **S2 noir dialogue attribution swap**: "Same thing, honey" delivered by wrong character. Root cause: prompt format diverged from LTX docs. Documented in Linear HAI-152.
 - **v2.0.2 install sanity check broken by em-dash**: Pinokio shells mangled the unicode em-dash, triggering Python SyntaxError, falsely failing every install. Fixed in v2.0.4 (ASCII colon).
+
+### Fixed 2026-05-17 (Codex C+ UI restructure + Train Character + LoRA chrome session)
+
+The biggest single-day refactor since v2.0.6. Driven by Codex's C+ recommendation (Q4 panel as separate surface from Q8 panel — see `lora-lab/PHOSPHENE_UX_Q4_VS_Q8_BRIEF.md`). 30+ commits today. Root cause + fix per bug:
+
+- **Player aspect-ratio cropped vertical clips** — `.player-surface` was hardcoded `aspect-ratio: 16/9` + `object-fit: cover`. A 9:16 / 576×1024 clip got head-to-toe cropped. Fixed by reading natural dims on `loadedmetadata` into a `--media-aspect` CSS prop + flipping to height-driven sizing for verticals. Object-fit also switched to `contain` as a safety net. Commit `4987022`.
+- **Expand button was inline-positioned (not a modal)** — `.expand-lightbox` had no CSS rules at all. Clicking Expand dropped the `<video>` at native dims inline somewhere on the page. Now styled as a real fullscreen modal (position fixed, dark backdrop, z 200, close button, Esc + backdrop-click already worked). Commit `4987022`.
+- **`/output/delete` orphaned the raw mp4** — after an upscale pass, only the clicked file + its sidecar moved to Trash. The hidden native `<base>.mp4` (kept on disk for restore-from-source) stayed. Now collects every companion via sidecar fields + filename heuristic (`UPSCALE_TAGS = (720p, v720p, up2x)`). Commit `0dba2dc`.
+- **`/sidecar` 404'd on raw card** — after an upscale, the sidecar lives next to `<base>_720p.mp4`, not `<base>.mp4`. Clicking Load Params on a raw card → 404 → loadParams() bails silently. `/sidecar` now walks the same `UPSCALE_TAGS` family. Commit `331795a`.
+- **`/stop` didn't kill training subprocess** — face + audio trainer Popens were inherited into the panel's process group. `/stop` killed HELPER + mux ffmpeg but the trainer ran for hours. Both Popens now use `start_new_session=True`; `STATE["train_pgid"]` tracked; `stop_current_job()` SIGTERMs via killpg with 8s SIGKILL fallback. Commit `b6d1222`.
+- **`/queue/batch` silently rendered 5s clips when caller sent `duration=10`** — `make_job` reads `frames` directly from form (default 121 = 5s). The UI JS does duration→frames math client-side, but `/queue/batch` from curl skips that. Now: if `duration` is set + `frames` isn't, derive frames via `_duration_to_8k_frames`. Commit `038a0a1`.
+- **Train Character High preset subtitle skew** — UI said `~4 h · rank 32 · 768px` while canonical Python preset is `rank 32 · 5000 steps · 512px · ~2h50m`. Fixed HTML + JS copy. Commit `4255f12`.
+- **Dual quality strip rendered on top of each other** — `_applyCharacterQualityStripVisibility()` set `hidden` on the unwanted strip, but `.quality-strip { display: grid }` outranked the user-agent `[hidden] { display: none }` at CSS specificity (0,0,1,0) vs (0,0,0,0). Both strips visible at once. Fixed with `.quality-strip[hidden] { display: none !important }`. Commit `7bd5057`.
+- **Train tab voice toggle defaulted OFF** — even when a voice clip was uploaded, users had to manually click the toggle to enable audio training. Now defaults ON; the disabled state until upload still prevents submission without a clip. Commit `ea2cf02`.
+- **caption_strategy="user_provided" rejected by trainer** — panel auto-fills missing captions then sets `caption_strategy=user_provided`. lora_lab rejected the value ("unknown caption_strategy") and exited code 1 immediately. Salo's Eltrumpo run was the first to hit this (auto-caption produced 37 user .txt files). Fixed in lora-lab (commit `b04eaab` on `feat/train-character-cli`): alias map `'user_provided' → 'class_word'` + `'trigger_simple' → 'class_word'`. Commits in this repo: `8b5a3cf` (the eventual panel-side defense-in-depth).
+- **Q4-distilled inference of dev-trained character LoRAs gave generic-Trump output** — character LoRAs were silently routed through the Q4 pipeline when `quality=balanced`, but their training base is the Q8 dev transformer with full sigma schedule + CFG. Fused into distilled = wrong base = identity barely locks. UI now forces Q8 chips when a character is selected; backend rejects `character_id + quality != high`. Commits `1d7983a`, `8b5a3cf`.
+- **HQ-speed Fast pill was inactive at boot** — the boot cascade ran `_applyCharacterQualityStripVisibility()` with no character selected → else branch fired `_setSkipStepEnabled(false)` → removed `.active` from the HTML-default Fast pill → first character render missed the Codex 12% optimization. Fixed in two commits: `1056c99` (stopped the row-visibility helper from touching skip-step) and `04d2ffd` (stopped the character cascade else branch from touching skip-step too; HQ-speed pill in Customize is now the single source of truth).
 
 ### Fixed in v2.0.6 (May 8 2026)
 
