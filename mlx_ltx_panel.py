@@ -20746,10 +20746,19 @@ async function charactersLoadParams(p) {
     if (durInp) durInp.value = durSec;
   }
 
-  // Restore seed if not -1 (random).
-  if (typeof p.seed !== 'undefined' && String(p.seed) !== '-1') {
+  // Restore seed — prefer seed_used (the integer the helper actually
+  // picked at generation time) over seed (often '-1' when the user let
+  // the panel randomize). Without this preference, Load Params on a
+  // -1 submission restored -1 and the next render got a fresh random
+  // seed instead of reproducing the source clip. Mirrors the Manual
+  // loadParams fix (commit b024bb5, 2026-05-18); the Character branch
+  // was missed in that pass and reported by Mr Bizarro on the panel.
+  const _seedRaw = (p.seed_used != null && String(p.seed_used) !== '' && String(p.seed_used) !== '-1')
+                    ? p.seed_used
+                    : p.seed;
+  if (typeof _seedRaw !== 'undefined' && _seedRaw !== null && String(_seedRaw) !== '-1') {
     const seedInp = document.getElementById('seed');
-    if (seedInp) seedInp.value = String(p.seed);
+    if (seedInp) seedInp.value = String(_seedRaw);
   }
 
   // Prompt textarea — verbatim. Use prompt_body if present (legacy
