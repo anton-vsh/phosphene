@@ -57,6 +57,7 @@ tier-aware default table.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -1166,7 +1167,29 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
 # settings UI can surface a precise error if either is missing.
 # ---------------------------------------------------------------------------
 
-HIDREAM_LAB_DIR = Path("/Users/salo/HIDREAM-O1-MLX-LAB-active")
+# HiDream-O1 MLX lab — the standalone repo that ships the BF16 generator
+# script + custom_heads.safetensors. Public installs that want to enable
+# the HiDream engine point this at their checkout via
+# ``HIDREAM_LAB_DIR`` (env). Default lives just outside the home dir so
+# Pinokio cleanup never touches it; if the env var isn't set, falls back
+# to ``~/HIDREAM-O1-MLX-LAB-active`` and ``~/AI/HIDREAM-O1-MLX-LAB-active``
+# in that order. The health check below reports clearly when neither
+# exists so users know to clone the lab.
+def _resolve_hidream_lab_dir() -> Path:
+    env_p = os.environ.get("HIDREAM_LAB_DIR")
+    if env_p:
+        return Path(env_p).expanduser()
+    home = Path.home()
+    for cand in (home / "HIDREAM-O1-MLX-LAB-active",
+                 home / "AI" / "HIDREAM-O1-MLX-LAB-active",
+                 home / "AI" / "projects" / "HIDREAM-O1-MLX-LAB-active"):
+        if cand.exists():
+            return cand
+    # Return the most conventional location even if it doesn't exist —
+    # the health check surfaces a clean error from here.
+    return home / "HIDREAM-O1-MLX-LAB-active"
+
+HIDREAM_LAB_DIR = _resolve_hidream_lab_dir()
 HIDREAM_DEFAULT_PY = HIDREAM_LAB_DIR / ".venv" / "bin" / "python"
 # BF16 (no quantization) is the only precision that doesn't accumulate visible
 # patch-grid artifacts. Upstream loads weights in fp32 + autocasts to bf16;

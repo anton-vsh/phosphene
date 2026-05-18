@@ -54,8 +54,8 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 
 ```json
 [
-  {"path": "/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/loras/ariatrn_v2.safetensors", "strength": 1.0},
-  {"path": "/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/loras/ariatrn.audio.safetensors", "strength": 1.0}
+  {"path": "<panel-root>/mlx_models/loras/ariatrn_v2.safetensors", "strength": 1.0},
+  {"path": "<panel-root>/mlx_models/loras/ariatrn.audio.safetensors", "strength": 1.0}
 ]
 ```
 
@@ -75,7 +75,7 @@ curl -s -X POST http://127.0.0.1:8199/queue/add \
   --data-urlencode "bongmath_max_iter=100" --data-urlencode "accel=off" \
   --data-urlencode "enhance=false" --data-urlencode "upscale=fit_720p" \
   --data-urlencode "upscale_method=lanczos" --data-urlencode "seed=-1" \
-  --data-urlencode 'loras=[{"path":"/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/loras/bizarrotrn_v2.safetensors","strength":1.0},{"path":"/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/loras/bizarrotrn.audio.safetensors","strength":1.0}]'
+  --data-urlencode 'loras=[{"path":"<panel-root>/mlx_models/loras/bizarrotrn_v2.safetensors","strength":1.0},{"path":"<panel-root>/mlx_models/loras/bizarrotrn.audio.safetensors","strength":1.0}]'
 ```
 
 ### `POST /run` — alias for `/queue/add` (identical behavior).
@@ -456,7 +456,8 @@ def wait_terminal(job_id, timeout=1800):
     raise TimeoutError(f"job {job_id} did not finish")
 
 if __name__ == "__main__":
-    LORAS_DIR = "/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/loras"
+    # Adjust to wherever your Phosphene install lives:
+    LORAS_DIR = "<panel-root>/mlx_models/loras"
     job_id = submit(
         prompt="Cinematic close-up of bizarrotrn man in a wood-paneled study, photorealistic.",
         loras=[

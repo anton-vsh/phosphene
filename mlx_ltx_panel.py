@@ -1604,8 +1604,11 @@ def _character_dataset_image(trigger: str) -> Path | None:
             avatar = char_dir / f"avatar{ext}"
             if avatar.is_file():
                 return avatar
-    # 2 + 3. lora-lab conventions (legacy / manual).
-    lab_root = Path("/Users/salo/AI/projects/lora-lab")
+    # 2 + 3. lora-lab conventions (legacy / manual). LORA_LAB_ROOT is
+    # the vendored install dir by default; the LTX_LORA_LAB_ROOT env
+    # var can repoint it at an external authoring tree (e.g.
+    # ~/AI/projects/lora-lab) for in-place iteration.
+    lab_root = LORA_LAB_ROOT
     stem = trigger[:-3] if trigger.endswith("trn") else trigger
     candidates = [
         lab_root / f"dataset_{stem}_v2" / "images" / f"{trigger}_001.png",
@@ -5882,10 +5885,24 @@ def run_job_inner(job: dict) -> None:
         job["raw_path"] = str(out_path)
         # Optional reference image — when present the pipeline anchors
         # frame 0 the same way I2V does. When absent it's pure A2V.
+        #
+        # make_job() defaults `image` to the panel's example REFERENCE
+        # (examples/reference.png) so every job spec carries it whether
+        # the user picked anything or not. The Audio tab UI only POSTs
+        # `image=` when a ref slot is actually filled; the make_job
+        # default is what we have to filter out here, otherwise pure
+        # A2V silently runs image-conditioned with the canned reference
+        # PNG and the user has no idea why their A2V looks the same
+        # every time. Treat the panel defaults as "no image" and only
+        # promote to a real ref when the user genuinely picked one.
         ref_image_path = p.get("image") if p.get("image") else None
-        # The panel ships the reference path defaulted to examples/reference.png
-        # via AUDIO_DEFAULT-style fallback; only treat as a "real" image if
-        # the user actually picked something distinct from the inert default.
+        if ref_image_path:
+            try:
+                resolved = Path(ref_image_path).resolve()
+                if resolved == REFERENCE.resolve():
+                    ref_image_path = None
+            except (OSError, ValueError):
+                pass
         if ref_image_path and not Path(ref_image_path).exists():
             ref_image_path = None
         # LoRAs flow through unchanged — useful for character A2V.
@@ -7039,10 +7056,23 @@ class Handler(BaseHTTPRequestHandler):
             # Y1.039 — per-job progress for the Now-card. Phase-aware,
             # config-bucketed ETA, denoise-step extrapolation. Replaces the
             # old elapsed/global-avg ratio that mis-paced Quick/High renders.
+            #
+            # Train jobs OWN their own progress dict — the trainer writes
+            # step / phase / eta directly into STATE["current"]["progress"]
+            # at runtime (see run_train_job_inner around line 5212 for the
+            # face phase and 5461 for the voice phase). _compute_progress
+            # is built around the video helper's log-tail format and would
+            # blindly stamp a "phase=setup" snapshot on top of the trainer's
+            # real "Training face · step N / total", making the Now card
+            # appear stuck at Loading pipeline. Skip the override when the
+            # job mode is "train".
             if payload.get("current"):
-                payload["current"]["progress"] = _compute_progress(
-                    payload["current"], payload.get("log") or [],
-                )
+                _mode = ((payload["current"].get("params") or {})
+                         .get("mode") or "").lower()
+                if _mode != "train":
+                    payload["current"]["progress"] = _compute_progress(
+                        payload["current"], payload.get("log") or [],
+                    )
             payload["helper"] = {
                 "alive": HELPER.is_alive(), "pid": HELPER.pid(),
                 "low_memory": HELPER_LOW_MEMORY == "true",
@@ -7506,7 +7536,7 @@ class Handler(BaseHTTPRequestHandler):
             # lora-lab dataset tree (legacy / manual characters) OR the
             # panel-owned characters cache (new Train-tab avatars).
             try:
-                lab_root = Path("/Users/salo/AI/projects/lora-lab").resolve()
+                lab_root = LORA_LAB_ROOT.resolve()
                 char_root = _CHARACTERS_CACHE_PATH.resolve()
                 resolved = sample.resolve()
                 in_lab = resolved.is_relative_to(lab_root)
@@ -9747,6 +9777,58 @@ class Handler(BaseHTTPRequestHandler):
                 _VERSION_STATE["pull_pulled_to_version"] = None
                 _VERSION_STATE["pull_requires_full_update"] = False
             try:
+                # Server-side guard (P2 hardening 2026-05-18). The UI already
+                # refuses to surface the magic Update button unless the
+                # local repo is clean + on main + with no local commits
+                # ahead, but a malicious POST could otherwise bypass that
+                # and silently trigger `reset --hard` on the user's repo.
+                # Re-validate here so the endpoint never destroys local
+                # work without explicit ?force=1 opt-in.
+                cur_branch = (_git_capture(
+                    ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
+                if cur_branch != "main":
+                    self._json({
+                        "ok": False,
+                        "error": (
+                            f"refusing to pull: local repo is on '{cur_branch}', "
+                            f"not 'main'. Switch to main or run a fresh Pinokio "
+                            f"install if you didn't intend to be on a side branch."
+                        ),
+                    }, 409)
+                    return
+                # `git status --porcelain` is empty iff the working tree is
+                # clean. The UI's clean-check uses the same probe.
+                dirty = (_git_capture(["status", "--porcelain"]) or "").strip()
+                if dirty:
+                    self._json({
+                        "ok": False,
+                        "error": (
+                            "refusing to pull: local working tree has "
+                            "uncommitted changes. Commit, stash, or discard "
+                            "them, then click Update again."
+                        ),
+                        "dirty_files": dirty.splitlines()[:20],
+                    }, 409)
+                    return
+                # Block if there are local commits ahead of origin — those
+                # would be wiped by the reset --hard fallback below.
+                ahead = (_git_capture(
+                    ["rev-list", "--count", "origin/main..HEAD"]) or "0").strip()
+                try:
+                    ahead_n = int(ahead)
+                except ValueError:
+                    ahead_n = 0
+                if ahead_n > 0:
+                    self._json({
+                        "ok": False,
+                        "error": (
+                            f"refusing to pull: local has {ahead_n} commit(s) "
+                            f"ahead of origin/main. Push them or reset manually "
+                            f"if you don't need them."
+                        ),
+                    }, 409)
+                    return
+
                 # Capture HEAD before the pull so we can diff afterwards.
                 pre_sha = _git_capture(["rev-parse", "HEAD"]) or ""
                 # Step 1: fetch — populates origin/main without touching HEAD.
@@ -9768,9 +9850,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Step 3: if the fast-forward refused (history diverged from
                 # origin — e.g. because of a past force-push that scrubbed
                 # commit identities), fall back to a hard reset onto
-                # origin/main. A Pinokio-installed panel is not a place
-                # users keep local commits, so this is the Right Thing —
-                # it's what they meant by clicking Update.
+                # origin/main. Guards above already proved this is safe
+                # (clean tree + on main + nothing ahead), so the reset just
+                # snaps the diverged history back to upstream.
                 if pull_proc.returncode != 0:
                     reset_proc = subprocess.run(
                         ["git", "-C", str(ROOT), "reset", "--hard", "origin/main"],
@@ -19649,11 +19731,16 @@ function audioStudioRenderSlots() {
       const dur = (AUDIO_STUDIO.audioDuration != null)
         ? ' · ' + AUDIO_STUDIO.audioDuration.toFixed(1) + ' s'
         : '';
+      // escapeHtml — user-supplied filename can contain &, <, >, ", '
+      // that would otherwise break out of innerHTML into attribute/tag
+      // context. Same defense the rest of the panel uses for any user
+      // string that ends up in innerHTML.
+      const safeName = escapeHtml(AUDIO_STUDIO.audioName || 'audio');
       audioSlot.innerHTML =
         '<span class="ref-tag">Audio</span>' +
         '<div style="padding:18px 12px;text-align:center;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;">' +
         '<svg class="ph" aria-hidden="true" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;"><use href="#ph-music-notes"/></svg>' +
-        (AUDIO_STUDIO.audioName || 'audio') + dur +
+        safeName + dur +
         '<div class="hint" style="margin-top:8px;">' +
           '<a href="#" onclick="event.stopPropagation();audioStudioClearAudio();return false;">Remove</a>' +
         '</div>' +

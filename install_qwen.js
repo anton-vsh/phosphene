@@ -57,6 +57,26 @@ module.exports = {
         // The 0.17.5 baseline shipped Edit-2509 multi-image fixes
         // (vision encoder save bug) and is the bottom of our FBCache
         // patch contract.
+        //
+        // Two-step install (P2 fix 2026-05-18). The previous
+        // single-step `pip install --force-reinstall --no-deps` left
+        // mflux's transitive dependencies (transformers, accelerate,
+        // sentencepiece, ...) MISSING on fresh installs, so the very
+        // first attempt to call mflux silently ImportError'd inside a
+        // subprocess and the panel reported "engine not installed"
+        // instead of working. New shape:
+        //   Step 1: install WITH deps so pip resolves the full
+        //     transitive set.
+        //   Step 2: force-reinstall the same version WITHOUT deps so
+        //     pip never silently bumps a transitive dep when we
+        //     re-run later.
+        message: "./ltx-2-mlx/env/bin/pip install 'mflux==0.17.5'"
+      }
+    },
+    {
+      method: "shell.run",
+      params: {
+        // Pin-tightening pass — see two-step rationale above.
         message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'"
       }
     },

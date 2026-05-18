@@ -8,7 +8,7 @@
       "key": "q4",
       "kind": "base",
       "name": "LTX 2.3 — Q4 (base model, distilled)",
-      "blurb": "Required. Drives Standard / Draft renders.",
+      "blurb": "Required. Drives Quick / Balanced / Standard renders.",
       "repo_id": "dgrauet/ltx-2.3-mlx-q4",
       "local_dir": "mlx_models/ltx-2.3-mlx-q4",
       "size_gb": 20,
