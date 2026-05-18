@@ -5557,7 +5557,7 @@ def run_job_inner(job: dict) -> None:
     quality = p.get("quality", "standard")
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
-    if quality == "high" or mode in ("extend", "keyframe"):
+    if quality == "high" or mode in ("extend", "keyframe", "a2v"):
         p["accel"] = "off"
 
     # Guard: Q4 distilled hardcoded 9-sigma schedule needs the full walk to
@@ -5567,7 +5567,8 @@ def run_job_inner(job: dict) -> None:
     # Modes that don't use the distilled `steps` field skip this check:
     #   - extend / keyframe use stage1_steps + stage2_steps via two-stage path
     #   - high quality uses two-stage HQ with its own schedule
-    if mode not in ("extend", "keyframe") and quality != "high" and int(p.get("steps", 8)) < 8:
+    #   - a2v uses A2VidPipelineTwoStage's stage1/stage2 walks
+    if mode not in ("extend", "keyframe", "a2v") and quality != "high" and int(p.get("steps", 8)) < 8:
         raise RuntimeError(
             f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
             "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
@@ -5844,6 +5845,104 @@ def run_job_inner(job: dict) -> None:
         write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
         job["output_path"] = str(out_path)
         push(f"Keyframe done in {sidecar['elapsed_sec']}s → {out_path.name}")
+        if p.get("open_when_done"):
+            subprocess.run(["open", str(out_path)], check=False)
+        return
+
+    # Audio → Video (A2VidPipelineTwoStage).
+    # Pipeline drives generation FROM the input audio waveform. Optional
+    # reference image conditions frame 0 (single picture; pipeline cover-
+    # crops to target). Original audio is muxed onto the output by the
+    # pipeline itself — no panel-side mux needed (unlike i2v_clean_audio).
+    # Always Q8 dev + distilled LoRA stage 2 (the pipeline requires both).
+    if mode == "a2v":
+        if not SYSTEM_CAPS["allows_q8"]:
+            raise RuntimeError(
+                f"Audio → Video isn't supported on the {SYSTEM_CAPS['label']} "
+                f"hardware tier — the Q8 dev transformer + audio VAE peak "
+                f"doesn't fit. Bump to 64+ GB."
+            )
+        a2v_missing = q8_missing_files()
+        if a2v_missing:
+            raise RuntimeError(
+                f"Audio → Video requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"Missing {len(a2v_missing)} file(s): {', '.join(a2v_missing[:3])}"
+                f"{' …' if len(a2v_missing) > 3 else ''}. "
+                f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+            )
+        audio_src = (p.get("audio") or "").strip()
+        if not audio_src or not Path(audio_src).exists():
+            raise RuntimeError(f"audio file not found: {audio_src}")
+        width, height = int(p["width"]), int(p["height"])
+        frames = int(p["frames"])
+        desc_stem = _descriptive_filename(
+            p.get("label") or "", p.get("prompt") or "", fallback="a2v"
+        )
+        out_path = _unique_output_path(OUTPUT, desc_stem)
+        job["raw_path"] = str(out_path)
+        # Optional reference image — when present the pipeline anchors
+        # frame 0 the same way I2V does. When absent it's pure A2V.
+        ref_image_path = p.get("image") if p.get("image") else None
+        # The panel ships the reference path defaulted to examples/reference.png
+        # via AUDIO_DEFAULT-style fallback; only treat as a "real" image if
+        # the user actually picked something distinct from the inert default.
+        if ref_image_path and not Path(ref_image_path).exists():
+            ref_image_path = None
+        # LoRAs flow through unchanged — useful for character A2V.
+        a2v_loras = list(p.get("loras") or [])
+        if p.get("hdr"):
+            a2v_loras.append({
+                "path": CURATED_LORAS["hdr"]["repo_id"],
+                "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
+            })
+        job_spec = {
+            "action": "generate_a2v",
+            "id": job["id"],
+            "params": {
+                "model_dir": str(Q8_LOCAL_PATH),
+                "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
+                "output_path": str(out_path),
+                "audio_path": audio_src,
+                "image": ref_image_path,
+                "height": height,
+                "width": width,
+                "frames": frames,
+                "frame_rate": float(FPS),
+                "seed": p["seed"],
+                "stage1_steps": int(p.get("stage1_steps", 20)),
+                "stage2_steps": int(p.get("stage2_steps", 3)),
+                "cfg_scale": float(p.get("cfg_scale", 3.0)),
+                "stg_scale": float(p.get("stg_scale", 1.0)),
+                "loras": a2v_loras,
+            },
+        }
+        push(
+            f"Run A2V via helper: id={job['id']} {width}x{height} {frames}f · "
+            f"audio={Path(audio_src).name}"
+            f"{' image=' + Path(ref_image_path).name if ref_image_path else ''} · "
+            f"{len(a2v_loras)} LoRA"
+            f"{'s' if len(a2v_loras) != 1 else ''}"
+        )
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            push(f"seed used: {result['seed_used']}")
+            p["seed_used"] = result["seed_used"]
+        sidecar = {
+            "output": str(out_path), "raw_output": str(out_path),
+            "params": {**p, "command": "generate_a2v", "audio": audio_src,
+                       "image": ref_image_path},
+            "started": job.get("started_at"),
+            "elapsed_sec": round(time.time() - job["started_ts"], 2)
+            if job.get("started_ts") else None,
+            "video_duration_sec": video_duration(frames),
+            "fps": FPS, "model": str(Q8_LOCAL_PATH), "queue_id": job["id"],
+            "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
+        }
+        write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
+        job["output_path"] = str(out_path)
+        push(f"A2V done in {sidecar['elapsed_sec']}s → {out_path.name}")
         if p.get("open_when_done"):
             subprocess.run(["open", str(out_path)], check=False)
         return
@@ -10995,8 +11094,21 @@ HTML = r"""<!doctype html>
     body[data-workflow="train"] #modeGroup,
     body[data-workflow="train"] aside.form-pane > h2,
     body[data-workflow="train"] #genForm,
-    body[data-workflow="train"] #studioSection { display: none !important; }
+    body[data-workflow="train"] #studioSection,
+    body[data-workflow="train"] #audioSectionTab { display: none !important; }
     body[data-workflow="train"] #trainSection { display: block; }
+
+    /* Audio → Video is its own workflow tier alongside Video / Images / Train.
+       Pure A2V (audio + prompt) and Image + Audio (audio + still + prompt)
+       both live here, behind one audio drop-zone + optional image picker.
+       Hides the manual-only chrome the same way Train / Studio do. */
+    body[data-workflow="audio"] #modelsInline,
+    body[data-workflow="audio"] #modeGroup,
+    body[data-workflow="audio"] aside.form-pane > h2,
+    body[data-workflow="audio"] #genForm,
+    body[data-workflow="audio"] #studioSection,
+    body[data-workflow="audio"] #trainSection { display: none !important; }
+    body[data-workflow="audio"] #audioSectionTab { display: block; }
 
     /* =========================================================
        CAPABILITY TIER (Q4 vs Q8) — Codex C+ recommendation, 2026-05-17
@@ -11922,7 +12034,8 @@ HTML = r"""<!doctype html>
     body[data-workflow="studio"] aside.form-pane > h2,
     body[data-workflow="studio"] #genForm,
     body[data-workflow="studio"] #trainSection,
-    body[data-workflow="studio"] #charactersSection { display: none !important; }
+    body[data-workflow="studio"] #charactersSection,
+    body[data-workflow="studio"] #audioSectionTab { display: none !important; }
     body[data-workflow="studio"] #studioSection { display: block; }
 
     /* ============================================================
@@ -16460,7 +16573,8 @@ HTML = r"""<!doctype html>
     <nav class="workflow-tabs" id="workflowTabs">
       <button data-workflow="manual" class="active"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg>Video</button>
       <button data-workflow="studio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg>Images</button>
-      <button data-workflow="train"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character<span class="new-badge">NEW</span></button>
+      <button data-workflow="audio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>Audio<span class="new-badge">NEW</span></button>
+      <button data-workflow="train"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character</button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
@@ -17866,6 +17980,109 @@ HTML = r"""<!doctype html>
       </div>
 
     </div>
+
+    <!-- ============== AUDIO → VIDEO (own workflow tab) ==============
+         Routes to the helper's `generate_a2v` action which loads
+         A2VidPipelineTwoStage (Q8 dev + distilled LoRA stage 2). The
+         pipeline writes the original input audio onto the output MP4
+         itself — no panel-side mux. Reference image is optional; when
+         present the pipeline anchors frame 0 (same shape as I2V), so
+         the same surface covers both pure A2V (audio only) and
+         Image + Audio (audio + still). -->
+    <div id="audioSectionTab" style="display:none">
+      <div class="composer-card">
+        <div class="composer-refs">
+          <div class="show">
+            <h2>Audio
+              <span class="h2-hint">drives the generation · WAV / MP3 / M4A / FLAC</span>
+            </h2>
+            <div class="studio-ref-grid" style="grid-template-columns:1fr;">
+              <div class="studio-ref-slot" id="audioStudioAudioSlot" data-slot="audio" style="aspect-ratio:auto;min-height:96px;">
+                <span class="ref-tag">Audio</span>
+                <div class="hint" style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;">
+                  Drop a WAV / MP3 / M4A / FLAC here, or click to pick a file.
+                </div>
+              </div>
+            </div>
+            <input type="file" id="audioStudioAudioInput" accept=".wav,.mp3,.m4a,.flac,audio/*" style="display:none">
+          </div>
+        </div>
+
+        <div class="composer-refs">
+          <div class="show">
+            <h2>Reference image
+              <span class="h2-hint">optional · anchors frame 0 like I2V</span>
+            </h2>
+            <div class="studio-ref-grid" style="grid-template-columns:1fr;">
+              <div class="studio-ref-slot" id="audioStudioImageSlot" data-slot="image">
+                <span class="ref-tag">Image</span>
+              </div>
+            </div>
+            <input type="file" id="audioStudioImageInput" accept="image/*" style="display:none">
+            <div class="hint" style="margin-top:6px">
+              Leave empty for pure Audio → Video. Add an image to open the clip on that frame (e.g. a portrait for a talking-head shot).
+            </div>
+          </div>
+        </div>
+
+        <textarea id="audioStudioPrompt" class="composer-prompt" rows="4"
+                  placeholder="A photoreal medium close-up of a woman speaking to camera, soft daylight, shallow depth of field, natural skin pores"></textarea>
+      </div>
+
+      <div class="studio-status-row" style="margin: 6px 0 -4px;">
+        <span id="audioStudioStatus" class="hint"></span>
+      </div>
+
+      <!-- Quick settings: aspect / duration / seed / quality.
+           Aspect maps to the same width/height table the Characters tab
+           uses (1024×576 high, 736×416 draft). Duration → frames at
+           8k+1 cadence the model expects. -->
+      <div class="quick-settings">
+        <div>
+          <div class="mini-fields">
+            <div class="mf-cell">
+              <span class="mf-label">Aspect</span>
+              <select id="audioStudioAspect" style="padding:7px 9px;font-size:13px;">
+                <option value="16:9" selected>16:9 — 1024×576</option>
+                <option value="9:16">9:16 — 576×1024</option>
+                <option value="1:1">1:1 — 768×768</option>
+                <option value="4:3">4:3 — 832×608</option>
+              </select>
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Duration</span>
+              <select id="audioStudioDuration" style="padding:7px 9px;font-size:13px;">
+                <option value="5">5 s</option>
+                <option value="7" selected>7 s</option>
+                <option value="10">10 s</option>
+              </select>
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Seed</span>
+              <input type="number" id="audioStudioSeed" value="-1" placeholder="-1 = random">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hint" style="margin-top:8px">
+        Audio → Video uses the Q8 dev transformer with audio conditioning.
+        Wall time is similar to High-quality I2V (~7–9 min on a 64 GB M-Max
+        for a 7 s 1024×576 clip).
+      </div>
+
+      <div class="form-action-footer" id="audioStudioFooter">
+        <div class="queue-strip">
+          <span class="qchip-spacer"></span>
+          <span class="qchip-derived" id="audioStudioEstimate"></span>
+        </div>
+        <div class="actions">
+          <button type="button" class="primary" id="audioStudioGenBtn" onclick="audioStudioGenerate()">Generate</button>
+          <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
+        </div>
+      </div>
+    </div>
+
   </aside>
 
   <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
@@ -19302,6 +19519,249 @@ function imgStudioCopyPath(path) {
   };
   if (!navigator.clipboard || !navigator.clipboard.writeText) { legacy(); return; }
   navigator.clipboard.writeText(path).then(() => flash('Path copied.')).catch(() => legacy());
+}
+
+// ====== Audio → Video pane ===================================================
+// State for the Audio workflow tab. Routes to make_job with mode='a2v'.
+// One drop-zone for audio (required), one for an optional reference image.
+const AUDIO_STUDIO = {
+  busy: false,
+  audioPath: null,      // server-side path returned by /upload
+  audioName: null,      // display name for the drop-zone tag
+  audioDuration: null,  // probed duration (seconds) if ffprobe returns it
+  imagePath: null,
+  imageName: null,
+  wired: false,         // init() runs once
+};
+
+function audioStudioInit() {
+  if (AUDIO_STUDIO.wired) return;
+  AUDIO_STUDIO.wired = true;
+  const audioSlot = document.getElementById('audioStudioAudioSlot');
+  const audioInput = document.getElementById('audioStudioAudioInput');
+  const imageSlot = document.getElementById('audioStudioImageSlot');
+  const imageInput = document.getElementById('audioStudioImageInput');
+
+  // Audio drop-zone wiring — click to pick, drag-and-drop, paste.
+  if (audioSlot && audioInput) {
+    audioSlot.addEventListener('click', () => audioInput.click());
+    audioSlot.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      audioSlot.classList.add('drop-active');
+    });
+    audioSlot.addEventListener('dragleave', () => audioSlot.classList.remove('drop-active'));
+    audioSlot.addEventListener('drop', (e) => {
+      e.preventDefault();
+      audioSlot.classList.remove('drop-active');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+        audioStudioUploadAudio(e.dataTransfer.files[0]);
+      }
+    });
+    audioInput.addEventListener('change', () => {
+      if (audioInput.files && audioInput.files[0]) {
+        audioStudioUploadAudio(audioInput.files[0]);
+      }
+    });
+  }
+
+  // Image drop-zone wiring (optional reference frame 0).
+  if (imageSlot && imageInput) {
+    imageSlot.addEventListener('click', () => imageInput.click());
+    imageSlot.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      imageSlot.classList.add('drop-active');
+    });
+    imageSlot.addEventListener('dragleave', () => imageSlot.classList.remove('drop-active'));
+    imageSlot.addEventListener('drop', (e) => {
+      e.preventDefault();
+      imageSlot.classList.remove('drop-active');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+        audioStudioUploadImage(e.dataTransfer.files[0]);
+      }
+    });
+    imageInput.addEventListener('change', () => {
+      if (imageInput.files && imageInput.files[0]) {
+        audioStudioUploadImage(imageInput.files[0]);
+      }
+    });
+  }
+  audioStudioRenderSlots();
+}
+
+async function audioStudioUploadAudio(file) {
+  const status = document.getElementById('audioStudioStatus');
+  if (status) status.textContent = 'Uploading audio…';
+  try {
+    const fd = new FormData();
+    // /upload accepts both `image` and `audio` field names.
+    fd.append('audio', file);
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    AUDIO_STUDIO.audioPath = data.path || null;
+    AUDIO_STUDIO.audioName = file.name;
+    AUDIO_STUDIO.audioDuration = (data.duration_sec != null) ? Number(data.duration_sec) : null;
+    audioStudioRenderSlots();
+    if (status) status.textContent = '';
+  } catch (e) {
+    if (status) status.textContent = 'Audio upload failed: ' + (e.message || 'unknown');
+  }
+}
+
+async function audioStudioUploadImage(file) {
+  const status = document.getElementById('audioStudioStatus');
+  if (status) status.textContent = 'Uploading image…';
+  try {
+    const fd = new FormData();
+    fd.append('image', file);
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    AUDIO_STUDIO.imagePath = data.path || null;
+    AUDIO_STUDIO.imageName = file.name;
+    audioStudioRenderSlots();
+    if (status) status.textContent = '';
+  } catch (e) {
+    if (status) status.textContent = 'Image upload failed: ' + (e.message || 'unknown');
+  }
+}
+
+function audioStudioClearImage() {
+  AUDIO_STUDIO.imagePath = null;
+  AUDIO_STUDIO.imageName = null;
+  audioStudioRenderSlots();
+}
+
+function audioStudioClearAudio() {
+  AUDIO_STUDIO.audioPath = null;
+  AUDIO_STUDIO.audioName = null;
+  AUDIO_STUDIO.audioDuration = null;
+  audioStudioRenderSlots();
+}
+
+function audioStudioRenderSlots() {
+  const audioSlot = document.getElementById('audioStudioAudioSlot');
+  const imageSlot = document.getElementById('audioStudioImageSlot');
+  if (audioSlot) {
+    if (AUDIO_STUDIO.audioPath) {
+      const dur = (AUDIO_STUDIO.audioDuration != null)
+        ? ' · ' + AUDIO_STUDIO.audioDuration.toFixed(1) + ' s'
+        : '';
+      audioSlot.innerHTML =
+        '<span class="ref-tag">Audio</span>' +
+        '<div style="padding:18px 12px;text-align:center;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;">' +
+        '<svg class="ph" aria-hidden="true" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;"><use href="#ph-music-notes"/></svg>' +
+        (AUDIO_STUDIO.audioName || 'audio') + dur +
+        '<div class="hint" style="margin-top:8px;">' +
+          '<a href="#" onclick="event.stopPropagation();audioStudioClearAudio();return false;">Remove</a>' +
+        '</div>' +
+        '</div>';
+    } else {
+      audioSlot.innerHTML =
+        '<span class="ref-tag">Audio</span>' +
+        '<div class="hint" style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;">' +
+        'Drop a WAV / MP3 / M4A / FLAC here, or click to pick a file.' +
+        '</div>';
+    }
+  }
+  if (imageSlot) {
+    if (AUDIO_STUDIO.imagePath) {
+      imageSlot.innerHTML =
+        '<span class="ref-tag">Image</span>' +
+        '<img src="/uploads/' + encodeURIComponent(AUDIO_STUDIO.imagePath.split(/[/\\\\]/).pop()) + '" ' +
+        '     alt="" style="max-width:100%;max-height:240px;border-radius:6px;display:block;margin:8px auto;">' +
+        '<div class="hint" style="text-align:center;">' +
+          '<a href="#" onclick="event.stopPropagation();audioStudioClearImage();return false;">Remove</a>' +
+        '</div>';
+    } else {
+      imageSlot.innerHTML =
+        '<span class="ref-tag">Image</span>' +
+        '<div class="hint" style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;">' +
+        'Optional · click to add an image that anchors frame 0.' +
+        '</div>';
+    }
+  }
+}
+
+async function audioStudioGenerate() {
+  if (AUDIO_STUDIO.busy) return;
+  const status = document.getElementById('audioStudioStatus');
+  const btn = document.getElementById('audioStudioGenBtn');
+  const prompt = (document.getElementById('audioStudioPrompt').value || '').trim();
+  if (!AUDIO_STUDIO.audioPath) {
+    if (status) status.textContent = 'Audio file is required.';
+    return;
+  }
+  if (!prompt) {
+    if (status) status.textContent = 'Prompt is required.';
+    return;
+  }
+  // Aspect → width/height map. Snapped to multiples of 32 so the latent
+  // grid is exact (LTX requires HW % 32 == 0; the panel checks this in
+  // make_job too but we pre-snap to keep the user's chosen ratio).
+  const aspect = (document.getElementById('audioStudioAspect').value || '16:9');
+  const aspectMap = {
+    '16:9': [1024, 576],
+    '9:16': [576, 1024],
+    '1:1':  [768, 768],
+    '4:3':  [832, 608],
+  };
+  const [w, h] = aspectMap[aspect] || aspectMap['16:9'];
+  // Duration → frames at 8k+1 cadence the model expects.
+  const dur = parseInt(document.getElementById('audioStudioDuration').value || '7', 10);
+  // 24 fps → frames per second; snap to nearest 8k+1.
+  const targetFrames = Math.max(1, Math.round(dur * 24));
+  const frames = ((targetFrames - 1 + 7) >> 3 << 3) + 1;  // round up to 8k+1
+  const seed = parseInt(document.getElementById('audioStudioSeed').value || '-1', 10);
+
+  AUDIO_STUDIO.busy = true;
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Queueing…';
+  try {
+    const fd = new URLSearchParams();
+    fd.set('mode', 'a2v');
+    fd.set('prompt', prompt);
+    fd.set('audio', AUDIO_STUDIO.audioPath);
+    if (AUDIO_STUDIO.imagePath) fd.set('image', AUDIO_STUDIO.imagePath);
+    fd.set('width', String(w));
+    fd.set('height', String(h));
+    fd.set('frames', String(frames));
+    fd.set('seed', String(seed));
+    fd.set('quality', 'high');  // A2V is always Q8 dev-class
+    // No accel, no enhance — A2V uses A2VidPipelineTwoStage's own walks.
+    fd.set('accel', 'off');
+    fd.set('enhance', 'off');
+    // Forward picked LoRAs if any are active in the unified picker.
+    if (typeof _activeLoras !== 'undefined' && Array.isArray(_activeLoras) && _activeLoras.length) {
+      const slim = _activeLoras.map(l => ({ path: l.path, strength: l.strength }));
+      fd.set('loras', JSON.stringify(slim));
+    }
+    const r = await fetch('/queue/add', { method: 'POST', body: fd });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error('HTTP ' + r.status + ' ' + txt);
+    }
+    if (status) status.textContent = 'Submitted. Watch Now / Recent.';
+    if (typeof phosToast === 'function') {
+      phosToast('Queued Audio → Video clip · watch Now', { kind: 'success' });
+    }
+    const nowTab = document.querySelector('.tabs button[data-tab="now"]');
+    if (nowTab) {
+      nowTab.classList.add('flash');
+      setTimeout(() => nowTab.classList.remove('flash'), 1200);
+    }
+  } catch (e) {
+    if (status) status.textContent = 'Submit failed: ' + (e.message || 'unknown');
+    if (typeof phosToast === 'function') {
+      phosToast('A2V submit failed: ' + (e.message || 'unknown'),
+                { kind: 'danger', duration: 5000 });
+    }
+  } finally {
+    AUDIO_STUDIO.busy = false;
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ====== Train Character pane ================================================
@@ -26283,12 +26743,14 @@ function workflowSwitch(name) {
   const manual = document.getElementById('genForm');
   const studio = document.getElementById('studioSection');
   const train = document.getElementById('trainSection');
+  const audioTab = document.getElementById('audioSectionTab');
   const characters = document.getElementById('charactersSection');  // dead HTML; hide defensively
   // Set body data attribute so CSS can switch the layout per workflow.
   document.body.setAttribute('data-workflow', name);
   // All non-Manual panes start hidden; the active branch re-shows its own.
   if (studio) studio.classList.remove('show');
   if (train) train.classList.remove('show');
+  if (audioTab) audioTab.style.display = 'none';
   if (characters) characters.classList.remove('show');
   if (name === 'studio') {
     // Studio is its own top-level tab now (was a mode chip inside
@@ -26304,6 +26766,14 @@ function workflowSwitch(name) {
     if (manual) manual.style.display = 'none';
     if (train) train.classList.add('show');
     if (typeof trainInit === 'function') trainInit();
+  } else if (name === 'audio') {
+    // Audio → Video — own workflow tab. Pure A2V (audio + prompt) and
+    // Image + Audio (audio + still + prompt) both live here, behind a
+    // single drop-zone + optional image picker. Routes to make_job
+    // with mode='a2v'.
+    if (manual) manual.style.display = 'none';
+    if (audioTab) audioTab.style.display = 'block';
+    if (typeof audioStudioInit === 'function') audioStudioInit();
   } else {
     // Manual — show the video form, restore the previous video mode.
     if (manual) manual.style.display = '';
@@ -26321,7 +26791,8 @@ try {
   const saved = localStorage.getItem('phos_workflow');
   // 2026-05-17 — Characters tab removed; 'characters' now snaps to
   // 'manual' (workflowSwitch handles the alias). 'studio' is new.
-  if (saved === 'studio' || saved === 'train' || saved === 'characters') {
+  // 2026-05-18 — 'audio' is the Audio → Video workflow tab.
+  if (saved === 'studio' || saved === 'train' || saved === 'characters' || saved === 'audio') {
     workflowSwitch(saved);
   }
   // Clear any stale agent-fullscreen flag from the removed chat surface.

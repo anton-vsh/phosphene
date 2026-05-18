@@ -4,10 +4,14 @@
 Reads JSON-line jobs from stdin, emits JSON-line events to stdout.
 
 Actions:
-  generate  — T2V or I2V (auto-resizes images to target dims via PIL cover-crop)
-  extend    — chain a clip by N latent frames (uses ExtendPipeline)
-  ping      — returns pong
-  exit      — graceful shutdown
+  generate          — T2V or I2V (auto-resizes images to target dims via PIL cover-crop)
+  generate_hq       — Q8 dev transformer + res_2s sampler + CFG (TwoStageHQPipeline)
+  generate_keyframe — FFLF / multi-keyframe interpolation (KeyframeInterpolationPipeline)
+  generate_a2v      — Audio-to-Video, optional image conditioning (A2VidPipelineTwoStage)
+  extend            — chain a clip by N latent frames (uses ExtendPipeline)
+  enhance_prompt    — Gemma rewriting for T2V / I2V prompts
+  ping              — returns pong
+  exit              — graceful shutdown
 
 Auto-exits after LTX_IDLE_TIMEOUT seconds idle.
 """
@@ -176,6 +180,9 @@ _i2v_pipe = None
 _extend_pipe = None
 _hq_pipe = None          # TwoStageHQPipeline (Q8, res_2s + CFG, optional TeaCache)
 _hq_model_dir = None     # remember which model the HQ pipe was built against
+_a2v_pipe = None         # A2VidPipelineTwoStage (Q8 dev + distilled LoRA stage 2)
+_a2v_model_dir = None    # which model the A2V pipe was built against
+_a2v_lora_key: tuple | None = None  # LoRA fingerprint for current A2V cache
 _pipe_lock = threading.Lock()
 
 
@@ -201,11 +208,14 @@ _pipe_lock = threading.Lock()
 # 1.2× speedup with ~22% skip rate. Aggressive users can pass higher values
 # in the job spec (1.0 → ~2×, 1.5 → ~3× per the upstream comment).
 _EXTEND_TC_CONFIG: dict | None = None
+_A2V_TC_CONFIG: dict | None = None  # mirror gate for A2V (2026-05-18 PM)
 
 try:
     import ltx_pipelines_mlx.retake as _ltx_retake_mod
+    import ltx_pipelines_mlx.a2vid_two_stage as _ltx_a2v_mod
     from ltx_pipelines_mlx.ti2vid_two_stages import _build_teacache_controller as _build_stage1_teacache
     _orig_guided_denoise_loop_for_retake = _ltx_retake_mod.guided_denoise_loop
+    _orig_guided_denoise_loop_for_a2v = _ltx_a2v_mod.guided_denoise_loop
 
     def _guided_denoise_loop_with_extend_teacache(*args, teacache=None, **kwargs):
         cfg = _EXTEND_TC_CONFIG
@@ -219,11 +229,30 @@ try:
                 teacache = None
         return _orig_guided_denoise_loop_for_retake(*args, teacache=teacache, **kwargs)
 
+    def _guided_denoise_loop_with_a2v_teacache(*args, teacache=None, **kwargs):
+        # Mirror of the extend wrapper, scoped to the a2vid_two_stage import
+        # site. A2V's Stage 1 is the same dev-transformer Euler loop the
+        # standard two-stages pipeline runs (same calibration applies). The
+        # distilled Stage 2 uses denoise_loop (no guidance) which we don't
+        # touch — it's already fast and TeaCache wasn't designed for it.
+        cfg = _A2V_TC_CONFIG
+        if teacache is None and cfg and cfg.get("enable"):
+            sigmas = kwargs.get("sigmas")
+            n_steps = len(sigmas) - 1 if sigmas else cfg.get("num_steps", 10)
+            try:
+                teacache = _build_stage1_teacache(n_steps, cfg.get("thresh"))
+            except Exception:
+                teacache = None
+        return _orig_guided_denoise_loop_for_a2v(*args, teacache=teacache, **kwargs)
+
     _ltx_retake_mod.guided_denoise_loop = _guided_denoise_loop_with_extend_teacache
+    _ltx_a2v_mod.guided_denoise_loop = _guided_denoise_loop_with_a2v_teacache
     _EXTEND_TC_PATCH_OK = True
+    _A2V_TC_PATCH_OK = True
 except Exception as _tc_patch_exc:
-    print(f"[warm-helper] Extend TeaCache patch skipped: {_tc_patch_exc}", flush=True)
+    print(f"[warm-helper] TeaCache patch skipped: {_tc_patch_exc}", flush=True)
     _EXTEND_TC_PATCH_OK = False
+    _A2V_TC_PATCH_OK = False
 
 
 def release_pipelines(keep_kind=None):
@@ -234,10 +263,11 @@ def release_pipelines(keep_kind=None):
     family stays resident at a time — switching mode reloads, but renders
     actually finish instead of getting SIGKILL'd by macOS.
 
-    keep_kind ∈ {'t2v', 'i2v', 'extend', 'hq', 'keyframe'} or None (free all).
+    keep_kind ∈ {'t2v', 'i2v', 'extend', 'hq', 'keyframe', 'a2v'} or None (free all).
     Caller must hold _pipe_lock.
     """
     global _t2v_pipe, _i2v_pipe, _extend_pipe, _hq_pipe, _kf_pipe, _hq_model_dir, _kf_model_dir
+    global _a2v_pipe, _a2v_model_dir
     global _gemma_lm
     try:
         from ltx_core_mlx.utils.memory import aggressive_cleanup
@@ -255,6 +285,8 @@ def release_pipelines(keep_kind=None):
         _hq_pipe = None; _hq_model_dir = None; freed.append("HQ")
     if keep_kind != "keyframe" and _kf_pipe is not None:
         _kf_pipe = None; _kf_model_dir = None; freed.append("Keyframe")
+    if keep_kind != "a2v" and _a2v_pipe is not None:
+        _a2v_pipe = None; _a2v_model_dir = None; freed.append("A2V")
     # Always free Gemma LanguageModel when releasing for any pipeline —
     # ~6 GB persistent that competes with the dev transformer's headroom.
     # Re-loaded on demand by the next enhance call (one-time ~10s cost).
@@ -840,6 +872,60 @@ def get_kf_pipe(model_dir: str):
             )
             _kf_model_dir = model_dir
         return _kf_pipe
+
+
+# Audio-to-Video (A2V) pipeline — drives video from an input audio waveform.
+# Stage 1: Q8 dev transformer + CFG at half resolution, audio frozen.
+# Stage 2: dev + distilled LoRA fused, refine video at full resolution.
+# Image is OPTIONAL — passing it conditions frame 0 the same way I2V does, so
+# the same pipeline serves both "pure A2V" (audio + prompt → video) and
+# "Image + Audio" (audio + still + prompt → audio-driven video that opens on
+# the reference frame). The upstream pipeline writes the original audio (not
+# VAE-decoded) onto the final mp4, so no panel-side mux is needed.
+def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None):
+    """Returns A2VidPipelineTwoStage lazily.
+
+    A2V REQUIRES dev_transformer + distilled_lora at init time (same pattern
+    as Keyframe). The pipeline inherits from TI2VidTwoStagesPipeline so LoRA
+    fusion goes through the same `_pending_loras` hook the patched load()
+    consumes. Cached on (model_dir, lora_fingerprint) so a LoRA swap or a
+    model-dir flip rebuilds; otherwise reuses.
+    """
+    global _a2v_pipe, _a2v_model_dir, _a2v_lora_key
+    from ltx_pipelines_mlx.a2vid_two_stage import A2VidPipelineTwoStage
+
+    _install_lora_fusion_patches()
+    _install_video_decoder_patch()
+    fp = _lora_fingerprint(loras)
+
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+    except Exception:
+        _ac = lambda: None
+    with _pipe_lock:
+        release_pipelines(keep_kind="a2v")
+        if (_a2v_pipe is None
+                or _a2v_model_dir != model_dir
+                or _a2v_lora_key != fp):
+            if _a2v_pipe is not None:
+                why = "LoRA set changed" if _a2v_lora_key != fp else "model_dir changed"
+                emit({"event": "log", "line": f"{why}; reloading A2V pipeline."})
+                _a2v_pipe = None
+                _ac()
+            emit({"event": "log",
+                  "line": f"Loading A2V pipeline (Q8 dev + distilled LoRA — {model_dir})..."})
+            _a2v_pipe = A2VidPipelineTwoStage(
+                model_dir=model_dir,
+                gemma_model_id=GEMMA_PATH,
+                low_memory=LOW_MEMORY,
+                dev_transformer="transformer-dev.safetensors",
+                distilled_lora="ltx-2.3-22b-distilled-lora-384.safetensors",
+                distilled_lora_strength=1.0,
+            )
+            _attach_loras(_a2v_pipe, loras)
+            _a2v_model_dir = model_dir
+            _a2v_lora_key = fp
+        return _a2v_pipe
 
 
 # ---- prompt enhancement (Gemma language model) ------------------------------
@@ -1863,6 +1949,114 @@ for line in sys.__stdin__:
             _last_activity = time.time()
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
         finally:
+            _is_busy = False
+        continue
+
+    if action == "generate_a2v":
+        # Audio-to-Video. Drives generation from an input audio waveform
+        # plus prompt. Optional `image` conditions frame 0 (acts as I2V on
+        # top of audio-driven generation). Pipeline writes the original
+        # input audio onto the output mp4 — no panel-side mux needed.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            configure_acceleration("off")
+            audio_path = p.get("audio_path") or ""
+            if not audio_path:
+                raise RuntimeError("audio_path is required for A2V")
+            if not os.path.exists(audio_path):
+                raise RuntimeError(f"audio file not found: {audio_path}")
+            num_frames = int(p["frames"])
+            loras = p.get("loras") or []
+            pipe = get_a2v_pipe(model_dir, loras=loras)
+            _apply_vae_streaming_decision(num_frames)
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                audio_path=audio_path,
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=num_frames,
+                frame_rate=float(p.get("frame_rate", 24.0)),
+                seed=seed,
+                stage1_steps=int(p.get("stage1_steps", 20)),
+                stage2_steps=int(p.get("stage2_steps", 3)),
+                cfg_scale=float(p.get("cfg_scale", 3.0)),
+                stg_scale=float(p.get("stg_scale", 1.0)),
+                audio_start_time=float(p.get("audio_start_time", 0.0)),
+            )
+            # Optional reference image — when present, conditions frame 0
+            # so the audio-driven generation opens on the user's still.
+            ref_image = p.get("image") or None
+            if ref_image:
+                if not os.path.exists(ref_image):
+                    raise RuntimeError(f"reference image not found: {ref_image}")
+                kwargs["image"] = ref_image
+            # audio_max_duration defaults inside the pipeline to
+            # num_frames / frame_rate when omitted. The form may pin a
+            # tighter clamp (e.g. user dragged a 30 s mp3 but only wants 5 s).
+            amd = p.get("audio_max_duration")
+            if amd is not None:
+                try:
+                    kwargs["audio_max_duration"] = float(amd)
+                except (TypeError, ValueError):
+                    pass
+            # TeaCache for A2V (2026-05-18 PM). The Stage-1 dev-Euler loop
+            # is exactly what LTX2_TEACACHE_COEFFICIENTS was calibrated for —
+            # same model, same scheduler, same sigma layout. Default ON;
+            # opt-out via job spec `enable_teacache=false`. The wrapper at
+            # the top of this file reads _A2V_TC_CONFIG and constructs a
+            # controller; we clear it in `finally` so a future non-a2v
+            # call doesn't inherit a stale state.
+            enable_tc = bool(p.get("enable_teacache", True)) and _A2V_TC_PATCH_OK
+            tc_thresh = p.get("teacache_thresh")
+            if tc_thresh is not None:
+                try:
+                    tc_thresh = float(tc_thresh)
+                except (TypeError, ValueError):
+                    tc_thresh = None
+            _A2V_TC_CONFIG = {
+                "enable": enable_tc,
+                "thresh": tc_thresh,
+                "num_steps": kwargs["stage1_steps"],
+            }
+            if enable_tc:
+                emit({"event": "log",
+                      "line": f"TeaCache active on A2V Stage 1 (thresh={tc_thresh if tc_thresh is not None else 'default 0.5'})."})
+            emit({
+                "event": "log",
+                "line": (
+                    f"step:generate_a2v {kwargs['width']}x{kwargs['height']} "
+                    f"{kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps "
+                    f"stage1={kwargs['stage1_steps']} stage2={kwargs['stage2_steps']} "
+                    f"cfg={kwargs['cfg_scale']} audio={os.path.basename(audio_path)}"
+                    f"{' image=' + os.path.basename(ref_image) if ref_image else ''}"
+                ),
+            })
+            with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
+                if neg_active:
+                    emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
+                kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
+                out_path = pipe.generate_and_save(**kwargs)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            # Clear so the next non-A2V action doesn't inherit a stale gate.
+            _A2V_TC_CONFIG = None
             _is_busy = False
         continue
 
