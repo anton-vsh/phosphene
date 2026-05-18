@@ -132,15 +132,30 @@ def main() -> int:
         return 1
 
     # Default Gemma path is the same one the panel's preflight already
-    # downloads — no extra disk required.
+    # downloads — no extra disk required. Resolve via lora_lab's shared
+    # helper so this honors `LTX_MODELS_DIR` the same way every other
+    # lora_lab module does; anchoring to `__file__.parent` previously broke
+    # when this script ran from a Pinokio install where the panel had set
+    # LTX_MODELS_DIR to a different root than the script's directory.
     if args.gemma_path:
         gemma_path = pathlib.Path(args.gemma_path).resolve()
     else:
-        here = pathlib.Path(__file__).resolve().parent
-        gemma_path = here / "mlx_models" / "gemma-3-12b-it-4bit"
+        try:
+            from lora_lab import resolve_default_text_encoder
+            resolved = resolve_default_text_encoder()
+        except ImportError:
+            # lora_lab not on PYTHONPATH (shouldn't happen via the panel's
+            # spawn path, but keep a sane fallback so the standalone CLI
+            # still works in a clean checkout).
+            resolved = str(pathlib.Path(__file__).resolve().parent
+                           / "mlx_models" / "gemma-3-12b-it-4bit")
+        gemma_path = pathlib.Path(resolved).resolve()
     if not gemma_path.is_dir():
-        _emit("error", message=f"Gemma model dir not found: {gemma_path} — "
-                                f"run /train/preflight via the panel.")
+        _emit("error",
+              message=f"Gemma model dir not found: {gemma_path} — "
+                      f"run /train/preflight via the panel, or set "
+                      f"LTX_MODELS_DIR to a root that contains "
+                      f"gemma-3-12b-it-4bit/.")
         return 1
 
     # mlx_vlm + Gemma 3. Imports here (not module top) so the JSON-event

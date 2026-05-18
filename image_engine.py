@@ -62,6 +62,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1128,7 +1129,19 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
         if sample_url is None:
             raise RuntimeError(f"BFL task {task_id} timed out after 180s")
 
-        # Download
+        # Download. Validate the URL before fetching: BFL hands us back a
+        # sample URL from a JSON response, and a compromised/MITM'd response
+        # could substitute file:///... (local file read) or an attacker host
+        # (exfil of poll_headers via Referer / credential reuse). Pin to
+        # https on bfl.ai / bfl.ml only.
+        parsed = urllib.parse.urlparse(sample_url)
+        host = (parsed.hostname or "").lower()
+        allowed = ("bfl.ai", "bfl.ml")
+        host_ok = any(host == d or host.endswith("." + d) for d in allowed)
+        if parsed.scheme != "https" or not host_ok:
+            raise RuntimeError(
+                f"BFL returned unexpected URL: {parsed.scheme}://{parsed.hostname}"
+            )
         try:
             with urllib.request.urlopen(sample_url, timeout=60) as r:
                 data = r.read()

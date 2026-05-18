@@ -88,7 +88,7 @@ All share the same argparse mixins — `--prompt`, `--negative-prompt`, `--width
 
 mflux is great but only ships diffusion-based families. **HiDream-O1-Image-Dev** is a different beast: a single 8B Qwen3-VL backbone that does pixel-level patch generation directly (no separate VAE), distilled from a 50-step teacher into a 28-step student via flow matching. License is MIT (cleaner than FLUX.2-dev's NC).
 
-The lab port lives outside Phosphene at `/Users/salo/HIDREAM-O1-MLX-LAB-active/` so its mlx-vlm dep tree doesn't fight Phosphene's ltx-2-mlx env. Phosphene shells out to the lab's python via subprocess (mirrors mflux pattern). Module path: `agent/image_engine.py`, `kind="hidream"`.
+The lab port lives outside Phosphene at `~/HIDREAM-O1-MLX-LAB-active/` so its mlx-vlm dep tree doesn't fight Phosphene's ltx-2-mlx env. Phosphene shells out to the lab's python via subprocess (mirrors mflux pattern). Module path: `agent/image_engine.py`, `kind="hidream"`.
 
 ### Why ship it alongside mflux
 

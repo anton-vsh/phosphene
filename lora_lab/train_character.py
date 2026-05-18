@@ -252,11 +252,19 @@ def _framing_for_image(width: int, height: int) -> str:
 
 
 def _make_caption(trigger: str, strategy: str, width: int, height: int) -> str:
+    # Emit LTX's canonical `[VISUAL]: ...\n[TEXT]: None\n` format so the
+    # fallback rows match what caption_with_gemma.py writes for the auto-
+    # caption path. Mixed-format datasets (some rows naked `<trigger> man`,
+    # others `[VISUAL]:...`) caused identity drift on the fallback images
+    # because the trainer's tokenizer saw two distinct prompt styles for
+    # the same character. See ~/.claude/skills/ltx-lora/SKILL.md for the
+    # validated v2 recipe.
     if strategy == "trigger_only":
-        return f"a photo of {trigger}"
-    # class_word (default) and auto_caption fallback
-    framing = _framing_for_image(width, height)
-    return f"{trigger} man, {framing}"
+        body = "a photo"
+    else:
+        # class_word (default) and auto_caption fallback
+        body = _framing_for_image(width, height)
+    return f"[VISUAL]: {trigger}, {body}\n[TEXT]: None\n"
 
 
 def crop_and_caption(
@@ -389,7 +397,21 @@ def crop_and_caption(
 
             emit("crop_progress", done=i, total=len(source_files), path=str(png_path))
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"failed to crop {src.name}: {exc}") from exc
+            # One unreadable / corrupt image must not kill the whole pass.
+            # Mirrors preprocess_images.preprocess_images_to_latents which
+            # logs+continues on per-image encode failure (preprocess_images.py
+            # :174-176). Re-raising used to fail the entire crop stage, so
+            # users with one bad JPEG in a 30-image dataset lost the whole run.
+            logger.warning(
+                "failed to crop %s: %s — skipping this image", src.name, exc
+            )
+            emit(
+                "warning",
+                stage="crop",
+                message=f"skipped {src.name}: {exc}",
+                file=src.name,
+            )
+            continue
 
     emit("crop_done")
     return out_paths, out_captions

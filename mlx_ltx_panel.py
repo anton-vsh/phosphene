@@ -20,6 +20,7 @@ import json
 import os
 import random
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -799,6 +800,14 @@ TRAIN_MIN_IMAGES = 15
 TRAIN_MAX_IMAGES = 50
 TRAIN_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 TRAIN_MAX_BYTES_PER_IMAGE = 32 * 1024 * 1024     # 32 MB per image upload
+
+# Hard cap on bodies for the generic urlencoded POST fallback (the catch-all
+# at the end of do_POST that handles /run, /queue/add, characters, etc.).
+# Endpoints with their own larger caps (uploads, multipart, JSON bodies)
+# enforce those locally before reading. 1 MB is well above any legitimate
+# urlencoded form on Phosphene; without this cap a malformed Content-Length
+# 500s the handler and a multi-GB declared CL allocates before any check.
+MAX_FORM_BYTES = 1024 * 1024
 
 # User-provided captions. Industry convention: `image_001.png` pairs with
 # `image_001.txt` (same stem) in the same upload. Caption body uses LTX's
@@ -3445,12 +3454,24 @@ def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
     cached = src.parent / f"{src.stem}_dn{new_w}x{new_h}.mp4"
     if cached.exists() and cached.stat().st_size > 1024:
         return cached
+    # Write to a .partial sibling and atomically rename on success so a
+    # cancelled-mid-encode run can't leave a broken mp4 at `cached` that
+    # the next call would treat as a valid cache hit.
+    partial = cached.with_suffix(cached.suffix + ".partial")
     cmd = [str(FFMPEG), "-y", "-i", str(src),
            "-vf", f"scale={new_w}:{new_h}",
            "-c:v", "libx264", "-pix_fmt", "yuv444p", "-crf", "0", "-preset", "veryfast",
            "-c:a", "copy",   # don't re-encode audio — extend doesn't need it transformed
-           str(cached)]
-    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+           str(partial)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+        os.replace(partial, cached)  # atomic on POSIX
+    except Exception:
+        try:
+            partial.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return cached
 
 
@@ -3712,7 +3733,14 @@ def load_queue() -> None:
 class WarmHelper:
     def __init__(self):
         self.proc: subprocess.Popen | None = None
+        # `lock` guards proc lifecycle (spawn / kill / restart).
         self.lock = threading.Lock()
+        # `run_lock` serializes the write+read pair inside run() so two
+        # concurrent callers (worker thread + /prompt/enhance) can't both
+        # land in _read_until and steal each other's events. Kept separate
+        # from `lock` so a /stop or /helper/restart can still kill the proc
+        # while a run is mid-flight (the kill interrupts readline via EOF).
+        self.run_lock = threading.Lock()
 
     def _ensure(self) -> None:
         with self.lock:
@@ -3767,11 +3795,25 @@ class WarmHelper:
         if not self.proc or not self.proc.stdout:
             return None
         deadline = time.time() + timeout if timeout else None
+        # Poll-and-check loop: blocking readline() used to mean a hung helper
+        # froze the worker thread until /stop. select() with a small interval
+        # gives us deterministic deadline enforcement; readline() is only
+        # called once we know there's data waiting.
+        poll_interval = 0.5
+        stdout = self.proc.stdout
         while True:
             if deadline and time.time() > deadline:
                 return None
-            line = self.proc.stdout.readline()
+            rlist, _, _ = select.select([stdout], [], [], poll_interval)
+            if not rlist:
+                continue  # idle slice — re-check deadline
+            try:
+                line = stdout.readline()
+            except (OSError, ValueError):
+                # Pipe closed underneath us (kill from another thread).
+                return None
             if not line:
+                # EOF — helper closed stdout (likely crashed or was killed).
                 return None
             line = line.strip()
             if not line:
@@ -3790,15 +3832,22 @@ class WarmHelper:
                 push(f"helper {ev_type}: {json.dumps(ev)[:200]}")
 
     def run(self, job_spec: dict) -> dict:
-        self._ensure()
-        with self.lock:
-            assert self.proc is not None and self.proc.stdin is not None
-            try:
-                self.proc.stdin.write(json.dumps(job_spec) + "\n")
-                self.proc.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
-                raise RuntimeError(f"helper stdin closed: {exc}")
-        ev = self._read_until(["done", "error", "exit"])
+        # Whole-run serialization so concurrent callers don't both park in
+        # _read_until and grab each other's done/error events. See __init__
+        # for why this is distinct from self.lock.
+        with self.run_lock:
+            self._ensure()
+            with self.lock:
+                assert self.proc is not None and self.proc.stdin is not None
+                try:
+                    self.proc.stdin.write(json.dumps(job_spec) + "\n")
+                    self.proc.stdin.flush()
+                except (BrokenPipeError, OSError) as exc:
+                    raise RuntimeError(f"helper stdin closed: {exc}")
+            ev = self._read_until(["done", "error", "exit"])
+            return self._dispatch_run_event(ev)
+
+    def _dispatch_run_event(self, ev: dict | None) -> dict:
         if ev is None:
             # Pipe closed without an event. peanut review correction: don't
             # claim "SIGKILL" with certainty — could be SIGKILL (OOM jetsam),
@@ -3860,10 +3909,17 @@ class WarmHelper:
             self.proc = None
 
     def is_alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        # Snapshot the ref so a concurrent kill() can't null self.proc between
+        # the `is not None` and `.poll()` calls below (which would AttributeError
+        # and bubble up to /status as a 500).
+        proc = self.proc
+        return proc is not None and proc.poll() is None
 
     def pid(self) -> int | None:
-        return self.proc.pid if self.is_alive() else None
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return None
+        return proc.pid
 
 
 HELPER = WarmHelper()
@@ -3911,6 +3967,38 @@ def _kill_caption_proc() -> None:
 
 
 atexit.register(_kill_caption_proc)
+
+
+def _kill_train_proc() -> None:
+    """Atexit hook — SIGTERM any training/audio subprocess by its pgid.
+    Mirrors the kill path inside stop_current_job so the panel doesn't leave
+    a training run hanging when the user CMD-Qs Pinokio or shuts down."""
+    try:
+        pgid = STATE.get("train_pgid")
+    except Exception:
+        pgid = None
+    if not pgid:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _kill_image_procs() -> None:
+    """Atexit hook — SIGTERM any in-flight image-engine subprocesses
+    (HiDream BF16 helper, mflux per-family binaries). Each engine registers
+    its Popen via _register_active_proc; kill_active_image_procs walks
+    the set and SIGTERMs each process group."""
+    try:
+        agent_image_engine.kill_active_image_procs()
+    except Exception:
+        # Atexit handlers must not raise — they're best-effort.
+        pass
+
+
+atexit.register(_kill_train_proc)
+atexit.register(_kill_image_procs)
 
 
 # ---- generation pipeline -----------------------------------------------------
@@ -4130,25 +4218,56 @@ def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> 
     forgets the chip-swap logic could submit the broken combo. Returning
     an error keeps the trainer-base contract honest at the API boundary.
 
+    Also catches the loras=[] back-door: a scripted POST with a raw
+    train_character-kind LoRA in the `loras` JSON array (no character_id)
+    + quality=balanced would otherwise bypass this check — the UI's
+    updateQualityChipsForLora handles it client-side but the server
+    must enforce the same rule.
+
     Returns None when valid, or an error string to surface as a 400."""
     def _f(name: str, default: str = "") -> str:
         v = form.get(name, default)
         if isinstance(v, list):
             v = v[0] if v else default
         return (v or "").strip()
-    cid = _f("character_id", "")
-    if not cid:
-        return None  # no character; nothing to validate
     quality = _f("quality", "balanced").lower()
-    if quality != "high":
-        return (
-            f"character {cid!r} requires quality=high (Q8 HQ pipeline). "
-            f"Got quality={quality!r}. Character LoRAs are trained against "
-            f"the Q8 dev transformer's sigma schedule; the Q4 distilled "
-            f"pipeline fuses them into the wrong base and produces "
-            f"identity-mushed output. Pick Q8 Pro or Q8 Draft in the "
-            f"Character quality strip."
-        )
+    cid = _f("character_id", "")
+    if cid:
+        if quality != "high":
+            return (
+                f"character {cid!r} requires quality=high (Q8 HQ pipeline). "
+                f"Got quality={quality!r}. Character LoRAs are trained against "
+                f"the Q8 dev transformer's sigma schedule; the Q4 distilled "
+                f"pipeline fuses them into the wrong base and produces "
+                f"identity-mushed output. Pick Q8 Pro or Q8 Draft in the "
+                f"Character quality strip."
+            )
+        return None
+    # No character_id — but a raw train_character LoRA in `loras` triggers
+    # the same incompatibility. Resolve each entry's sidecar and refuse if
+    # any one of them is kind == "train_character" and quality != high.
+    if quality == "high":
+        return None  # the only outcome that needs to fail is non-high here
+    try:
+        loras = parse_loras_from_form(form)
+    except Exception:
+        loras = []
+    for entry in loras:
+        try:
+            p = Path(str(entry.get("path") or ""))
+            if not p.exists():
+                continue
+            meta = _read_lora_sidecar(p)
+        except Exception:
+            continue
+        if (meta.get("kind") or "") == "train_character":
+            return (
+                f"a character LoRA ({p.name!r}) requires quality=high "
+                f"(Q8 HQ pipeline). Got quality={quality!r}. Character LoRAs "
+                f"are trained against the Q8 dev transformer's sigma schedule; "
+                f"the Q4 distilled pipeline fuses them into the wrong base "
+                f"and produces identity-mushed output. Pick Q8 Pro or Q8 Draft."
+            )
     return None
 
 
@@ -5050,12 +5169,20 @@ def run_train_job_inner(job: dict) -> None:
     for w in recon_warnings:
         push(f"[train] caption reconcile: {w}")
 
+    # Use LTX canonical `[VISUAL]: <trigger>, <body>\n[TEXT]: None\n` format
+    # so the fallback rows match the auto-caption path (caption_with_gemma.py
+    # writes the same shape). Mixed-format datasets — some rows naked
+    # `<trigger> man`, others `[VISUAL]: ...` — caused identity drift on
+    # the fallback rows because the trainer's tokenizer saw two distinct
+    # prompt styles for the same identity. v2 recipe in
+    # ~/.claude/skills/ltx-lora/SKILL.md is the validated baseline.
     if caption_strategy == "trigger_only":
-        fallback_text = trigger
+        fallback_body = "a photo"
     elif is_style:
-        fallback_text = f"{trigger} shot"
+        fallback_body = "shot"
     else:
-        fallback_text = f"{trigger} man"
+        fallback_body = "man"
+    fallback_text = f"[VISUAL]: {trigger}, {fallback_body}\n[TEXT]: None\n"
 
     user_caps = 0
     auto_caps = 0
@@ -5070,14 +5197,17 @@ def run_train_job_inner(job: dict) -> None:
         except OSError as e:
             push(f"[train] warn: could not write caption for {img.name}: {e}")
 
+    # Single-line summary of the fallback caption for log readability —
+    # avoids dumping the multi-line `[VISUAL]:\n[TEXT]:` payload into the log.
+    fallback_summary = f"[VISUAL]: {trigger}, {fallback_body}"
     total_imgs = len(image_files)
     if user_caps:
         push(f"[train] using user-provided captions: {user_caps} / {total_imgs} images"
-             + (f" (auto-filled {auto_caps} with '{fallback_text}')"
+             + (f" (auto-filled {auto_caps} with '{fallback_summary}')"
                 if auto_caps else ""))
     elif caption_strategy == "user_provided":
         push(f"[train] caption_strategy=user_provided but no .txt files found — "
-             f"auto-filled all {total_imgs} images with '{fallback_text}'")
+             f"auto-filled all {total_imgs} images with '{fallback_summary}'")
 
     # Output path for the trained LoRA. Going straight into
     # mlx_models/loras/ so the existing picker scan finds it.
@@ -8838,8 +8968,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "issueUrl": issue_url, "zipPath": zip_path})
             return
 
-        # All other POST endpoints expect urlencoded body
-        length = int(self.headers.get("Content-Length", "0"))
+        # All other POST endpoints expect urlencoded body. Validate
+        # Content-Length: int() on garbage 500s the handler; an absurd
+        # declared length would allocate before any size check. See
+        # MAX_FORM_BYTES near the top of the file.
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            self._json({"error": "bad content-length"}, 400); return
+        if length < 0:
+            self._json({"error": "bad content-length"}, 400); return
+        if length > MAX_FORM_BYTES:
+            self._json(
+                {"error": f"request too large (max {MAX_FORM_BYTES} bytes)"},
+                413,
+            )
+            return
         body = self.rfile.read(length).decode() if length else ""
         form = parse_qs(body)
 
@@ -9465,6 +9609,22 @@ class Handler(BaseHTTPRequestHandler):
             if source is None:
                 self._json({"error": f"job {source_id!r} not found in history/queue"}, 404); return
             src_params = source.get("params") or {}
+            # Defense-in-depth: re-queuing a historical job with character_id
+            # + balanced quality (or a raw train_character LoRA + non-high
+            # quality) reproduces the bug /queue/add already rejects. Wrap
+            # src_params into the form-shape the validator expects: it reads
+            # `character_id`, `quality`, and `loras`. The first two are
+            # already strings; `loras` lives in src_params as a parsed list
+            # and needs to be re-encoded as JSON so parse_loras_from_form
+            # round-trips it cleanly.
+            _retry_form = {
+                "character_id": src_params.get("character_id") or "",
+                "quality": src_params.get("quality") or "",
+                "loras": json.dumps(src_params.get("loras") or []),
+            }
+            err = _validate_character_quality(_retry_form)
+            if err:
+                self._json({"error": err}, 400); return
             # Build a fresh job — copy params verbatim, mint a new id, drop
             # any open_when_done flag (retries are usually background; user
             # is mid-other-work and doesn't want the OS jumping windows).
@@ -9759,6 +9919,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"unhidden_count": count}); return
 
         if path == "/helper/restart":
+            # Mark any in-flight job as user-cancelled BEFORE killing the
+            # helper. Otherwise the worker sees the helper exit and writes
+            # status=failed/"helper exited" instead of status=cancelled.
+            with LOCK:
+                cur = STATE.get("current")
+                if cur is not None:
+                    cur["cancel_requested"] = True
             HELPER.kill()
             self._json({"ok": True}); return
 
@@ -10214,6 +10381,14 @@ class Handler(BaseHTTPRequestHandler):
                     "(takes effect on next job)."
                 )
             if codec_changed or tokens_changed:
+                # Settings change forces a helper restart. Mark any in-flight
+                # job as user-cancelled so the worker reports it that way
+                # instead of as a "helper exited" failure (same shape as
+                # /helper/restart and stop_current_job).
+                with LOCK:
+                    cur = STATE.get("current")
+                    if cur is not None:
+                        cur["cancel_requested"] = True
                 HELPER.kill()
             # Return only the public-safe view — never echo the saved
             # key back to the client even on success.
@@ -11239,6 +11414,7 @@ HTML = r"""<!doctype html>
     body[data-cap-tier="q4"] #charactersPickerDivider,
     body[data-cap-tier="q4"] #qualityGroupCharacter,
     body[data-cap-tier="q4"] #charSkipstepToggleWrap,
+    body[data-cap-tier="q4"] #workflowTabs button[data-workflow="audio"],
     body[data-cap-tier="q4"] #qualityGroup [data-quality="high"] { display: none !important; }
     /* Quality strip becomes a 3-col grid (Quick/Balanced/Standard)
        since the 4th column ("High") is gone. */
@@ -18934,12 +19110,12 @@ function syncAvoidRowFromValue() {
 }
 
 function setMode(mode) {
-  // Capability guard — Q4 (sub-48GB) tier can't run FFLF or Extend; the
-  // pipeline classes are HQ-only. CSS already hides the chips, but a
-  // stale localStorage or a JS caller could still try to switch. Snap
-  // to t2v with a console warning so we never end up in an unrenderable
-  // mode by accident.
-  if (window.PHOSPHENE_CAP_TIER === 'q4' && (mode === 'keyframe' || mode === 'extend')) {
+  // Capability guard — Q4 (sub-48GB) tier can't run FFLF, Extend, or
+  // Character (HQ-only pipelines + Q8 trainer-base contract). CSS already
+  // hides the chips, but a stale localStorage, charactersLoadParams(), or
+  // a JS caller could still try to switch. Snap to t2v with a console
+  // warning so we never end up in an unrenderable mode by accident.
+  if (window.PHOSPHENE_CAP_TIER === 'q4' && (mode === 'keyframe' || mode === 'extend' || mode === 'character')) {
     console.warn(`setMode(${mode}): not available on Q4 tier — snapping to t2v`);
     mode = 't2v';
   }
@@ -26713,7 +26889,10 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
 // inline style changes on the modals themselves; whoever toggles
 // display gets the side-effects for free.
 (function _phosModalScaffold() {
-  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox';
+  // .modal-bg.show covers the batch modal (and any future modal that
+  // uses the same .modal-bg + .show idiom). Including it here so Esc /
+  // Tab focus-trap / body.modal-open scroll-lock all work for it too.
+  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox, .modal-bg.show';
   const isVisible = el => {
     const d = el.style.display;
     // Some modals open by adding an .open class (.model-browser-modal);
@@ -26847,6 +27026,12 @@ function workflowSwitch(name) {
   // chip strip is integrated into Manual (T2V). If we get a stale
   // 'characters' value from localStorage, snap to 'manual'.
   if (name === 'characters') name = 'manual';
+  // Q4 cap-tier doesn't ship the audio workflow. If 'audio' is requested
+  // anyway (stale localStorage, Load Params on a historical A2V job,
+  // scripted caller), snap to 'manual' before any pane logic runs.
+  if (name === 'audio' && document.body.dataset.capTier === 'q4') {
+    name = 'manual';
+  }
   document.querySelectorAll('#workflowTabs button[data-workflow]')
     .forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
   const manual = document.getElementById('genForm');

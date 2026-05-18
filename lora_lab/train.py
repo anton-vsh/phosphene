@@ -46,16 +46,54 @@ def _patch_loader_prefer_dev_transformer() -> None:
     that point toward the wrong target — coarse features (hair/age/beard) survive the
     mismatch but fine face geometry doesn't. Switching the trainer to the dev transformer
     eliminates the objective mismatch.
+
+    Q4/Q8 sibling fallback (2026-05-18):
+        The trainer config hardcodes the Q4 model dir, but on a Q8-only install
+        the dev transformer lives at ``<panel>/mlx_models/ltx-2.3-mlx-q8/
+        transformer-dev.safetensors`` and the Q4 dir doesn't exist (or has only
+        the distilled file). The panel's preflight (_train_required_models in
+        mlx_ltx_panel.py) already accepts either location via ``extra_dirs=
+        [q8_local_dir]``, but the trainer process — running in a separate venv
+        — has to do its own probing. We look at ``<model_dir>`` first
+        (matches existing behavior), then at the sibling ``ltx-2.3-mlx-q8/``
+        next to it, and pin to whichever exists. If NEITHER exists we raise
+        a clear, actionable error instead of letting the loader silently fall
+        back to the distilled file — silent fallback was the original bug:
+        identity capture quietly broke because the trainer was optimizing
+        against the wrong sigma schedule.
     """
     from pathlib import Path
     _orig = ml_module.load_transformer
 
     def patched(model_dir, transformer_file=None):
         if transformer_file is None:
-            dev = Path(model_dir) / "transformer-dev.safetensors"
-            if dev.exists():
-                transformer_file = "transformer-dev.safetensors"
-                logger.info("training-side override: using transformer-dev.safetensors (not distilled)")
+            primary = Path(model_dir) / "transformer-dev.safetensors"
+            sibling = Path(model_dir).parent / "ltx-2.3-mlx-q8" / "transformer-dev.safetensors"
+            if primary.exists():
+                logger.info(
+                    "training-side override: using transformer-dev.safetensors "
+                    "from %s (not distilled)",
+                    primary.parent,
+                )
+                return _orig(model_dir, transformer_file="transformer-dev.safetensors")
+            if sibling.exists():
+                # Repoint the loader at the Q8 sibling directory. We invoke
+                # the upstream loader with the sibling DIR as `model_dir` so
+                # `load_split_safetensors` resolves the shards relative to
+                # the right snapshot — passing only the basename would still
+                # join against the Q4 dir and miss the sibling's shard files.
+                logger.info(
+                    "training-side override: using transformer-dev.safetensors "
+                    "from Q8 sibling at %s (Q4 dir has no dev transformer)",
+                    sibling.parent,
+                )
+                return _orig(str(sibling.parent),
+                             transformer_file="transformer-dev.safetensors")
+            raise FileNotFoundError(
+                f"transformer-dev.safetensors not found in {primary.parent} "
+                f"or {sibling.parent}. Open Phosphene → Train Character → "
+                f"Preflight to download it (~11 GB)."
+            )
         return _orig(model_dir, transformer_file=transformer_file)
 
     ml_module.load_transformer = patched

@@ -1,6 +1,6 @@
 # Phosphene — project state, history, open work
 
-Current `dev` head: `04d2ffd` (May 17 2026, evening) — Codex C+ 7-pass UI restructure (capability tiers, Q4 surface, Character as 5th mode pill, accel kill, HQ-speed move) + Train tab polish (Gemma 3 auto-caption, voice-on default, letterbox crop) + LoRA picker chrome (rename, download, companion-aware delete) + vendored `lora_lab/` for installer-only users + Codex 12.6% skip-step optimization on Q8 HQ.
+Current `dev` head: see `git log -1` for the live SHA. The arc landed on May 17 2026 — Codex C+ 7-pass UI restructure (capability tiers, Q4 surface, Character as 5th mode pill, accel kill, HQ-speed move) + Train tab polish (Gemma 3 auto-caption, voice-on default, letterbox crop) + LoRA picker chrome (rename, download, companion-aware delete) + vendored `lora_lab/` for installer-only users + Codex 12.6% skip-step optimization on Q8 HQ.
 
 Latest `main`: still `v2.0.6` — `dev` carries ~30 commits ahead awaiting Mr Bizarro's ship verdict.
 
@@ -16,8 +16,8 @@ Two clones on Mr Bizarro's Mac, both managed by Pinokio:
 
 | Path | Branch tracked | Port | Role |
 |---|---|---|---|
-| `/Users/salo/pinokio/api/phosphene-dev.git/` | `dev` | 8199 | Active development. Most edits land here first. |
-| `/Users/salo/pinokio/api/phosphene.git/` | `main` | 8198 | Production / daily driver. Mr Bizarro's actual usage. |
+| `~/pinokio/api/phosphene-dev.git/` | `dev` | 8199 | Active development. Most edits land here first. |
+| `~/pinokio/api/phosphene.git/` | `main` | 8198 | Production / daily driver. Mr Bizarro's actual usage. |
 
 GitHub is the source of truth (memory: `feedback_github_source_of_truth.md`). Branch policy is strict: **NEVER push to `main` without Mr Bizarro's explicit OK** (memory: `phosphene_dev_workflow.md`). When ready to promote, fast-forward only — `git merge --ff-only dev` from main, never a merge commit.
 
@@ -149,18 +149,25 @@ A Pinokio Reset wipes the install dir but preserves all four — Mr Bizarro can 
   Settings)
 - Plan/Interactive mode pill toggle in agent header
 
-**Image Studio (v2.0.6+, May 8 2026)**
-- Five engines in dropdown: Qwen-Edit-2511 Lightning (4-step distilled,
-  fast preview), Qwen-Edit-2511 standard, Qwen-Edit-2511 high-quality,
-  Klein-Edit fast (distilled flux2_edit Q4), and Klein-Base-Edit
-  photoreal (`flux2_edit_high`, klein-base-4b Q8 25-step guidance 4.0
-  — non-distilled, real photographic look)
-- Q6 default quantization (was Q4) — Apple-Silicon community sweet
-  spot, ~4-6% quality loss vs full precision (Q4 was 8-12%), per-image
-  speed gap negligible on M4 Max
+**Image Studio (dev head — Klein retired 2026-05-13)**
+- Two engine families in the dropdown. Six tiers total:
+  - **Qwen-Image-Edit-2511** — Fast (Lightning, 4-step Q6 + FBCache,
+    ~1:20 / image, multi-ref), Medium (8-step Q6 + FBCache, ~2:05 /
+    image, multi-ref), Quality (40-step Q8 + CFG 4.0 + FBCache, ~3:50
+    / image, multi-ref).
+  - **HiDream-O1-Image-Dev** — Fast (3-step, ~3:45 / 4-img batch,
+    slight bg softness), Medium (6-step + FBCache, ~6 min / 4-img
+    batch, character-preserving), Quality (12-step + light FBCache,
+    ~9 min / 4-img batch, best detail).
+- HiDream is a separate one-time clone (`HIDREAM_LAB_DIR` env var or
+  `~/HIDREAM-O1-MLX-LAB-active`); resolved in `image_engine.py`.
+- Q6 default quantization for mflux Qwen tiers — Apple-Silicon
+  community sweet spot, ~4-6% quality loss vs full precision (Q4 was
+  8-12%), per-image speed gap negligible on M4 Max. Q8 reserved for
+  the Quality tier.
 - Image jobs go through the same queue worker as video — they appear
   in Now / Queue / Recent / Logs alongside video jobs (was: synchronous
-  HTTP, invisible in panel)
+  HTTP, invisible in panel).
 - Right-pane viewer is mode-aware: `<img>` tag for image mode,
   `<video>` for video. Carousel thumbnails ditto.
 - OUTPUTS gallery filter chips: All / Videos / Photos. Auto-flips
@@ -178,6 +185,11 @@ A Pinokio Reset wipes the install dir but preserves all four — Mr Bizarro can 
   log lines, generates a github.com/.../issues/new link with
   labels=bug, optionally bundles the latest 5 .ips crash files into
   /tmp/phosphene-bug-TS.zip.
+- FLUX / Klein-Edit / Klein-Base-Edit were retired 2026-05-13 — the
+  flux2_edit family stopped being competitive with Qwen-Edit-2511 +
+  HiDream at the same step counts, and dropping it freed UI vocabulary
+  for the new Qwen Fast/Medium/Quality + HiDream Fast/Medium/Quality
+  six-tier grid above.
 
 **Frontend extraction (parked on `frontend-extraction` branch)**
 - `webapp/` directory: index.html, style/all.css, js/main.js,
@@ -532,16 +544,7 @@ research-grade work on token merging.
 
 ## 10. Memory pointers (for next-Claude)
 
-Files in `/Users/salo/.claude/projects/-Users-salo-AI/memory/`:
-
-- `phosphene_dev_workflow.md` — branch + dev-panel discipline
-- `phosphene_linear_project.md` — Linear project location + credentials
-- `feedback_copy_edit_dont_rewrite.md` — when Mr Bizarro asks me to look at his writing
-- `feedback_writing_style.md` — schematic, short, plain
-- `feedback_github_source_of_truth.md` — git fetch first, surface drift
-- `feedback_dont_ask_to_save_memory.md` — when Mr Bizarro states a fact, save it; don't ask
-- `claudio_repo.md` — shared infra, hosts `.env` with Linear key
-- `ltx_video_setup.md` — older notes from MLX vs Comfy decisions
+See local memory files for the cross-cutting workflow context — branch discipline (`phosphene_dev_workflow`), Linear credentials (`phosphene_linear_project`), writing style feedback (`feedback_copy_edit_dont_rewrite`, `feedback_writing_style`), source-of-truth discipline (`feedback_github_source_of_truth`), memory-save reflex (`feedback_dont_ask_to_save_memory`), shared infra (`claudio_repo`), historical MLX/Comfy decisions (`ltx_video_setup`).
 
 ## 11. Linear board
 
@@ -561,7 +564,7 @@ Issue prefixes are `HAI-NN` because of the team constraint. Active:
 
 ## 12. How to start a fresh session
 
-1. `cd /Users/salo/pinokio/api/phosphene-dev.git/`
+1. `cd ~/pinokio/api/phosphene-dev.git/`
 2. `git fetch origin && git status -sb` — surface any drift first
 3. Read this file (`docs/STATE.md`) AND check `git log --oneline dev -25` — recent commits move faster than this doc; the v2.0.6 May 8 batch is a good example (~18 commits in one session). Read `CLAUDE.md` for architecture.
 4. Skim Linear `HAI-150` through `HAI-158` for state of each workstream

@@ -23,8 +23,8 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PINOKIO_FFMPEG = Path("/Users/salo/pinokio/bin/ffmpeg-env/bin/ffmpeg")
-PINOKIO_FFPROBE = Path("/Users/salo/pinokio/bin/ffmpeg-env/bin/ffprobe")
+PINOKIO_FFMPEG = Path.home() / "pinokio" / "bin" / "ffmpeg-env" / "bin" / "ffmpeg"
+PINOKIO_FFPROBE = Path.home() / "pinokio" / "bin" / "ffmpeg-env" / "bin" / "ffprobe"
 
 
 def run(cmd: list[str], label: str) -> None:
