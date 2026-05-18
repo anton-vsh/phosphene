@@ -26,9 +26,27 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-# Default locations — override at module import if needed.
-CHARACTERS_DIR = Path("/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/characters")
-LORAS_DIR = Path("/Users/salo/pinokio/api/phosphene-dev.git/mlx_models/loras")
+# Default locations — derived from the panel install root the same
+# way the other vendored lora_lab modules resolve their model dir.
+# Override either by reassigning these constants at import time or by
+# setting LTX_MODELS_DIR which the resolver also honors.
+def _default_models_root() -> Path:
+    import os
+    env_dir = os.environ.get("LTX_MODELS_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "mlx_models"
+        if candidate.is_dir():
+            return candidate
+        if (parent / ".git").exists():
+            return parent / "mlx_models"
+    return here.parents[1] / "mlx_models"
+
+_MODELS_ROOT = _default_models_root()
+CHARACTERS_DIR = _MODELS_ROOT / "characters"
+LORAS_DIR = _MODELS_ROOT / "loras"
 
 
 @dataclass

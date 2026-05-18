@@ -425,6 +425,10 @@ def run_preprocess(
         pp.preprocess_images(
             images_dir=str(images_dir),
             output_dir=str(output_root),
+            # Pass the locally-resolved Gemma path explicitly. Without
+            # this the preprocessor falls back to the HF repo id and
+            # may duplicate-download ~6 GB to HF_HOME (or fail offline).
+            gemma_model_id=DEFAULT_TEXT_ENCODER,
             target_height=resolution,
             target_width=resolution,
             captions_dir=str(captions_dir),

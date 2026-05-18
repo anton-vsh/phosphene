@@ -9783,6 +9783,64 @@ class Handler(BaseHTTPRequestHandler):
             # `git pull`), we set pull_requires_full_update=True and the
             # UI nudges the user toward Pinokio's full Update flow
             # instead of just Stop+Start.
+            # Server-side guards run BEFORE we mutate _VERSION_STATE so a
+            # rejected 409 doesn't leave pull_state="pulling" stuck on
+            # disk for the UI poller to chew on forever. Previously the
+            # state was set first and the guards lived inside the try
+            # block; a guarded return would skip the cleanup branch in
+            # the bottom finally clause and never reset pull_state. Codex
+            # caught this on the second pre-ship review.
+            #
+            # The UI already refuses to surface the magic Update button
+            # unless the local repo is clean + on main + with no local
+            # commits ahead, but a malicious POST could otherwise bypass
+            # that and silently trigger `reset --hard`. Re-validate here.
+            cur_branch = (_git_capture(
+                ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
+            if cur_branch != "main":
+                self._json({
+                    "ok": False,
+                    "error": (
+                        f"refusing to pull: local repo is on '{cur_branch}', "
+                        f"not 'main'. Switch to main or run a fresh Pinokio "
+                        f"install if you didn't intend to be on a side branch."
+                    ),
+                }, 409)
+                return
+            # `git status --porcelain` is empty iff the working tree is
+            # clean. The UI's clean-check uses the same probe.
+            dirty = (_git_capture(["status", "--porcelain"]) or "").strip()
+            if dirty:
+                self._json({
+                    "ok": False,
+                    "error": (
+                        "refusing to pull: local working tree has "
+                        "uncommitted changes. Commit, stash, or discard "
+                        "them, then click Update again."
+                    ),
+                    "dirty_files": dirty.splitlines()[:20],
+                }, 409)
+                return
+            # Block if there are local commits ahead of origin — those
+            # would be wiped by the reset --hard fallback below.
+            ahead = (_git_capture(
+                ["rev-list", "--count", "origin/main..HEAD"]) or "0").strip()
+            try:
+                ahead_n = int(ahead)
+            except ValueError:
+                ahead_n = 0
+            if ahead_n > 0:
+                self._json({
+                    "ok": False,
+                    "error": (
+                        f"refusing to pull: local has {ahead_n} commit(s) "
+                        f"ahead of origin/main. Push them or reset manually "
+                        f"if you don't need them."
+                    ),
+                }, 409)
+                return
+
+            # All guards passed — claim the pulling state and proceed.
             with _VERSION_LOCK:
                 _VERSION_STATE["pull_state"] = "pulling"
                 _VERSION_STATE["pull_message"] = None
@@ -9790,58 +9848,6 @@ class Handler(BaseHTTPRequestHandler):
                 _VERSION_STATE["pull_pulled_to_version"] = None
                 _VERSION_STATE["pull_requires_full_update"] = False
             try:
-                # Server-side guard (P2 hardening 2026-05-18). The UI already
-                # refuses to surface the magic Update button unless the
-                # local repo is clean + on main + with no local commits
-                # ahead, but a malicious POST could otherwise bypass that
-                # and silently trigger `reset --hard` on the user's repo.
-                # Re-validate here so the endpoint never destroys local
-                # work without explicit ?force=1 opt-in.
-                cur_branch = (_git_capture(
-                    ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
-                if cur_branch != "main":
-                    self._json({
-                        "ok": False,
-                        "error": (
-                            f"refusing to pull: local repo is on '{cur_branch}', "
-                            f"not 'main'. Switch to main or run a fresh Pinokio "
-                            f"install if you didn't intend to be on a side branch."
-                        ),
-                    }, 409)
-                    return
-                # `git status --porcelain` is empty iff the working tree is
-                # clean. The UI's clean-check uses the same probe.
-                dirty = (_git_capture(["status", "--porcelain"]) or "").strip()
-                if dirty:
-                    self._json({
-                        "ok": False,
-                        "error": (
-                            "refusing to pull: local working tree has "
-                            "uncommitted changes. Commit, stash, or discard "
-                            "them, then click Update again."
-                        ),
-                        "dirty_files": dirty.splitlines()[:20],
-                    }, 409)
-                    return
-                # Block if there are local commits ahead of origin — those
-                # would be wiped by the reset --hard fallback below.
-                ahead = (_git_capture(
-                    ["rev-list", "--count", "origin/main..HEAD"]) or "0").strip()
-                try:
-                    ahead_n = int(ahead)
-                except ValueError:
-                    ahead_n = 0
-                if ahead_n > 0:
-                    self._json({
-                        "ok": False,
-                        "error": (
-                            f"refusing to pull: local has {ahead_n} commit(s) "
-                            f"ahead of origin/main. Push them or reset manually "
-                            f"if you don't need them."
-                        ),
-                    }, 409)
-                    return
-
                 # Capture HEAD before the pull so we can diff afterwards.
                 pre_sha = _git_capture(["rev-parse", "HEAD"]) or ""
                 # Step 1: fetch — populates origin/main without touching HEAD.

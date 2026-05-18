@@ -31,7 +31,8 @@ This module is the dispatch layer. Four backends ship today:
     don't have to know it needs 4 steps vs 25.
   - **hidream** — fully-local HiDream-O1-Image-Dev (8B Qwen3-VL-based unified
     pixel-patch transformer, MIT). Lives in its own venv outside Phosphene
-    at `/Users/salo/HIDREAM-O1-MLX-LAB-active/`. Subprocess pattern, mirrors
+    at ``$HIDREAM_LAB_DIR`` (defaults to ``~/HIDREAM-O1-MLX-LAB-active``).
+    Subprocess pattern, mirrors
     mflux. Default **BF16** (~16 GB working set, 1024×1024 in ~67s) —
     matches upstream's master-weight precision and is the only precision
     that doesn't show patch-grid artifacts in flat regions. Q8/Q6 work
@@ -1150,8 +1151,8 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
 # ltx-2-mlx env stay decoupled (different MLX-related dep trees historically
 # fight each other on install). Subprocess pattern, mirrors mflux.
 #
-# Lab layout:
-#   /Users/salo/HIDREAM-O1-MLX-LAB-active/
+# Lab layout (resolved via $HIDREAM_LAB_DIR; default ~/HIDREAM-O1-MLX-LAB-active):
+#   <HIDREAM_LAB_DIR>/
 #     .venv/bin/python            <- the interpreter we shell out to
 #     mlx_models/hidream-o1-dev-bf16/
 #       model.safetensors         <- 17 GB BF16 backbone (mlx-vlm-loadable)

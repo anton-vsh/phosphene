@@ -125,13 +125,40 @@ module.exports = {
       }
     },
     // Pin mflux to the exact version our FBCache patch is line-targeted
-    // against (0.17.5). --force-reinstall + --no-deps so we don't churn
-    // unrelated packages. If a future bump is needed, change the pin here
+    // against (0.17.5). If a future bump is needed, change the pin here
     // AND in install_qwen.js AND re-validate patch_mflux_fbcache.py.
+    //
+    // Two-step shape mirrors install_qwen.js (the previous single-step
+    // `--force-reinstall --no-deps` could leave mflux's transitive deps
+    // MISSING after this update ran — the panel would show Qwen as
+    // available, then runtime would ImportError on first call).
+    //
+    // Gated on "is mflux already installed?" because update.js runs for
+    // every user on every update — including ones who never opted into
+    // Qwen via install_qwen.js. Importing mflux is the cheapest probe
+    // we can do without touching pip. The patch step below is already
+    // idempotent (skips when its marker is present); the install step
+    // we gate is the one that materially adds packages to the venv.
     {
       method: "shell.run",
       params: {
-        message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'"
+        message: [
+          // Step 1: probe. If mflux isn't already on the venv, skip the
+          // whole repair block — user didn't install Qwen, don't add it
+          // on their behalf.
+          "if ./ltx-2-mlx/env/bin/python -c 'import mflux' 2>/dev/null; then \\",
+          "  echo 'mflux present — refreshing pin to 0.17.5 with deps to repair any missing transitive packages…' && \\",
+          // Step 2: install WITH deps so pip resolves the full transitive
+          // set (transformers, accelerate, sentencepiece, etc.). Repairs
+          // any user whose previous --no-deps install left deps missing.
+          "  ./ltx-2-mlx/env/bin/pip install 'mflux==0.17.5' && \\",
+          // Step 3: force-reinstall WITHOUT deps to lock the version
+          // without churning the deps we just installed.
+          "  ./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'; \\",
+          "else \\",
+          "  echo 'mflux not installed (user never opted into Qwen image gen) — skipping mflux repair.'; \\",
+          "fi"
+        ].join("\n")
       }
     },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op

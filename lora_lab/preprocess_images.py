@@ -186,13 +186,22 @@ def preprocess_images(
     images_dir: str,
     output_dir: str,
     model_dir: str = DEFAULT_MODEL_DIR,
-    gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
+    gemma_model_id: str | None = None,
     target_height: int = 320,
     target_width: int = 512,
     captions_dir: str | None = None,
     caption_ext: str = ".txt",
     crop_anchor: str = "center",
 ) -> None:
+    # Default to the locally-resolved Gemma path (vendored install ships
+    # mlx_models/gemma-3-12b-it-4bit; the panel sets LTX_MODELS_DIR so
+    # the resolver lands there). Falling back to the HF repo id, the way
+    # the previous hard-coded default did, would silently duplicate-
+    # download ~6 GB to HF_HOME on a clean Pinokio install AND fail on
+    # offline rigs that have the local Gemma already cached.
+    if gemma_model_id is None:
+        from lora_lab import resolve_default_text_encoder
+        gemma_model_id = resolve_default_text_encoder()
     mx.set_cache_limit(mx.device_info()["memory_size"])
     model_dir = _resolve_model_dir(model_dir)
 
