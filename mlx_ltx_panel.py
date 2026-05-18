@@ -2331,6 +2331,28 @@ def q8_missing_files() -> list[str]:
     return []
 
 
+def q8_available_anywhere() -> bool:
+    """True if the Q8 repo is complete in EITHER the local dir OR the HF cache.
+
+    `q8_missing_files()` only checks the local dir (Q8_LOCAL_PATH or
+    LTX_Q8_LOCAL). `repo_status_list()` knows about both layers and picks
+    the more-complete one. /status used to compute `q8_available = not
+    q8_missing_files()`, which falsely reported "Q8 missing" for users who
+    had Q8 in their HF cache but not in mlx_models/. The model browser
+    modal — which IS cache-aware — would simultaneously show Q8 as
+    complete. Two different answers from the same panel for the same repo.
+
+    Issue #9 (oo2music, 2026-05-16): "This mode needs the Q8 model" gate
+    on FFLF/Extend/HQ stayed on even after Q8 was downloaded to the HF
+    cache. This helper is the single source of truth so the FFLF gate
+    matches the model browser.
+    """
+    for repo in repo_status_list():
+        if repo.get("key") == "q8":
+            return bool(repo.get("complete"))
+    return False
+
+
 def repo_status_list() -> list[dict]:
     """Per-repo status snapshot for the /models endpoint and the UI panel.
 
@@ -7275,8 +7297,17 @@ class Handler(BaseHTTPRequestHandler):
             # _load_required_files() helper near the top of this file.
             _q8_missing = q8_missing_files()
             _base_missing = base_missing()
-            payload["q8_available"] = not _q8_missing
-            payload["q8_missing"] = _q8_missing
+            # q8_available consults BOTH layers (local + HF cache) via
+            # q8_available_anywhere() so the FFLF/Extend/HQ gate agrees
+            # with the model browser modal. Closes issue #9 (oo2music).
+            # q8_missing keeps reporting local-dir-missing so the user
+            # can still see what would be needed for a fresh install;
+            # we zero it out when Q8 is reachable via cache so the UI
+            # doesn't show a spurious "missing files" warning alongside
+            # an enabled FFLF button.
+            _q8_available = q8_available_anywhere()
+            payload["q8_available"] = _q8_available
+            payload["q8_missing"] = [] if _q8_available else _q8_missing
             payload["q8_path"] = str(Q8_LOCAL_PATH)
             payload["base_available"] = not _base_missing
             payload["base_missing"] = _base_missing
