@@ -179,6 +179,53 @@ _hq_model_dir = None     # remember which model the HQ pipe was built against
 _pipe_lock = threading.Lock()
 
 
+# ---- TeaCache for Extend (2026-05-18) -----------------------------------------
+#
+# Lightricks' RetakePipeline.extend() shares its denoise loop
+# (ltx_pipelines_mlx.utils.samplers.guided_denoise_loop) with the standard
+# two-stage T2V pipeline's Stage 1 — same dev transformer, same Euler sampler,
+# same ltx2_schedule sigma layout. That stage is exactly what TeaCache is
+# calibrated against in ti2vid_two_stages.LTX2_TEACACHE_COEFFICIENTS. The
+# coefficients are reusable here; what's missing is the wiring — extend()
+# doesn't pass `teacache=` into guided_denoise_loop today.
+#
+# Rather than fork retake.py we monkey-patch the symbol the retake module
+# imports, so only calls FROM retake (i.e. extend() and retake()) go through
+# the patched version. Two-stages, HQ, and any other caller are untouched.
+#
+# Activation is per-call: the extend action below sets _EXTEND_TC_CONFIG before
+# pipe.extend_from_video() and clears it after. The helper inference loop is
+# already serialized (single _is_busy gate) so the module-level state is safe.
+#
+# Default threshold matches Stage 1's `LTX2_TEACACHE_THRESH=0.5` — moderate
+# 1.2× speedup with ~22% skip rate. Aggressive users can pass higher values
+# in the job spec (1.0 → ~2×, 1.5 → ~3× per the upstream comment).
+_EXTEND_TC_CONFIG: dict | None = None
+
+try:
+    import ltx_pipelines_mlx.retake as _ltx_retake_mod
+    from ltx_pipelines_mlx.ti2vid_two_stages import _build_teacache_controller as _build_stage1_teacache
+    _orig_guided_denoise_loop_for_retake = _ltx_retake_mod.guided_denoise_loop
+
+    def _guided_denoise_loop_with_extend_teacache(*args, teacache=None, **kwargs):
+        cfg = _EXTEND_TC_CONFIG
+        if teacache is None and cfg and cfg.get("enable"):
+            sigmas = kwargs.get("sigmas")
+            n_steps = len(sigmas) - 1 if sigmas else cfg.get("num_steps", 12)
+            try:
+                teacache = _build_stage1_teacache(n_steps, cfg.get("thresh"))
+            except Exception:
+                # Don't fail the gen if calibration is somehow unusable.
+                teacache = None
+        return _orig_guided_denoise_loop_for_retake(*args, teacache=teacache, **kwargs)
+
+    _ltx_retake_mod.guided_denoise_loop = _guided_denoise_loop_with_extend_teacache
+    _EXTEND_TC_PATCH_OK = True
+except Exception as _tc_patch_exc:
+    print(f"[warm-helper] Extend TeaCache patch skipped: {_tc_patch_exc}", flush=True)
+    _EXTEND_TC_PATCH_OK = False
+
+
 def release_pipelines(keep_kind=None):
     """Free every loaded pipeline except the one matching keep_kind.
 
@@ -1532,6 +1579,28 @@ for line in sys.__stdin__:
             # extends into swap (240s/step instead of ~25s/step). The panel
             # exposes a "Fast" / "Quality" toggle that flips this to 3.0.
             cfg_scale = float(p.get("cfg_scale", 1.0))
+            num_steps = int(p.get("steps", 12))
+
+            # TeaCache for Extend (2026-05-18). Active only if the boot-time
+            # patch landed AND the job spec doesn't explicitly opt out. The
+            # monkey-patched guided_denoise_loop reads _EXTEND_TC_CONFIG to
+            # decide whether to construct a controller. Threshold defaults
+            # match the Stage-1 calibration's `LTX2_TEACACHE_THRESH=0.5`.
+            enable_tc = bool(p.get("enable_teacache", True)) and _EXTEND_TC_PATCH_OK
+            tc_thresh = p.get("teacache_thresh")
+            if tc_thresh is not None:
+                try:
+                    tc_thresh = float(tc_thresh)
+                except (TypeError, ValueError):
+                    tc_thresh = None
+            _EXTEND_TC_CONFIG = {
+                "enable": enable_tc,
+                "thresh": tc_thresh,
+                "num_steps": num_steps,
+            }
+            if enable_tc:
+                emit({"event": "log",
+                      "line": f"TeaCache active on extend (thresh={tc_thresh if tc_thresh is not None else 'default 0.5'})."})
             with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
                 if neg_active:
                     emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
@@ -1541,7 +1610,7 @@ for line in sys.__stdin__:
                     extend_frames=int(p.get("extend_frames", 5)),
                     direction=p.get("direction", "after"),
                     seed=seed,
-                    num_steps=int(p.get("steps", 12)),
+                    num_steps=num_steps,
                     cfg_scale=cfg_scale,
                 )
             # Decode + save (mirrors the CLI _decode_and_save)
@@ -1566,6 +1635,10 @@ for line in sys.__stdin__:
             _last_activity = time.time()
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
         finally:
+            # Always clear the per-call TeaCache config so a future
+            # non-extend call (or extend with enable=False) doesn't
+            # inherit a stale state.
+            _EXTEND_TC_CONFIG = None
             _is_busy = False
         continue
 
