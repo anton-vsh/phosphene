@@ -4484,7 +4484,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # the advanced fields.
             "stage1_steps": max(1, int(f("stage1_steps", "10") or 10)),
             "stage2_steps": max(0, int(f("stage2_steps", "3") or 3)),
-            "teacache_thresh": float(f("teacache_thresh", "2.0") or 2.0),
+            # HQ TeaCache default — 1.0 is the calibrated sweet spot per
+            # ti2vid_two_stages_hq.LTX2_HQ_TEACACHE_THRESH ("~52% skip,
+            # ~2× speedup, sweet spot"). 2.0 was the panel's previous
+            # default and sat WAY past the calibration cliff at ~1.0,
+            # causing near-100% skip rate — late denoise steps reused
+            # ancient cached residuals and produced visible ghost-frame
+            # fusion (two faces, motion smear). Mr Bizarro caught this
+            # in a real render on 2026-05-18.
+            "teacache_thresh": float(f("teacache_thresh", "1.0") or 1.0),
             "cfg_scale": float(f("cfg_scale", "3.0") or 3.0),
             # Bongmath inner-loop cap for HQ res_2s sampler. Default 100
             # (matches upstream). Lower values save latent algebra time
@@ -6155,7 +6163,10 @@ def run_job_inner(job: dict) -> None:
                 # by mistake (copy from standard params); fixed here.
                 "stg_scale": 0.0,
                 "enable_teacache": True,
-                "teacache_thresh": float(p.get("teacache_thresh", 2.0)),
+                # HQ TeaCache default — see make_job comment. 1.0 is the
+                # calibrated sweet spot; 2.0 (prior default) sat past the
+                # skip cliff and produced ghost-frame artifacts.
+                "teacache_thresh": float(p.get("teacache_thresh", 1.0)),
                 "bongmath_max_iter": int(p.get("bongmath_max_iter", 100)),
                 "video_skip_step": int(p.get("video_skip_step", 0)),
                 "audio_skip_step": int(p.get("audio_skip_step", 0)),
@@ -8979,7 +8990,9 @@ class Handler(BaseHTTPRequestHandler):
                 "temporal_mode": ["native"],
                 "stage1_steps": [_val("stage1_steps", "10")],
                 "stage2_steps": [_val("stage2_steps", "3")],
-                "teacache_thresh": [_val("teacache_thresh", "1.8")],
+                # HQ TeaCache default — was 1.8 (past calibrated cliff
+                # at ~1.0). Matches the /run + make_job default now.
+                "teacache_thresh": [_val("teacache_thresh", "1.0")],
                 "cfg_scale": [_val("cfg_scale", "3.0")],
                 "bongmath_max_iter": [_val("bongmath_max_iter", "100")],
                 "video_skip_step": [_val("video_skip_step", "1")],
