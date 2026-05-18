@@ -8,7 +8,9 @@
   <a href="https://x.com/PhospheneAI">@PhospheneAI</a> on X · <a href="https://github.com/mrbizarro/phosphene">github.com/mrbizarro/phosphene</a>
 </p>
 
-<!-- HERO_CLIP_PLACEHOLDER -->
+<p align="center">
+  <img src="assets/screenshots/phos_01_video_tab.png" alt="Phosphene panel — Video tab" width="100%">
+</p>
 
 ---
 
@@ -76,7 +78,7 @@ Use `LTX_FORCE_CAP_TIER=q4` to view the Q4 surface from a Q8 machine (useful for
 
 Pinokio handles the rest: Apple Silicon hardware gate, the upstream `dgrauet/ltx-2-mlx` clone, the uv-managed Python 3.11 venv, the codec + memory patches, and the filtered model download (~28 GB: Q4 + Gemma encoder).
 
-<!-- PINOKIO_INSTALL_SCREENSHOT_PLACEHOLDER -->
+<!-- Pinokio install screenshot can land here once we record one. -->
 
 For the Q8 HQ tier (required for Character, FFLF, Extend), click **Download Q8** in the panel sidebar after first launch (~37 GB, one-time).
 
@@ -104,9 +106,27 @@ cd ..
 
 ## Quick start
 
-<!-- PANEL_SCREENSHOT_PLACEHOLDER -->
+Pick a workflow at the top: **Video**, **Images**, **Audio**, or **Train Character**. Each one is a single page.
 
-Pick a workflow at the top: **Video**, **Images**, or **Train Character**. Each one is a single page.
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/phos_05_character_mode.png" alt="Video tab · Character mode — compact avatar picker"></td>
+<td width="50%"><img src="assets/screenshots/phos_02_images_tab.png" alt="Images tab — multi-reference subject composition"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Video / Character mode</b> — round-avatar picker, voice indicator, manage modal</sub></td>
+<td align="center"><sub><b>Images</b> — Qwen Edit / HiDream-O1 / FLUX, multi-ref subject composition</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="assets/screenshots/phos_03_audio_tab.png" alt="Audio tab — audio drives the generation"></td>
+<td width="50%"><img src="assets/screenshots/phos_04_train_tab.png" alt="Train Character tab — dataset + auto-caption + voice LoRA"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Audio</b> — voice or music clip drives generation; optional reference image anchors frame 0</sub></td>
+<td align="center"><sub><b>Train Character</b> — drop 30–80 photos, Gemma 3 auto-captions, optional voice LoRA</sub></td>
+</tr>
+</table>
+
 
 **Text → video**
 1. Video tab → **Text** mode pill.
