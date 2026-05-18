@@ -499,7 +499,15 @@ def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
                 and cand.name.startswith("mflux-generate")):
             return str(cand)
 
-    repo_root = Path(__file__).resolve().parent.parent
+    # image_engine.py lives AT the repo root (panel.git/image_engine.py).
+    # Regression in d7a7caa: a `.parent.parent` accidentally walked one
+    # directory too high to /Users/salo/pinokio/api/, where neither the
+    # ltx-2-mlx env nor the image-gen env exist — every probe fell
+    # through to shutil.which() which (with no global mflux on PATH)
+    # returned None, so health_check() reported "mflux not installed"
+    # and image generations never wrote anything to disk. Fixed
+    # 2026-05-18: walk just one level so the bundled venv resolves.
+    repo_root = Path(__file__).resolve().parent
     candidates = [
         repo_root / "ltx-2-mlx" / "env" / "bin" / bin_name,
         repo_root / "image-gen" / "env" / "bin" / bin_name,
