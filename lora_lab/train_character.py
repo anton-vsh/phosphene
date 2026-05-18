@@ -218,7 +218,7 @@ def load_spec(spec_path: Path) -> dict[str, Any]:
     cs = spec["advanced"].get("caption_strategy")
     if cs == "trigger_simple":
         # Panel-side alias; means "trigger word + a tiny framing hint",
-        # which is what class_word does ("salotrn man, close-up portrait").
+        # which is what class_word does (e.g. "mychar man, close-up portrait").
         spec["advanced"]["caption_strategy"] = "class_word"
 
     for k in _REQUIRED_SPEC_KEYS:

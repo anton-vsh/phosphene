@@ -264,7 +264,14 @@ def main() -> int:
                         "(center=default+backward-compatible; top=preserves face on portrait sources "
                         "going to landscape target; bottom=preserves lower body)")
     p.add_argument("--model-dir", default=DEFAULT_MODEL_DIR)
-    p.add_argument("--gemma", default="mlx-community/gemma-3-12b-it-4bit")
+    # Default left as None so the preprocess_images() body's local
+    # resolver (resolve_default_text_encoder) picks the right path.
+    # Hardcoding the HF repo id here would duplicate-download Gemma to
+    # HF_HOME on a vendored install that already has it under
+    # mlx_models/gemma-3-12b-it-4bit/.
+    p.add_argument("--gemma", default=None,
+                   help="Gemma model dir or repo id. Default: resolved "
+                        "via LTX_MODELS_DIR or vendored mlx_models/.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 

@@ -61,12 +61,30 @@ import urllib.request
 SCENEMA_URL = os.environ.get("SCENEMA_URL", "http://127.0.0.1:8000/generate")
 SCENEMA_TIMEOUT_SEC = int(os.environ.get("SCENEMA_TIMEOUT_SEC", "600"))
 
-# Pinokio bundles ffmpeg under its own prefix; use that path explicitly so
-# we don't depend on PATH ordering (the panel often has a sanitised PATH).
-FFMPEG_BIN = os.environ.get(
-    "PHOSPHENE_FFMPEG",
-    "/Users/salo/pinokio/bin/ffmpeg-env/bin/ffmpeg",
-)
+# Pinokio bundles ffmpeg under its own prefix; locate it dynamically the
+# same way the rest of the panel does (env override → standard Pinokio
+# locations → system PATH). PHOSPHENE_FFMPEG takes precedence so a power
+# user can pin a specific binary.
+def _resolve_ffmpeg() -> str:
+    from pathlib import Path
+    import shutil
+    explicit = os.environ.get("PHOSPHENE_FFMPEG")
+    if explicit and Path(explicit).is_file():
+        return explicit
+    for c in (
+        Path.home() / "pinokio" / "bin" / "ffmpeg-env" / "bin" / "ffmpeg",
+        Path("/Applications/Pinokio.app/Contents/Resources/bin/ffmpeg-env/bin/ffmpeg"),
+    ):
+        if c.is_file():
+            return str(c)
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        return sys_ffmpeg
+    # Last resort — return whatever was explicitly set (or a sensible
+    # vendored guess) so the real error surfaces at runtime, not import.
+    return explicit or str(Path.home() / "pinokio" / "bin" / "ffmpeg-env" / "bin" / "ffmpeg")
+
+FFMPEG_BIN = _resolve_ffmpeg()
 
 
 # ---------------------------------------------------------------------------

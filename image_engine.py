@@ -503,7 +503,7 @@ def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
 
     # image_engine.py lives AT the repo root (panel.git/image_engine.py).
     # Regression in d7a7caa: a `.parent.parent` accidentally walked one
-    # directory too high to /Users/salo/pinokio/api/, where neither the
+    # directory too high to Pinokio's api/ dir, where neither the
     # ltx-2-mlx env nor the image-gen env exist — every probe fell
     # through to shutil.which() which (with no global mflux on PATH)
     # returned None, so health_check() reported "mflux not installed"

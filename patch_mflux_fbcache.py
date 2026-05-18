@@ -253,8 +253,16 @@ QWEN_HELPER_NEW = QWEN_HELPER_INSERT_AFTER + """
 def _patch_qwen() -> int:
     target = _find("mflux/models/qwen/model/qwen_transformer/qwen_transformer.py")
     if target is None:
-        print("[qwen] mflux qwen_transformer.py not found — mflux not installed in expected venv root")
-        return 1
+        # mflux isn't installed. This is the normal state for users who
+        # never opted into Qwen image gen — they shouldn't have their
+        # Update fail because of a patch script that has nothing to
+        # patch. The previous return code (1) made Pinokio Update bail
+        # for everyone who didn't run install_qwen.js. Return 0 with a
+        # benign message instead; install_qwen.js will re-invoke this
+        # script after the venv has mflux.
+        print("[qwen] mflux not installed — skipping FBCache patch "
+              "(this is normal if you haven't installed Qwen image gen).")
+        return 0
     src = target.read_text()
     if PATCH_MARKER in src:
         print(f"[qwen] {target.name}: already patched (marker present)")

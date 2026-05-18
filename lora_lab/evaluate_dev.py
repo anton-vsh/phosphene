@@ -37,21 +37,26 @@ from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
 from ltx_core_mlx.loader.sft_loader import SafetensorsStateDictLoader
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 
+from lora_lab import resolve_default_model_dir, resolve_default_text_encoder
+
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL_DIR = (
-    Path.home()
-    / ".cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q4"
-    / "snapshots/53a6f5f39d9c074bc73e6a18ba391f40ddffaa68"
-)
+# Same resolver story as evaluate.py — env (LTX_MODELS_DIR) → vendored
+# mlx_models/ → HF cache fallback. The previous hardcoded dgrauet snapshot
+# path silently broke fresh Pinokio installs whose model dir lives at
+# <panel-root>/mlx_models/ltx-2.3-mlx-q4 (not in ~/.cache/huggingface).
+DEFAULT_MODEL_DIR = resolve_default_model_dir()
 
+# `{trigger}` is substituted in main() so this file is reusable for any
+# character LoRA. Pass `--trigger mychar` (or whatever token the LoRA was
+# trained on); default is `mychar`.
 DEFAULT_PROMPTS = [
-    "salotrn man, close-up portrait, facing camera, neutral expression, soft daylight",
-    "salotrn man, medium shot, three-quarter angle, slight smile, warm indoor lighting",
-    "salotrn man, half body shot, looking up, outdoor sunny afternoon",
-    "salotrn man, close-up portrait, looking away, profile view, evening light",
-    "salotrn man, medium shot, big grin, outdoor tropical balcony, daytime",
+    "{trigger} man, close-up portrait, facing camera, neutral expression, soft daylight",
+    "{trigger} man, medium shot, three-quarter angle, slight smile, warm indoor lighting",
+    "{trigger} man, half body shot, looking up, outdoor sunny afternoon",
+    "{trigger} man, close-up portrait, looking away, profile view, evening light",
+    "{trigger} man, medium shot, big grin, outdoor tropical balcony, daytime",
 ]
 
 
@@ -114,6 +119,9 @@ def main() -> int:
     p.add_argument("--seed-start", type=int, default=1000)
     p.add_argument("--prompts-file", default=None)
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--trigger", default="mychar",
+                   help="trigger token substituted into `{trigger}` placeholders in "
+                        "DEFAULT_PROMPTS. Ignored when --prompts-file is given.")
     p.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
     p.add_argument("--low-memory", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -127,7 +135,8 @@ def main() -> int:
     if args.prompts_file:
         prompts = [line.strip() for line in Path(args.prompts_file).read_text().splitlines() if line.strip()]
     else:
-        prompts = list(DEFAULT_PROMPTS)
+        trigger = (args.trigger or "mychar").strip() or "mychar"
+        prompts = [p.format(trigger=trigger) for p in DEFAULT_PROMPTS]
     if args.limit:
         prompts = prompts[: args.limit]
     print(f"running {len(prompts)} prompts via DEV pipeline | {args.width}x{args.height} {args.frames}f "
@@ -138,7 +147,7 @@ def main() -> int:
 
     pipe = TI2VidOneStagePipeline(
         model_dir=args.model_dir,
-        gemma_model_id="mlx-community/gemma-3-12b-it-4bit",
+        gemma_model_id=resolve_default_text_encoder(),
         low_memory=args.low_memory,
         low_ram_streaming=False,
     )

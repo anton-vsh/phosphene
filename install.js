@@ -184,7 +184,19 @@ module.exports = {
           // Force the mlx pin BEFORE installing ltx-* packages so their deps
           // resolve to the pinned version instead of pulling latest 0.31.x.
           "uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'",
-          "uv pip install --python env/bin/python ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
+          // Y3 — Train Character ships in 3.0. Without ltx-trainer-mlx in
+          // the venv, the trainer subprocess fails at `import yaml` because
+          // pyyaml is a transitive dep of ltx-trainer (declared in its
+          // pyproject). Codex pre-ship review 2026-05-18 caught this.
+          "uv pip install --python env/bin/python ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer",
+          // Auto-caption (Gemma 3 12B via mlx-vlm) needs the mlx-vlm
+          // package. Pinned to 0.4.4 — caption_with_gemma.py's import
+          // surface (load, generate, prompt_utils.apply_chat_template)
+          // is stable at that version. --no-deps so we don't drag in
+          // mlx-vlm's heavy default deps (PIL>=10, av, etc. that fight
+          // mflux/transformers pins). The runtime imports it lazily so
+          // a partial install doesn't break the rest of the panel.
+          "uv pip install --python env/bin/python --no-deps 'mlx-vlm==0.4.4'",
           // hf_transfer is HuggingFace's Rust-based downloader — 5-10× faster
           // than the default Python downloader for big repos like Q8 (~25 GB).
           // The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
@@ -196,8 +208,7 @@ module.exports = {
           // See agent/engine.py for routing details. Falls back to stdlib
           // urllib if missing — safe to omit but the loop is less robust.
           //
-          // smolagents: Phase 2 of the agent-layer refactor (see
-          // /Users/salo/.claude/plans/fancy-conjuring-lovelace.md). Powers
+          // smolagents: Phase 2 of the agent-layer refactor. Powers
           // the optional CodeAgent runtime in agent/runtime_smol.py,
           // selectable per-request via PHOSPHENE_RUNTIME=smol. smolagents
           // pulls transformers as a transitive dep — the huggingface-hub

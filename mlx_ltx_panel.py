@@ -690,10 +690,13 @@ def _safe_loras_dir() -> Path:
 # ============================================================================
 #
 # Phosphene's panel runs the inference side; the actual LoRA training pipeline
-# lives in a sibling lab repo at /Users/salo/AI/projects/lora-lab/ — separate
-# tree, separate git, isolated dependencies (memory file: lora_lab notes).
-# This panel never imports the lab as Python. It calls the lab's training
-# entry-point as a subprocess via the lab's `scripts/run.sh` shim, which
+# is vendored at ``<panel-root>/lora_lab/`` (commit e9ce853) so an installer-
+# only user gets training out of the box without cloning a second repo. The
+# LTX_LORA_LAB_ROOT env var (read at module load into LORA_LAB_ROOT) can
+# repoint at an external authoring tree for in-place iteration.
+#
+# This panel never imports the lab as Python at module load time. It calls
+# the training entry-point as a subprocess via scripts/lora_lab_run.sh, which
 # selects the ltx-2-mlx venv python + sets PYTHONPATH so the training script
 # can `import ltx_pipelines_mlx` and friends. No new venv. No new service.
 #
@@ -827,8 +830,8 @@ TRAIN_VOICE_MAX_BYTES = 50 * 1024 * 1024         # 50 MB
 TRAIN_VOICE_MIN_SECONDS = 3                       # advisory; we don't ffprobe
 TRAIN_VOICE_MAX_SECONDS = 60                      # advisory; we don't ffprobe
 
-# Audio-phase defaults. Measured ~4 s/step on M4 Max during the salotrn
-# end-to-end run on 2026-05-15 (250 steps in 17 min). The original 30 s/step
+# Audio-phase defaults. Measured ~4 s/step on M4 Max during an end-to-end
+# voice-LoRA run on 2026-05-15 (250 steps in 17 min). The original 30 s/step
 # heuristic massively overestimated — chip labels were showing 2 h for what
 # is actually ~17 min, scaring users off the voice phase. The audit's earlier
 # 24 s/step number conflated preprocess + setup time with pure training.
@@ -23956,11 +23959,11 @@ document.getElementById('genForm').addEventListener('submit', async e => {
 
   // Safety net: if the prompt mentions a trigger word from a LoRA the user
   // has installed but NOT toggled active for this render, ask before
-  // submitting. The #1 silent-failure mode is "I typed 'salotrn' but
-  // forgot to switch on the picker chip" — the render then runs without
-  // fusion, and the face/style doesn't reproduce. Compare prompt vs.
-  // (_knownUserLoras minus _activeLoras) and surface a confirm() so the
-  // mismatch isn't invisible.
+  // submitting. The #1 silent-failure mode is "I typed my LoRA's trigger
+  // word but forgot to switch on the picker chip" — the render then runs
+  // without fusion, and the face/style doesn't reproduce. Compare prompt
+  // vs. (_knownUserLoras minus _activeLoras) and surface a confirm() so
+  // the mismatch isn't invisible.
   try {
     const promptRaw = (fd.get('prompt') || '').toString();
     const promptLower = promptRaw.toLowerCase();

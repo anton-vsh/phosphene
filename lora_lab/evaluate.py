@@ -36,31 +36,39 @@ from pathlib import Path
 import mlx.core as mx
 from ltx_pipelines_mlx import BasePipeline
 
+from lora_lab import resolve_default_model_dir, resolve_default_text_encoder
+
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL_DIR = (
-    Path.home()
-    / ".cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q4"
-    / "snapshots/53a6f5f39d9c074bc73e6a18ba391f40ddffaa68"
-)
+# Resolved at import time via the same logic the trainer uses (env override
+# LTX_MODELS_DIR → vendored mlx_models/ → HF cache fallback). Hardcoding the
+# old dgrauet HF snapshot path here used to break the public Pinokio install,
+# whose model dir is the vendored mlx_models/ltx-2.3-mlx-q4 — completely
+# unrelated to ~/.cache/huggingface.
+DEFAULT_MODEL_DIR = resolve_default_model_dir()
 
+# Prompts use `{trigger}` as a placeholder for the LoRA trigger token. The
+# CLI substitutes it via str.format at runtime — pass `--trigger mychar` (or
+# whatever token the LoRA was trained on) to fill it in. Default is `mychar`
+# so a fresh user can still smoke-test the eval pipeline without editing
+# this file.
 DEFAULT_PROMPTS = [
-    "salotrn, close-up portrait, facing camera, neutral expression, soft daylight, blurred indoor background",
-    "salotrn, medium shot, three-quarter angle, slight smile, warm indoor lighting, dark t-shirt",
-    "salotrn, half-body, looking up, outdoor sunny afternoon, light shirt, blue sky",
-    "salotrn, close-up portrait, looking away, evening light, profile view",
-    "salotrn, medium shot, big grin, outdoor tropical balcony, daytime, dark t-shirt, palm trees background",
-    "salotrn, close-up selfie, facing camera, deadpan expression, gray t-shirt, indoor home gym",
-    "salotrn, half-body shot, facing camera, hands in pockets, autumn forest, soft overcast light",
-    "salotrn, close-up portrait, three-quarter angle, contemplative expression, cafe interior, golden hour",
-    "salotrn, full-body shot, facing camera, walking, urban street, daytime",
-    "salotrn, close-up portrait, looking down, dramatic backlight, dark background",
-    "salotrn, medium shot, slight smile, library shelves behind, warm indoor light",
-    "salotrn, close-up selfie, big grin, beach background, bright outdoor light",
-    "salotrn, half-body, facing camera, sitting at desk with computer, screen lighting, indoor",
-    "salotrn, three-quarter angle, looking out window, overcast daylight, indoor",
-    "salotrn, close-up portrait, facing camera, serious expression, neutral background, studio lighting",
+    "{trigger}, close-up portrait, facing camera, neutral expression, soft daylight, blurred indoor background",
+    "{trigger}, medium shot, three-quarter angle, slight smile, warm indoor lighting, dark t-shirt",
+    "{trigger}, half-body, looking up, outdoor sunny afternoon, light shirt, blue sky",
+    "{trigger}, close-up portrait, looking away, evening light, profile view",
+    "{trigger}, medium shot, big grin, outdoor tropical balcony, daytime, dark t-shirt, palm trees background",
+    "{trigger}, close-up selfie, facing camera, deadpan expression, gray t-shirt, indoor home gym",
+    "{trigger}, half-body shot, facing camera, hands in pockets, autumn forest, soft overcast light",
+    "{trigger}, close-up portrait, three-quarter angle, contemplative expression, cafe interior, golden hour",
+    "{trigger}, full-body shot, facing camera, walking, urban street, daytime",
+    "{trigger}, close-up portrait, looking down, dramatic backlight, dark background",
+    "{trigger}, medium shot, slight smile, library shelves behind, warm indoor light",
+    "{trigger}, close-up selfie, big grin, beach background, bright outdoor light",
+    "{trigger}, half-body, facing camera, sitting at desk with computer, screen lighting, indoor",
+    "{trigger}, three-quarter angle, looking out window, overcast daylight, indoor",
+    "{trigger}, close-up portrait, facing camera, serious expression, neutral background, studio lighting",
 ]
 
 
@@ -104,6 +112,9 @@ def main() -> int:
     p.add_argument("--seed-start", type=int, default=1000)
     p.add_argument("--prompts-file", default=None, help="optional .txt file with one prompt per line; else use DEFAULT_PROMPTS")
     p.add_argument("--limit", type=int, default=None, help="only run the first N prompts")
+    p.add_argument("--trigger", default="mychar",
+                   help="trigger token substituted for `{trigger}` in DEFAULT_PROMPTS "
+                        "(must match what the LoRA was trained on). Ignored when --prompts-file is given.")
     p.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
     p.add_argument("--low-memory", action="store_true",
                    help="reload transformer between renders (cuts peak RAM, slower); default keeps loaded across renders")
@@ -118,7 +129,10 @@ def main() -> int:
     if args.prompts_file:
         prompts = [line.strip() for line in Path(args.prompts_file).read_text().splitlines() if line.strip()]
     else:
-        prompts = list(DEFAULT_PROMPTS)
+        # Substitute the trigger token into the {trigger}-placeholder defaults.
+        # Falls back to a literal `mychar` if the user forgot to pass --trigger.
+        trigger = (args.trigger or "mychar").strip() or "mychar"
+        prompts = [p.format(trigger=trigger) for p in DEFAULT_PROMPTS]
     if args.limit:
         prompts = prompts[: args.limit]
     print(f"running {len(prompts)} prompts | {args.width}x{args.height} {args.frames}f {args.num_steps}step")
@@ -128,7 +142,7 @@ def main() -> int:
 
     pipe = BasePipeline(
         model_dir=args.model_dir,
-        gemma_model_id="mlx-community/gemma-3-12b-it-4bit",
+        gemma_model_id=resolve_default_text_encoder(),
         low_memory=args.low_memory,
         low_ram_streaming=False,
     )

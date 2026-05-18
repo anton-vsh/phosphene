@@ -60,19 +60,48 @@ module.exports = {
         message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'"
       }
     },
-    // Re-install ltx-core-mlx + ltx-pipelines-mlx from local packages.
-    // Critical for users who hit the dcd639e pin window (commits 157b259
-    // through e02e288): their site-packages still has 0.1.0 installed
-    // even after `git checkout main` updates the source tree to 0.2.0+.
-    // Without this re-install they'd have working source but broken
-    // installed code (e.g. ExtendPipeline.extend_from_video missing
-    // cfg_scale kwarg). --force-reinstall guarantees overwrite;
+    // Re-install ltx-core-mlx + ltx-pipelines-mlx + ltx-trainer-mlx from
+    // local packages. Critical for users who hit the dcd639e pin window
+    // (commits 157b259 through e02e288): their site-packages still has
+    // 0.1.0 installed even after `git checkout main` updates the source
+    // tree to 0.2.0+. Without this re-install they'd have working source
+    // but broken installed code (e.g. ExtendPipeline.extend_from_video
+    // missing cfg_scale kwarg). --force-reinstall guarantees overwrite;
     // --no-deps avoids re-resolving (and re-pulling) mlx etc.
+    //
+    // 3.0: ltx-trainer added so existing v2 installs can run the new
+    // Train Character tab without re-installing from scratch. The
+    // trainer subprocess fails at `import yaml` without pyyaml, which
+    // is a transitive dep of ltx-trainer-mlx — installing the local
+    // package brings it cleanly.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
-        message: "./env/bin/pip install --force-reinstall --no-deps ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx"
+        message: "./env/bin/pip install --force-reinstall --no-deps ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx ./packages/ltx-trainer"
+      }
+    },
+    // 3.0: pyyaml + pydantic + tqdm + rich are ltx-trainer-mlx's
+    // transitive deps. We just installed ltx-trainer with --no-deps so
+    // those weren't resolved. Install them explicitly (idempotent — pip
+    // skips when already present).
+    {
+      method: "shell.run",
+      params: {
+        path: "ltx-2-mlx",
+        message: "./env/bin/pip install 'pyyaml>=6.0' 'pydantic>=2.0' 'tqdm>=4.65' 'rich>=13.0'"
+      }
+    },
+    // 3.0: auto-caption (Gemma 3 12B via mlx-vlm) needs mlx-vlm 0.4.4.
+    // --no-deps because mlx-vlm's heavy default deps fight our mflux /
+    // transformers / mlx pins. The runtime import is lazy so a partial
+    // install doesn't break the panel — but the Auto-caption button
+    // will fail noisily if mlx-vlm is missing. Install idempotently.
+    {
+      method: "shell.run",
+      params: {
+        path: "ltx-2-mlx",
+        message: "./env/bin/pip install --no-deps 'mlx-vlm==0.4.4'"
       }
     },
     // Y1.022: hf_transfer is HuggingFace's Rust accelerator — 5-10× faster
@@ -102,8 +131,7 @@ module.exports = {
       }
     },
     // smolagents: powers the optional CodeAgent runtime in
-    // agent/runtime_smol.py (Phase 2 of the agent-layer refactor —
-    // see /Users/salo/.claude/plans/fancy-conjuring-lovelace.md).
+    // agent/runtime_smol.py (Phase 2 of the agent-layer refactor).
     // Off by default; the panel uses it only when launched with
     // PHOSPHENE_RUNTIME=smol.
     //
