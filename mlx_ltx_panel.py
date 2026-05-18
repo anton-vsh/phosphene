@@ -1152,25 +1152,54 @@ def _train_required_models() -> list[dict]:
     for inference so they should already be present, but we check anyway.
     """
     q4_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
+    q8_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
     q4_repo_id = "dgrauet/ltx-2.3-mlx-q4"
     gemma_local_dir = ROOT / "mlx_models" / "gemma-3-12b-it-4bit"
     gemma_repo_id = "mlx-community/gemma-3-12b-it-4bit"
 
-    def _file_present(local_dir: Path, repo_id: str, filename: str) -> bool:
-        p = local_dir / filename
-        try:
-            if p.exists() and p.stat().st_size >= _MIN_FILE_BYTES:
-                return True
-        except OSError:
-            pass
+    def _file_present(local_dir: Path, repo_id: str, filename: str,
+                      *, extra_dirs: list[Path] | None = None) -> bool:
+        """Check known locations for a model file in this order:
+
+          1. The primary local_dir (where the helper expects it by default).
+          2. Any `extra_dirs` callers list explicitly — used for files that
+             can legitimately live in more than one place. The dev
+             transformer is the canonical example: original downloads
+             land in mlx_models/ltx-2.3-mlx-q4/ but Phosphene also ships
+             a Q8-friendly copy under mlx_models/ltx-2.3-mlx-q8/, and the
+             trainer happily loads either. Without this fallback the
+             preflight reports "missing" on installs that only have the
+             Q8-side copy and prompts an unnecessary 11 GB redownload.
+          3. The configured HF_HOME hub for repo_id.
+          4. The user-default HF cache (~/.cache/huggingface/hub) — covers
+             installs where HF_HOME wasn't set at first download time and
+             weights landed in the default location.
+        """
+        candidates: list[Path] = [local_dir / filename]
+        for d in (extra_dirs or []):
+            candidates.append(d / filename)
         cache_dir = _repo_hf_cache_dir(repo_id)
         if cache_dir is not None:
-            cp = cache_dir / filename
+            candidates.append(cache_dir / filename)
+        # Last-resort: default HF cache, regardless of HF_HOME. Matches what
+        # huggingface_hub does when neither env var is set. Old downloads
+        # often live here even when HF_HOME is now pointing elsewhere.
+        safe = repo_id.replace("/", "--")
+        default_root = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{safe}" / "snapshots"
+        try:
+            if default_root.is_dir():
+                snaps = sorted(default_root.iterdir(),
+                               key=lambda d: d.stat().st_mtime, reverse=True)
+                if snaps:
+                    candidates.append(snaps[0] / filename)
+        except OSError:
+            pass
+        for c in candidates:
             try:
-                if cp.exists() and cp.stat().st_size >= _MIN_FILE_BYTES:
+                if c.exists() and c.stat().st_size >= _MIN_FILE_BYTES:
                     return True
             except OSError:
-                pass
+                continue
         return False
 
     items = [
@@ -1185,7 +1214,8 @@ def _train_required_models() -> list[dict]:
             "local_dir": str(q4_local_dir),
             "size_gb": 11.0,
             "ready": _file_present(q4_local_dir, q4_repo_id,
-                                   "transformer-dev.safetensors"),
+                                   "transformer-dev.safetensors",
+                                   extra_dirs=[q8_local_dir]),
         },
         {
             "key": "gemma_text_encoder",
@@ -2572,9 +2602,20 @@ def _civitai_request(path: str, params: dict | None = None,
         raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
 
 
+_CIVITAI_BASE_MODELS_BY_CONTEXT = {
+    # Video LoRAs — the default. LTX-2.3 is the only video base we support.
+    "video": "LTXV 2.3",
+    # Image LoRAs — covers the four engines exposed in the Images tab:
+    # mflux (Flux.1 family), FLUX.2 Klein-Edit, Qwen-Image / Qwen-Image-Edit,
+    # and the HiDream-i1 family. Comma-separated lets the CivitAI API
+    # filter on any of these. Order doesn't matter to the API.
+    "image": "Flux.1 D,Flux.1 S,Flux.1 Kontext,Flux.2,Qwen-Image,Qwen-Image-Edit,HiDream-i1",
+}
+
 def _civitai_search(query: str = "", nsfw: bool = False,
-                    cursor: str = "", limit: int = 20) -> dict:
-    """Search LTX-2.3 LoRAs. Returns the trimmed shape:
+                    cursor: str = "", limit: int = 20,
+                    context: str = "video") -> dict:
+    """Search LoRAs. Returns the trimmed shape:
         { "items": [{
             "id", "name", "creator", "description", "tags", "downloads",
             "rating", "nsfw", "preview_url", "version_id",
@@ -2597,9 +2638,16 @@ def _civitai_search(query: str = "", nsfw: bool = False,
     # request). Page numbers are deprecated for this endpoint. We expose
     # the same cursor flow to the panel UI so it can render a "Load more"
     # affordance without faking pagination on top of cursors.
+    # Context-aware baseModels (2026-05-18). The Images workflow needs to
+    # see Flux / Qwen / HiDream LoRAs, NOT LTX-2.3 video LoRAs. Unknown
+    # contexts silently fall back to the video default so any caller that
+    # forgets to set context still gets sensible results.
+    base_models_filter = _CIVITAI_BASE_MODELS_BY_CONTEXT.get(
+        context, _CIVITAI_BASE_MODELS_BY_CONTEXT["video"]
+    )
     params: dict[str, object] = {
         "types": "LORA",
-        "baseModels": "LTXV 2.3",
+        "baseModels": base_models_filter,
         "limit": limit,
         "sort": "Most Downloaded",
         # nsfw=True lets the API include NSFW results; the user's CivitAI
@@ -4489,6 +4537,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         except (TypeError, ValueError):
             char_strength = 1.0
         char_strength = max(0.0, min(2.0, char_strength))
+        # Per-render voice opt-out (2026-05-18). When the user flips the
+        # "No voice" toggle in composer-tools, drop the character's
+        # audio LoRA from the stack for THIS render — face still locks,
+        # but no speech is generated. Useful when the trained voice
+        # produces gibberish on a particular prompt and the user only
+        # wants the visual. Matches the same checkbox idiom as
+        # f("enhance") / f("stop_comfy") above — "on" or empty.
+        no_voice = (f("no_voice", "off") or "").strip().lower() in ("on", "true", "1", "yes")
         try:
             chars_by_id = {c["id"]: c for c in list_characters()}
         except Exception:
@@ -4505,9 +4561,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             if face_p and face_p not in existing_paths:
                 additions.append({"path": face_p, "strength": char_strength})
                 existing_paths.add(face_p)
-            if audio_p and audio_p not in existing_paths:
+            if audio_p and audio_p not in existing_paths and not no_voice:
                 additions.append({"path": audio_p, "strength": char_strength})
                 existing_paths.add(audio_p)
+            elif audio_p and no_voice:
+                job["params"]["no_voice"] = True
             if additions:
                 # Face/audio LoRAs go FIRST in the stack so they take effect
                 # before any style LoRAs the user stacked on top. Mirrors
@@ -4835,6 +4893,14 @@ def run_image_job_inner(job: dict) -> None:
     finally:
         _IMG_STUDIO_LOCK.release()
     elapsed = round(time.time() - t0, 2)
+
+    # Record the observed wall time so /image/engine_status can override
+    # the hardcoded baseline with reality. This is what lets the wall-
+    # time estimate stop drifting after the first gen on a new machine.
+    try:
+        _record_image_gen_timing(engine_override, n, elapsed)
+    except Exception:
+        pass
 
     # Sidecar JSON next to each candidate. Schema must match
     # `phosphene/library/image@1` exactly so list_library_images and the
@@ -6289,6 +6355,35 @@ AGENT_LOCK = threading.RLock()
 # this lock is the server-side safety net.
 _IMG_STUDIO_LOCK = threading.Lock()
 
+# Rolling history of recent image-gen wall times keyed by engine. Used by
+# /image/engine_status to over-ride the hardcoded sec_per_image baselines
+# with the actual observed times once we have data. Each entry is
+# (n_candidates, elapsed_sec). Last 8 per engine — enough to smooth out
+# the occasional outlier without lagging the estimate when the user
+# switches hardware (e.g. plugs into a different Mac mid-session). The
+# baselines were measured on a 64 GB M4 Studio; on faster / slower rigs
+# the static estimates drift up to 2× off, hence this adaptive layer.
+_IMG_ENGINE_TIMING: dict[str, list[tuple[int, float]]] = {}
+_IMG_ENGINE_TIMING_MAX = 8
+
+def _record_image_gen_timing(engine: str, n: int, elapsed: float) -> None:
+    """Append a recent image-gen sample to the per-engine rolling history.
+
+    Called from the image-job runner after the gen wraps. Inputs:
+      engine:  the engine_override that was used (e.g. 'hidream_inline')
+      n:       number of candidates rendered in this batch
+      elapsed: wall-clock seconds the whole batch took (load + denoise)
+    """
+    if not engine or not isinstance(elapsed, (int, float)) or elapsed <= 0:
+        return
+    try:
+        bucket = _IMG_ENGINE_TIMING.setdefault(engine, [])
+        bucket.append((int(n) if n else 1, float(elapsed)))
+        if len(bucket) > _IMG_ENGINE_TIMING_MAX:
+            del bucket[: len(bucket) - _IMG_ENGINE_TIMING_MAX]
+    except Exception:
+        pass
+
 _AGENT_IMAGE_CONFIG_CACHE: agent_image_engine.ImageEngineConfig | None = None
 
 
@@ -6978,13 +7073,29 @@ class Handler(BaseHTTPRequestHandler):
                         cached = True
                     else:
                         cached = _repo_hf_cache_dir(repo) is not None
+                    # Adaptive override: if we've observed actual gens on
+                    # this engine, replace the static baseline with the
+                    # mean of recent (elapsed - cold) / n. After ≥2 samples
+                    # the estimate self-corrects for whatever rig the user
+                    # is actually on. The baseline tuple values stay as
+                    # the cold-start fallback for the very first gen.
+                    observed = _IMG_ENGINE_TIMING.get(engine) or []
+                    samples = "static"
+                    if len(observed) >= 2:
+                        per_image = [
+                            max(1.0, (el - cold) / max(1, batch_n))
+                            for (batch_n, el) in observed
+                        ]
+                        sec = sum(per_image) / len(per_image)
+                        samples = f"observed-{len(observed)}"
                     out.append({
                         "engine": engine,
                         "repo_id": repo or "",
                         "cached": cached,
                         "download_gb": dl_gb,
-                        "sec_per_image": sec,
+                        "sec_per_image": round(sec, 1),
                         "cold_start_sec": cold,
+                        "samples_source": samples,
                     })
                 self._json({"engines": out})
             except Exception as exc:                                # noqa: BLE001
@@ -7514,9 +7625,17 @@ class Handler(BaseHTTPRequestHandler):
             nsfw = (qs.get("nsfw", ["false"])[0] or "false").lower() == "true"
             cursor = qs.get("cursor", [""])[0]
             limit = max(1, min(50, int(qs.get("limit", ["20"])[0] or "20")))
+            # context="image" filters the API to Flux/Qwen/HiDream base
+            # models for the Images workflow; default "video" keeps the
+            # legacy LTX-2.3 result set for the Video workflow.
+            context = (qs.get("context", ["video"])[0] or "video").lower()
+            if context not in _CIVITAI_BASE_MODELS_BY_CONTEXT:
+                context = "video"
             try:
                 results = _civitai_search(query=query, nsfw=nsfw,
-                                         cursor=cursor, limit=limit)
+                                         cursor=cursor, limit=limit,
+                                         context=context)
+                results["context"] = context
                 self._json(results)
             except Exception as exc:
                 self._json({"error": f"civitai search failed: {exc}",
@@ -8276,12 +8395,54 @@ class Handler(BaseHTTPRequestHandler):
                     }, 413)
                     return
                 dest.write_bytes(data)
+
+                # Probe duration via ffprobe so we can surface the real
+                # length to the UI (e.g. "14 s") AND reject obviously
+                # broken clips before the user spends 15 minutes on a
+                # training run that's going to fail at preprocess. The
+                # trainer's audio decoder is ffmpeg-based and handles
+                # MP3/M4A/FLAC natively, so we never need to convert to
+                # WAV on the way in — only measure.
+                duration_s: float | None = None
+                try:
+                    if FFPROBE.is_file():
+                        out = subprocess.run(
+                            [str(FFPROBE), "-v", "error",
+                             "-show_entries", "format=duration",
+                             "-of", "default=noprint_wrappers=1:nokey=1",
+                             str(dest)],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if out.returncode == 0 and out.stdout.strip():
+                            duration_s = float(out.stdout.strip())
+                except (subprocess.TimeoutExpired, ValueError, OSError):
+                    duration_s = None
+
+                if duration_s is not None and duration_s < TRAIN_VOICE_MIN_SECONDS:
+                    # Reject (and delete) — running the audio LoRA on a
+                    # 1-second clip produces nothing usable, and the
+                    # user gets a friendlier error here than from the
+                    # trainer 5 min into preprocess.
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    self._json({
+                        "error": (
+                            f"voice clip too short — measured "
+                            f"{duration_s:.1f} s, need at least "
+                            f"{TRAIN_VOICE_MIN_SECONDS} s (10–25 s recommended)"
+                        ),
+                    }, 400)
+                    return
+
                 self._json({
                     "ok": True,
                     "job_id": train_job_id,
                     "filename": dest.name,
                     "path": str(dest),
                     "size": dest.stat().st_size,
+                    "duration_seconds": duration_s,
                     "min_seconds": TRAIN_VOICE_MIN_SECONDS,
                     "max_seconds": TRAIN_VOICE_MAX_SECONDS,
                 })
@@ -9677,6 +9838,123 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": str(exc)}, 400)
             return
 
+        # ===== Character management (2026-05-18) =====================
+        # POST /characters/<id>/delete and /characters/<id>/rename
+        # power the "Manage characters" modal in the Manual tab. Delete
+        # removes the entire character bundle (face + audio LoRAs +
+        # sidecars + voice clip + characters/<id>/ avatar cache).
+        # Rename only edits the display name in bundle.json — the
+        # trigger word is baked into the trained weights via captions
+        # so it can't be meaningfully renamed; we keep the file names
+        # and trigger immutable to avoid corrupting saved jobs that
+        # reference the character by id/path.
+        if path.startswith("/characters/") and path.endswith("/delete"):
+            cid_raw = path[len("/characters/"):-len("/delete")]
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                self._json({"ok": False, "error": "invalid id"}, 400); return
+            try:
+                # Bound the deletion to mlx_models/loras/ + characters/<cid>/.
+                # We never touch state/train_character/<cid>/ — the user's
+                # training dataset is a separate asset they may want to
+                # retrain from, and a Manage-characters click shouldn't
+                # destroy weeks of dataset curation.
+                base = _safe_loras_dir().resolve()
+                char_cache = (_CHARACTERS_CACHE_PATH / cid).resolve()
+                removed: list[str] = []
+                # All files in loras/ whose name starts with the trigger
+                # AND is one of the known shapes — explicit pattern
+                # whitelist so we don't accidentally remove an unrelated
+                # file that happens to share a prefix.
+                patterns = [
+                    f"{cid}_v2.safetensors",
+                    f"{cid}_v2.safetensors.json",
+                    f"{cid}_v2.json",
+                    f"{cid}.audio.safetensors",
+                    f"{cid}.audio.safetensors.json",
+                ]
+                for ext in TRAIN_VOICE_EXTS:
+                    patterns.append(f"{cid}.voice{ext}")
+                for name in patterns:
+                    p = (base / name).resolve()
+                    if p.is_file() and p.is_relative_to(base):
+                        try:
+                            p.unlink()
+                            removed.append(str(p))
+                        except OSError as e:
+                            return self._json({
+                                "ok": False,
+                                "error": f"failed to remove {p.name}: {e}",
+                                "removed_so_far": removed,
+                            }, 500)
+                # Avatar cache directory (mlx_models/characters/<cid>/).
+                # Best-effort recursive removal. Safe because the path is
+                # bound to _CHARACTERS_CACHE_PATH which only contains
+                # per-character subdirectories.
+                if char_cache.is_dir() and char_cache.is_relative_to(_CHARACTERS_CACHE_PATH.resolve()):
+                    try:
+                        import shutil
+                        shutil.rmtree(char_cache)
+                        removed.append(str(char_cache))
+                    except OSError as e:
+                        return self._json({
+                            "ok": False,
+                            "error": f"failed to remove avatar cache: {e}",
+                            "removed_so_far": removed,
+                        }, 500)
+                if not removed:
+                    return self._json({"ok": False, "error": "character not found"}, 404)
+                self._json({"ok": True, "id": cid, "removed": removed})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+
+        if path.startswith("/characters/") and path.endswith("/rename"):
+            cid_raw = path[len("/characters/"):-len("/rename")]
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                self._json({"ok": False, "error": "invalid id"}, 400); return
+            new_name_raw = form.get("name", [""])[0] or form.get("name", "")
+            if isinstance(new_name_raw, list):
+                new_name_raw = new_name_raw[0] if new_name_raw else ""
+            new_name = str(new_name_raw).strip()
+            if not new_name:
+                self._json({"ok": False, "error": "name is required"}, 400); return
+            if len(new_name) > 120:
+                self._json({"ok": False, "error": "name too long (max 120 chars)"}, 400); return
+            try:
+                # Confirm the character exists before writing a stray
+                # bundle. We don't want a rename to silently CREATE a
+                # bundle for a trigger that has no LoRA on disk.
+                face = _safe_loras_dir().resolve() / f"{cid}_v2.safetensors"
+                if not face.is_file():
+                    return self._json({"ok": False, "error": "character not found"}, 404)
+                char_dir = _CHARACTERS_CACHE_PATH / cid
+                char_dir.mkdir(parents=True, exist_ok=True)
+                bundle_path = char_dir / "bundle.json"
+                # Merge-update — preserve any existing pronoun /
+                # subject_noun / default_action fields the user may
+                # have set previously.
+                payload: dict = {}
+                if bundle_path.is_file():
+                    try:
+                        existing = json.loads(bundle_path.read_text(encoding="utf-8"))
+                        if isinstance(existing, dict):
+                            payload = existing
+                    except (OSError, json.JSONDecodeError):
+                        payload = {}
+                payload["name"] = new_name
+                bundle_path.write_text(
+                    json.dumps(payload, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                self._json({"ok": True, "id": cid, "name": new_name})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+
         if path == "/settings":
             # Accept partial-patch updates: only the fields the user
             # actually changed need to be present. Validation lives in
@@ -10937,6 +11215,27 @@ HTML = r"""<!doctype html>
       grid-template-columns: repeat(3, 1fr);
       gap: 8px;
     }
+    /* Multi-subject + wrong-engine warning (2026-05-18). Shown when the
+       user has 2+ refs loaded but the selected engine doesn't composite
+       multiple subjects well. Amber so it reads as a heads-up, not a
+       blocking error. */
+    .studio-ref-warn {
+      margin-top: 8px;
+      padding: 8px 10px;
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: #e0c060;
+      background: rgba(224, 160, 60, 0.08);
+      border: 1px solid rgba(224, 160, 60, 0.30);
+      border-radius: var(--r-sm);
+    }
+    .studio-ref-warn strong { color: #f0d090; font-weight: 600; }
+    .studio-ref-warn a {
+      color: var(--accent-bright);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .studio-ref-warn a:hover { color: #fff; }
     .studio-ref-slot {
       position: relative;
       aspect-ratio: 1 / 1;
@@ -12348,6 +12647,28 @@ HTML = r"""<!doctype html>
     }
     .train-lora-row .tl-actions { display: inline-flex; gap: 6px; }
 
+    /* Trained-character name chips (2026-05-18 rewrite). Each chip is
+       a link that switches to the Video tab + selects the character.
+       Subtle bordered pill so the row reads as a tight list of links,
+       not a stack of action cards. */
+    .train-lora-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--accent-bright);
+      background: rgba(47, 129, 247, 0.08);
+      border: 1px solid rgba(47, 129, 247, 0.22);
+      border-radius: 5px;
+      text-decoration: none;
+      transition: background var(--t-base), border-color var(--t-base);
+    }
+    .train-lora-chip:hover {
+      background: rgba(47, 129, 247, 0.16);
+      border-color: rgba(47, 129, 247, 0.4);
+      text-decoration: none;
+    }
+
     .pill-btn:disabled, .pill-btn.disabled {
       opacity: 0.45; cursor: not-allowed; pointer-events: none;
     }
@@ -13142,6 +13463,36 @@ HTML = r"""<!doctype html>
       color: #ff8b80;
       border-color: rgba(248,81,73,0.35);
     }
+    /* Vertical-media variant (2026-05-18): for portrait clips the player
+       surface shrinks to ~9:16 ratio and the action cluster's default
+       top-right anchor lands on top of the subject's head. Salo's call:
+       push the cluster into the empty stage-pane area to the RIGHT of
+       the surface instead. Surface gets overflow:visible so the
+       cluster can escape its bounds; the inner .player-wrap keeps its
+       own overflow:hidden so the video itself still clips cleanly to
+       the rounded corners. Landscape clips are unchanged. */
+    .player-surface[data-orient="vertical"] {
+      overflow: visible;
+    }
+    .player-surface[data-orient="vertical"] .player-overlay-actions {
+      top: 6px;
+      right: auto;
+      left: calc(100% + 10px);
+      flex-direction: column;
+      align-items: stretch;
+      gap: 2px;
+      background: rgba(8, 14, 35, 0.42);
+    }
+    .player-surface[data-orient="vertical"] .po-act {
+      justify-content: flex-start;
+      padding: 6px 10px;
+    }
+    .player-surface[data-orient="vertical"] .po-act.po-act-danger {
+      margin-top: 4px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+
     /* Compact mode at narrow widths — hide labels, keep icons. */
     @media (max-width: 1100px) {
       .po-act .po-act-label { display: none; }
@@ -14388,6 +14739,256 @@ HTML = r"""<!doctype html>
 
        Lives only in T2V mode; CSS-collapses on other modes via
        .chars-section.mode-only logic on the wrapper. */
+    /* Compact avatar strip (2026-05-18 round 2) — the second iteration
+       of the character picker. Replaced the bulky bordered card with a
+       thin row of round avatars (32 px) directly above the prompt.
+       Selected avatar carries an accent ring; click to switch. Strength
+       + applied-note collapse into a one-line meta strip under the row.
+       Scrolls horizontally when characters overflow.
+
+       Salo's brief: "either pops up from the prompt area, or small
+       pictures that don't take too much space, with an 'all' overflow
+       for users with many characters." This is the second variant — if
+       Salo prefers the popover instead, the strip → trigger-button
+       refactor is a 10-line change. */
+    #manualCharactersPickerSlot {
+      margin: 6px 0 10px;
+    }
+    .chars-strip {
+      display: flex; align-items: flex-start; gap: 8px;
+    }
+    /* Wrap onto multiple lines so 20+ characters stack cleanly. */
+    .chars-avatar-row {
+      display: flex; flex: 1 1 auto;
+      align-items: flex-start; gap: 10px;
+      flex-wrap: wrap;
+      padding: 2px 0;
+    }
+    .chars-strip-action {
+      flex: 0 0 auto;
+      width: 32px; height: 32px; padding: 0;
+      margin-top: 4px;
+      border-radius: 8px;
+      border: 1px solid var(--border-strong);
+      background: var(--panel);
+      color: var(--muted);
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center;
+      transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+    }
+    .chars-strip-action:hover {
+      color: var(--accent-bright); border-color: var(--accent);
+      background: rgba(47,129,247,0.10);
+    }
+    .chars-strip-action .ph { width: 14px; height: 14px; }
+
+    /* Character avatar chip — 2026-05-18 round 3. Bigger (52 px tall
+       including label), name printed under the photo so users can read
+       the cast at a glance, voice badge floats at the top-right with a
+       music-note icon. Active = blue ring + slight scale. Click again
+       to deselect. */
+    .chars-avatar-chip {
+      flex: 0 0 auto;
+      width: 56px;
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 2px 6px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      cursor: pointer;
+      position: relative;
+      transition: border-color var(--t-fast), background var(--t-fast), transform var(--t-fast);
+    }
+    .chars-avatar-chip:hover {
+      background: rgba(140,160,255,0.06);
+      border-color: var(--border-strong);
+    }
+    .chars-avatar-chip.active {
+      background: rgba(47,129,247,0.10);
+      border-color: var(--accent);
+    }
+    .chars-avatar-chip .chars-avatar-img,
+    .chars-avatar-chip .chars-avatar-ph {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      display: block;
+      object-fit: cover;
+      border: 2px solid transparent;
+      transition: border-color var(--t-fast);
+    }
+    .chars-avatar-chip.active .chars-avatar-img,
+    .chars-avatar-chip.active .chars-avatar-ph {
+      border-color: var(--accent-bright);
+      box-shadow: 0 0 0 2px rgba(47,129,247,0.25);
+    }
+    .chars-avatar-chip .chars-avatar-ph {
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 16px; font-weight: 600;
+      color: var(--text);
+      background: linear-gradient(135deg, #5b6cd1 0%, #8a4fc8 100%);
+    }
+    .chars-avatar-chip .chars-avatar-name {
+      font-size: 10.5px; font-weight: 500;
+      color: var(--muted);
+      line-height: 1.1;
+      max-width: 56px;
+      text-align: center;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chars-avatar-chip.active .chars-avatar-name {
+      color: var(--accent-bright);
+      font-weight: 600;
+    }
+    /* Voice badge — small music-note icon at top-right of the avatar.
+       Only present on characters with a voice LoRA. */
+    .chars-avatar-chip .chars-avatar-voice {
+      position: absolute;
+      top: 0; right: 4px;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 2px solid var(--panel-2, #0f1320);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    .chars-avatar-chip .chars-avatar-voice .ph {
+      width: 9px; height: 9px;
+    }
+
+    /* Under-strip meta line — shows the trigger + a compact inline
+       strength slider when a character is active. Hidden when no
+       character is selected. */
+    .chars-strip-active {
+      display: flex; align-items: center; gap: 10px;
+      margin-top: 6px;
+      padding: 4px 8px;
+      font-size: 11px; color: var(--muted);
+      background: rgba(47,129,247,0.06);
+      border: 1px solid rgba(47,129,247,0.18);
+      border-radius: 4px;
+    }
+    .chars-strip-active strong { color: var(--text); font-weight: 600; }
+    .chars-strip-active code {
+      background: rgba(140, 160, 220, 0.10);
+      padding: 1px 5px; border-radius: 3px;
+      font-size: 11px; color: var(--accent-bright);
+    }
+    .chars-strip-active .chars-inline-strength {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 10px; color: var(--muted);
+    }
+    .chars-strip-active .chars-inline-strength input[type="range"] {
+      width: 96px;
+      accent-color: var(--accent);
+    }
+    .chars-strip-active .chars-inline-strength output {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      color: var(--text);
+      min-width: 28px; text-align: right;
+    }
+
+    .chars-strip-empty {
+      font-size: 11px; color: var(--muted);
+      padding: 4px 2px;
+    }
+    .chars-strip-empty a { color: var(--accent-bright); }
+
+    /* Manage characters modal — list view with rename + delete per row. */
+    .chars-manage-list {
+      display: flex; flex-direction: column;
+      gap: 6px;
+      max-height: 60vh;
+      overflow-y: auto;
+      padding: 4px 2px;
+    }
+    .chars-manage-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 10px;
+      border-radius: var(--r-md);
+      border: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .chars-manage-row .cm-avatar {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      object-fit: cover;
+    }
+    .chars-manage-row .cm-avatar-ph {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 600;
+      color: var(--text);
+      background: linear-gradient(135deg, #5b6cd1 0%, #8a4fc8 100%);
+    }
+    .chars-manage-row .cm-name-input {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 13px; font-weight: 500;
+      padding: 5px 8px;
+      background: var(--panel-2);
+      border: 1px solid var(--border-strong);
+      border-radius: 5px;
+      color: var(--text);
+    }
+    .chars-manage-row .cm-name-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .chars-manage-row .cm-trigger {
+      flex: 0 0 auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--muted);
+      padding: 3px 7px;
+      background: rgba(140,160,220,0.06);
+      border-radius: 3px;
+    }
+    .chars-manage-row .cm-actions {
+      flex: 0 0 auto;
+      display: inline-flex; gap: 6px;
+    }
+    .chars-manage-row .cm-btn {
+      padding: 4px 10px;
+      font-size: 11px; font-weight: 500;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background: var(--panel-2);
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color var(--t-fast), background var(--t-fast), color var(--t-fast);
+    }
+    .chars-manage-row .cm-btn.cm-btn-save {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    .chars-manage-row .cm-btn.cm-btn-save:hover {
+      background: rgba(47,129,247,0.14);
+    }
+    .chars-manage-row .cm-btn.cm-btn-delete {
+      color: #e07a7a;
+      border-color: rgba(220,80,80,0.32);
+    }
+    .chars-manage-row .cm-btn.cm-btn-delete:hover {
+      background: rgba(220,80,80,0.12);
+      border-color: rgba(220,80,80,0.5);
+    }
+    .chars-manage-row .cm-btn:disabled {
+      opacity: 0.45; cursor: not-allowed;
+    }
+
+    /* Legacy <details>-based selectors retained because some unrelated
+       surfaces (older bundled help text, screenshots in STATE.md) still
+       reference them. The Manual-tab picker no longer uses these. */
     .chars-section {
       border: 1px solid var(--border-strong);
       border-radius: var(--r-md);
@@ -15285,6 +15886,55 @@ HTML = r"""<!doctype html>
       width: 12px; height: 12px;
     }
 
+    /* === Phosphene-X brand link (2026-05-18) ===================
+       Compact icon-only link to the official @PhospheneAI account.
+       Sits next to the by-Bizarro creator chip in the header's
+       right-corner cluster. A slow pulsing glow uses the Phosphene
+       brand gradient (blue → violet) so it draws the eye without
+       being aggressive. */
+    body > header .phosphene-x-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px; height: 34px;
+      border-radius: 8px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      color: var(--text);
+      text-decoration: none;
+      transition: border-color var(--t-base), color var(--t-base), background var(--t-base), transform var(--t-base);
+      animation: phosphene-x-glow 3.2s ease-in-out infinite;
+    }
+    body > header .phosphene-x-link:hover {
+      color: #fff;
+      border-color: rgba(165, 130, 240, 0.55);
+      background: rgba(140, 160, 220, 0.08);
+      transform: scale(1.04);
+    }
+    body > header .phosphene-x-link svg {
+      width: 16px; height: 16px;
+    }
+    @keyframes phosphene-x-glow {
+      0%, 100% {
+        box-shadow:
+          0 0 0 0 rgba(91, 108, 209, 0.00),
+          0 0 6px 0 rgba(138, 79, 200, 0.28);
+      }
+      50% {
+        box-shadow:
+          0 0 0 1px rgba(165, 130, 240, 0.35),
+          0 0 14px 2px rgba(138, 79, 200, 0.55),
+          0 0 22px 4px rgba(91, 108, 209, 0.30);
+      }
+    }
+    /* Respect users who don't want motion. */
+    @media (prefers-reduced-motion: reduce) {
+      body > header .phosphene-x-link {
+        animation: none;
+        box-shadow: 0 0 6px 1px rgba(138, 79, 200, 0.40);
+      }
+    }
+
     /* === MAIN LAYOUT ===========================================
        Hairline-bordered panes, no internal radius — Linear's edge
        feel is "everything is one continuous surface".
@@ -15371,7 +16021,7 @@ HTML = r"""<!doctype html>
          Agentic Flows. */
       width: auto;
       flex: 0 0 auto;
-      padding: 5px 14px;
+      padding: 5px 12px;
       font-size: 12px; font-weight: 500;
       letter-spacing: 0;
       background: transparent;
@@ -15380,6 +16030,18 @@ HTML = r"""<!doctype html>
       border-radius: 5px;
       box-shadow: none;
       transition: background var(--t-base), color var(--t-base);
+      /* Flex layout so the leading SVG icon aligns with the text
+         baseline without each tab needing per-element overrides. */
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .workflow-tabs .wf-icon {
+      /* Tab icons — 14px square, currentColor so they inherit the
+         tab's active/muted state without extra rules. */
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
     }
     .workflow-tabs button:hover {
       background: rgba(140, 160, 220, 0.06);
@@ -15698,7 +16360,10 @@ HTML = r"""<!doctype html>
 <symbol id="ph-file-text" viewBox="0 0 256 256"><path d="M200,224H56a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h96l56,56V216A8,8,0,0,1,200,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="136" x2="160" y2="136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="168" x2="160" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-file-pdf" viewBox="0 0 256 256"><polyline points="216 152 184 152 184 208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="208" y1="184" x2="184" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,192H64a20,20,0,0,0,0-40H48v56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M112,152v56h16a28,28,0,0,0,0-56Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,112V40a8,8,0,0,1,8-8h96l56,56v24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-folder-simple" viewBox="0 0 256 256"><path d="M224,208H32V72a8,8,0,0,1,8-8H92.69a8,8,0,0,1,5.65,2.34L128,96h88a8,8,0,0,1,8,8V208Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-device-mobile" viewBox="0 0 256 256"><rect x="64" y="24" width="128" height="208" rx="16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="56" x2="152" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-user-plus" viewBox="0 0 256 256"><circle cx="108" cy="100" r="60" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="200" y1="116" x2="248" y2="116" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="224" y1="92" x2="224" y2="140" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M16,208c20.83-36.04,57.06-60,104-60s83.17,23.96,104,60" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-music-notes" viewBox="0 0 256 256"><circle cx="180" cy="184" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="52" cy="200" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="80 200 80 56 208 24 208 184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="88" x2="208" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-x-brand" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" fill="currentColor"/></symbol>
 <symbol id="ph-speaker-slash" viewBox="0 0 256 256"><line x1="48" y1="40" x2="208" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M80,168H32a8,8,0,0,1-8-8V96a8,8,0,0,1,8-8H80l72-56V147" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M152,179v45L94.4,179.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </defs>
 </svg>
@@ -15767,6 +16432,15 @@ HTML = r"""<!doctype html>
     </svg>
   </button>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
+  <!-- Official Phosphene account on X (2026-05-18). Sits next to the
+       "by Bizarro" creator credit so the two brand links read as a
+       single right-corner cluster. Subtle pulsing glow uses the
+       Phosphene gradient (blue → violet) so it pulls the eye without
+       being loud. Tooltip on hover; the link itself opens a new tab. -->
+  <a class="phosphene-x-link" href="https://x.com/PhospheneAI" target="_blank" rel="noopener"
+     title="Follow @PhospheneAI on X — the official Phosphene account">
+    <svg class="ph" aria-hidden="true"><use href="#ph-x-brand"/></svg>
+  </a>
   <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Follow Mr. Bizarro on X (the panel's creator)">
     <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
     <span>by Bizarro</span>
@@ -15784,9 +16458,9 @@ HTML = r"""<!doctype html>
          character LoRAs). Default = manual; the choice persists in
          localStorage so the user lands on the same tab next session. -->
     <nav class="workflow-tabs" id="workflowTabs">
-      <button data-workflow="manual" class="active">Manual</button>
-      <button data-workflow="studio">Studio<span class="new-badge">NEW</span></button>
-      <button data-workflow="train">Train Character<span class="new-badge">NEW</span></button>
+      <button data-workflow="manual" class="active"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-film-strip"/></svg>Video</button>
+      <button data-workflow="studio"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-image"/></svg>Images</button>
+      <button data-workflow="train"><svg class="ph wf-icon" aria-hidden="true"><use href="#ph-user-plus"/></svg>Train Character<span class="new-badge">NEW</span></button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
@@ -15860,6 +16534,52 @@ HTML = r"""<!doctype html>
       <input type="hidden" name="audio_skip_step" id="audio_skip_step" value="0">
 
       <div id="warnBanner" class="warn-banner"></div>
+
+      <!-- ============== CHARACTERS PICKER · COMPACT AVATAR STRIP ==============
+           Redesigned 2026-05-18 (round 2) per Salo's feedback: the flat
+           card from the morning was still too bulky and visually
+           disconnected from the prompt. New shape: a thin row of round
+           avatars right ABOVE the prompt, integrated into the composer
+           card itself. Selected avatar gets a colored ring; clicking
+           switches characters in one tap. Strength tucks into the
+           Customize accordion (it's an advanced control, not a top-
+           level decision). Hover an avatar to see the name + trigger.
+
+           Empty + applied-note remain in the DOM for the JS hooks but
+           render as inline thin strings (or hide entirely) so they
+           don't punch a hole through the composer layout.
+
+           IDs preserved: charsList / charsEmpty / charsStrengthRow /
+           charsAppliedNote / charsSummaryMeta — JS layer untouched. -->
+      <div class="mode-only" id="manualCharactersPickerSlot">
+        <div class="chars-strip">
+          <div class="chars-avatar-row" id="charsList"><!-- avatars rendered by JS --></div>
+          <button type="button" class="chars-strip-action"
+                  title="Manage characters — rename or delete"
+                  onclick="openCharactersManageModal()"><svg class="ph" aria-hidden="true"><use href="#ph-pencil-simple"/></svg></button>
+          <button type="button" class="chars-strip-action"
+                  title="Rescan mlx_models/characters/ for new bundles"
+                  onclick="refreshManualCharacters()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
+        </div>
+        <!-- One-liner that surfaces under the strip when a character is
+             active. Shows trigger word + a tiny strength control inline.
+             charsSummaryMeta stays as a hidden carrier for legacy JS
+             callsites that still write to it. -->
+        <div class="chars-strip-active" id="charsAppliedNote" hidden></div>
+        <span class="chars-strip-meta-shadow" id="charsSummaryMeta" hidden></span>
+        <!-- Empty state — visible only when no bundles exist on disk. -->
+        <div class="chars-strip-empty" id="charsEmpty" hidden>
+          No trained characters yet —
+          <a href="#" onclick="workflowSwitch('train'); return false;">train one in the Train tab</a>.
+        </div>
+        <!-- Strength row carrier (kept in DOM for JS toggles; hidden
+             from view — the slider lives inside charsAppliedNote when a
+             character is selected so it sits right next to the trigger
+             reminder rather than as its own bulky row). -->
+        <div class="chars-strength-row" id="charsStrengthRow" hidden></div>
+      </div>
+      <input type="hidden" name="character_id" id="characterIdInput" value="">
+      <input type="hidden" name="character_strength" id="characterStrength" value="1.0">
 
       <!-- ============== COMPOSER CARD ==============
            Hero element of the form. Carries the reference picker(s)
@@ -16021,6 +16741,22 @@ HTML = r"""<!doctype html>
             <span class="toggle-dot"></span>
             <span>No music</span>
           </label>
+          <!-- No voice toggle (2026-05-18) — Salo's request: when a
+               character with a voice LoRA is selected, audio generation
+               sometimes produces gibberish speech even when you only
+               want visuals. This toggle suppresses voice for THIS
+               render only by:
+                 1) skipping the character's audio LoRA in make_job
+                 2) augmenting the prompt with an ambient-only directive
+               Only meaningfully relevant when a character with voice is
+               active; the pill is hidden otherwise to avoid clutter
+               (toggleVoicePillVisibility wires this). -->
+          <label class="toggle-pill" id="noVoicePill" hidden
+                 title="Skip the character's voice LoRA for this render. The face still locks, but audio stays ambient — no speech, no gibberish.">
+            <input type="checkbox" id="noVoice" name="no_voice">
+            <span class="toggle-dot"></span>
+            <span>No voice</span>
+          </label>
         </div>
       </div>
 
@@ -16122,11 +16858,11 @@ HTML = r"""<!doctype html>
         <div class="mode-only show" id="aspectRow" style="display:flex;align-items:center;gap:10px;margin:6px 0 8px 0;padding:0 2px;">
           <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">Orientation</span>
           <div class="pill-group" id="aspectGroup" style="display:flex;gap:4px;flex:0 0 auto;">
-            <button type="button" class="pill-btn active" data-aspect="landscape" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:baseline;">
-              <span>16:9</span><span style="opacity:.55;font-size:10px;">landscape</span>
+            <button type="button" class="pill-btn active" data-aspect="landscape" title="Landscape 16:9" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:center;">
+              <svg class="ph orient-icon" aria-hidden="true" style="width:14px;height:14px;transform:rotate(90deg);"><use href="#ph-device-mobile"/></svg><span>16:9</span>
             </button>
-            <button type="button" class="pill-btn" data-aspect="vertical" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:baseline;">
-              <span>9:16</span><span style="opacity:.55;font-size:10px;">vertical</span>
+            <button type="button" class="pill-btn" data-aspect="vertical" title="Vertical 9:16" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:center;">
+              <svg class="ph orient-icon" aria-hidden="true" style="width:14px;height:14px;"><use href="#ph-device-mobile"/></svg><span>9:16</span>
             </button>
           </div>
           <input type="hidden" name="aspect" id="aspect" value="landscape">
@@ -16150,62 +16886,10 @@ HTML = r"""<!doctype html>
         </div>
       </div>
 
-      <!-- ============== CHARACTERS PICKER (Manual tab · T2V) ==============
-           Sits ABOVE the LoRA picker. Single-select; "None" deselects.
-           Selecting a character DOES NOT add chips to the LoRA picker —
-           the backend expands character_id → face+audio LoRAs at submit
-           time (see make_job character_id branch). The user can still
-           stack STYLE LoRAs from the regular picker on top; the regular
-           picker is filtered to hide character files (face/audio/voice)
-           so the Characters picker is the only surface where trained
-           characters live.
-
-           Visible only in T2V mode (the spec's "Text-to-Video flow") —
-           setMode() toggles the .show class. Hidden field
-           #characterIdInput rides the form on submit; #characterStrength
-           defaults to 1.0 (Salo's default 'use the LoRA as recommended'). -->
-      <div class="form-divider mode-only" id="charactersPickerDivider"></div>
-      <div class="mode-only" id="manualCharactersPickerSlot">
-        <details id="charsDetails" open class="chars-section">
-          <summary class="chars-summary">
-            <span class="chars-chevron" aria-hidden="true"><svg class="ph"><use href="#ph-caret-down-bold"/></svg></span>
-            <span class="chars-title">Characters</span>
-            <span class="chars-meta" id="charsSummaryMeta">none selected</span>
-            <span class="chars-header-actions">
-              <button type="button" class="chars-icon-btn"
-                      title="Rescan mlx_models/characters/ for new bundles"
-                      onclick="event.stopPropagation(); event.preventDefault(); refreshManualCharacters()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
-            </span>
-          </summary>
-          <div class="chars-body">
-            <!-- Applied-LoRA explainer — visible only when a character is
-                 selected. Tells the user exactly what's being applied so
-                 selecting Aria doesn't feel like a black box. -->
-            <div class="chars-applied-note" id="charsAppliedNote" hidden></div>
-            <!-- Empty state — when no bundles exist on disk. Points the
-                 user at the Train tab to make their first character. -->
-            <div class="chars-empty" id="charsEmpty" hidden>
-              No trained characters yet — train one in the
-              <a href="#" onclick="workflowSwitch('train'); return false;">Train tab</a>
-              or drop a <code>bundle.json</code> + face/audio LoRAs in
-              <code>mlx_models/characters/&lt;trigger&gt;/</code>.
-            </div>
-            <div class="chars-list" id="charsList"></div>
-            <!-- Strength slider (face + audio LoRAs get the same value
-                 server-side, mirroring /characters/<id>/generate). Hidden
-                 until a character is selected. -->
-            <div class="chars-strength-row" id="charsStrengthRow">
-              <label for="characterStrength">Strength</label>
-              <input type="range" min="0" max="2" step="0.05" value="1.0"
-                     oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(2); document.getElementById('characterStrength').value = this.value">
-              <input type="number" min="0" max="2" step="0.05" value="1.00"
-                     oninput="this.previousElementSibling.value = this.value; document.getElementById('characterStrength').value = this.value">
-            </div>
-          </div>
-        </details>
-      </div>
-      <input type="hidden" name="character_id" id="characterIdInput" value="">
-      <input type="hidden" name="character_strength" id="characterStrength" value="1.0">
+      <!-- Characters picker MOVED to the top of the form (right after
+           warnBanner) on 2026-05-18 — see the block there for the full
+           spec. This comment is a tombstone so anyone grepping for the
+           old location knows it's not lost, just relocated. -->
 
       <!-- LoRA picker — UNIFIED across video form + Image Studio.
            Lives inside #genForm by default (so the video form's FormData
@@ -16502,7 +17186,7 @@ HTML = r"""<!doctype html>
         <div class="composer-refs">
           <div class="show">
             <h2>Reference images
-              <span class="h2-hint">multi-ref · Qwen-Image-Edit-2511 / FLUX.2 Klein-Edit only</span>
+              <span class="h2-hint">2-3 subjects: Qwen Edit (reliable) · HiDream Dev (fragile)</span>
             </h2>
             <div class="studio-ref-grid" id="imgStudioRefs">
               <div class="studio-ref-slot" data-slot="0">
@@ -16515,6 +17199,10 @@ HTML = r"""<!doctype html>
                 <span class="ref-tag">Multi-ref</span>
               </div>
             </div>
+            <!-- Runtime warning when the user has 2+ refs loaded but the
+                 selected engine doesn't composite multiple subjects
+                 reliably. Filled in by imgStudioUpdateRefWarning(). -->
+            <div class="studio-ref-warn" id="imgStudioRefWarn" hidden></div>
             <!-- Mirrors the video I2V picker's "Recent uploads · click to use"
                  strip. Click a thumb → fills the next empty ref slot. Hidden
                  when /uploads is empty. -->
@@ -16546,7 +17234,7 @@ HTML = r"""<!doctype html>
             <span class="qs-meta" id="imgStudioWallEstimate"></span>
           </div>
           <div class="studio-engine-row">
-            <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();if(typeof renderLorasList==='function')renderLorasList()">
+            <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();imgStudioUpdateRefWarning();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto">Auto (use Settings)</option>
               <option value="qwen_edit_lightning_inline" selected>Qwen Fast (Lightning &middot; 4-step Q6 + FBCache, ~1:20 / image, multi-ref)</option>
               <option value="qwen_edit_inline">Qwen Medium (8-step Q6 + FBCache, ~2:05 / image, multi-ref)</option>
@@ -16784,13 +17472,16 @@ HTML = r"""<!doctype html>
       </div>
 
       <!-- ============== GUIDANCE PANEL ==============
-           Collapsible "How to train well" walk-through. Open by default
-           for new users; dismissed state persists in localStorage. Sets
-           the dataset expectations before the user drops their first
-           image. Concise, scannable, matches the Linear design language.
-           Two mutually-exclusive bodies (character vs style); trainTypeApply
-           flips them based on the segmented toggle above. -->
-      <details class="train-guidance" id="trainGuidance" open>
+           Collapsible "How to train well" walk-through. CLOSED by
+           default — users who want it click the summary to expand;
+           power users aren't shown a wall of text every visit. Old
+           behavior was open-by-default + dismissible-via-localStorage,
+           but the dismiss CTA was easy to miss so the guide kept
+           greeting returning users. Concise, scannable, matches the
+           Linear design language. Two mutually-exclusive bodies
+           (character vs style); trainTypeApply flips them based on
+           the segmented toggle above. -->
+      <details class="train-guidance" id="trainGuidance">
         <summary>
           <span class="train-guidance-eyebrow">Guide</span>
           <span class="train-guidance-title" id="trainGuidanceTitle">How to train a character well</span>
@@ -16798,20 +17489,26 @@ HTML = r"""<!doctype html>
         <div class="train-guidance-body" id="trainGuidanceBodyCharacter">
           <div class="train-guidance-section">
             <h3>Image count</h3>
-            <p>25–50 photos is the sweet spot. Variety beats quantity — more angles teach the model more than more shots of the same pose.</p>
+            <p>30–80 photos is the practical sweet spot. <b>Variety beats quantity</b> — 50 well-chosen images across shot types beats 100 portraits-only. Below 25 the LoRA overfits to whatever pose dominates; above 100–150 you start hitting diminishing returns and risk contradictory signals (e.g. half-bearded vs half-not). Training time stays roughly the same regardless of dataset size — it's fixed by step count, not image count.</p>
           </div>
           <div class="train-guidance-section">
-            <h3>Angle coverage</h3>
+            <h3>Shot type coverage — biggest single lever</h3>
+            <p>The LoRA can only generate <b>what it saw</b>. If your set is all torso-up portraits, long shots will look mushy because the model never learned what this person looks like at distance. Aim for this mix on a 50–80 image set:</p>
             <ul>
-              <li><b>Tight close-ups</b> · face fills frame, anchors identity</li>
-              <li><b>Medium close-ups</b> · head + shoulders, the most-used shot</li>
-              <li><b>Medium shots</b> · waist up, teaches body proportions</li>
-              <li><b>Full-body shots</b> · varied poses, the whole person</li>
+              <li><b>5–8 tight close-ups</b> · face fills frame, anchors identity</li>
+              <li><b>15–25 medium close-ups</b> · head + shoulders, the workhorse</li>
+              <li><b>8–12 medium shots</b> · waist up, teaches body proportions</li>
+              <li><b>10–15 wide / full-body shots</b> · the missing piece in most datasets — without these, long shots in T2V come out distorted or texture-mushy</li>
+              <li><b>2–3 extreme long shots</b> · figure at distance, environment dominates</li>
             </ul>
           </div>
           <div class="train-guidance-section">
+            <h3>Image aspect ratio</h3>
+            <p>Use whatever native aspect ratio the photos came in — portrait, landscape, square, all fine. The trainer's letterbox crop preserves the original proportions (it adds black bars to fit the training canvas rather than chopping the sides off). The model learns the bars are a constant background factor across every sample and ignores them at inference.</p>
+          </div>
+          <div class="train-guidance-section">
             <h3>Lighting variety</h3>
-            <p>Mix indoor and outdoor, warm and cool, day and night. If every photo shares the same studio lighting, the LoRA bakes that lighting into every generation.</p>
+            <p>Mix indoor and outdoor, warm and cool, day and night, key-light from different angles. If every photo shares studio lighting, the LoRA bakes that lighting into every generation.</p>
           </div>
           <div class="train-guidance-section">
             <h3>Background variety</h3>
@@ -16820,15 +17517,16 @@ HTML = r"""<!doctype html>
           <div class="train-guidance-section">
             <h3>Avoid</h3>
             <ul>
-              <li>group photos</li>
+              <li>group photos (the LoRA can't tell which face is the subject)</li>
               <li>obvious props that aren't part of the look</li>
               <li>heavy makeup that varies wildly between shots</li>
-              <li>face partly obscured</li>
+              <li>face partly obscured (hand over mouth, microphone in front of face)</li>
+              <li>blurry / out-of-focus shots — training amplifies blur</li>
             </ul>
           </div>
           <div class="train-guidance-section">
             <h3>Caption rule</h3>
-            <p>Describe what <b>varies</b> in each shot — outfit, setting, pose, lighting. Don't describe invariant identity features (face, hair color, build); the LoRA absorbs those automatically.</p>
+            <p>Describe what <b>varies</b> in each shot — outfit, setting, pose, lighting, framing. Don't describe invariant identity features (face shape, hair color, build); the LoRA absorbs those automatically. The auto-caption button uses Gemma 3 to generate <code>[VISUAL]:</code>-format captions following this rule.</p>
           </div>
         </div>
         <!-- Style guidance — shown when train_type=style. Hand-picked movie
@@ -17066,7 +17764,8 @@ HTML = r"""<!doctype html>
           <div class="train-voice-empty" id="trainVoiceEmpty">
             <div class="picker-icon"><svg class="ph"><use href="#ph-music-notes"/></svg></div>
             <div class="picker-cta">Drop a voice clip here, or <strong>click to browse</strong></div>
-            <div class="hint">WAV / MP3 / M4A / FLAC · up to 50 MB · one file. Aim for 5–30 seconds, clean, single speaker.</div>
+            <div class="hint"><strong>MP3, WAV, M4A or FLAC</strong> — any format, auto-decoded. One file, up to 50 MB.</div>
+            <div class="hint" style="margin-top:4px"><strong>Aim for 10–25 seconds</strong> of clean speech, single speaker, no music or background noise. Shorter than 5 s won't train well; longer than 30 s just adds repetition.</div>
           </div>
           <div class="train-voice-loaded" id="trainVoiceLoaded" hidden>
             <div class="train-voice-fileline">
@@ -17144,15 +17843,26 @@ HTML = r"""<!doctype html>
         </div>
       </div>
 
-      <!-- ============== TRAINED LORAs LIST ============== -->
+      <!-- ============== TRAINED LORAs LIST ==============
+           One-liner pointing the user at the Video tab. The previous
+           card showed per-character "Use in T2V / Use in I2V / Copy
+           trigger / delete" rows but that duplicated the chip strip on
+           the Video tab itself — Salo flagged it 2026-05-18 as
+           unnecessary. New version: a single sentence with each
+           character name as a link that switches workflow + selects
+           the character on the Video tab. -->
       <div class="composer-card train-card">
-        <h2><span id="trainLoraListTitle">Trained character LoRAs</span>
-          <span class="h2-hint">your finished runs — click to use</span>
-        </h2>
-        <div class="train-lora-list" id="trainLoraList">
-          <div class="hint" style="padding:12px 0">No trained LoRAs yet. Start your first run above.</div>
+        <h2>Use your trained characters</h2>
+        <div class="hint" style="margin-top:2px">
+          Generate a video with your trained characters
+          <a href="#" class="train-go-video-link"
+             onclick="workflowSwitch('manual'); return false;">on the Video tab</a>
+          — the links below take you to each character's picker chip.
         </div>
-        <div class="hint" style="margin-top:4px">Trained LoRAs land in <code id="trainLorasDir">mlx_models/loras/</code> alongside any LoRAs you've downloaded — they show up in the regular picker too.</div>
+        <div class="train-lora-link-row" id="trainLoraList" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
+          <div class="hint" style="padding:4px 0">No trained characters yet. Start your first run above.</div>
+        </div>
+        <div class="hint" style="margin-top:8px">Trained LoRAs land in <code id="trainLorasDir">mlx_models/loras/</code> alongside any LoRAs you've downloaded — they show up in the regular picker too.</div>
       </div>
 
     </div>
@@ -17301,6 +18011,33 @@ HTML = r"""<!doctype html>
   <!-- Lightbox for stage outputs — plays a finished mp4 full-size on click.
        Refine button references the playing clip in the composer so the
        user can ask the agent for a variation while watching. -->
+
+<!-- ============== MANAGE CHARACTERS MODAL (2026-05-18) ==============
+     Opened by the pencil icon in the avatar strip. Lists every trained
+     character with rename + delete actions. Rename only touches the
+     bundle.json display name (trigger word is baked into the weights);
+     delete removes the face + audio LoRAs + sidecars + voice clip +
+     avatar cache, but leaves state/train_character/<id>/ alone so the
+     user keeps their dataset for retraining. -->
+<div id="charactersManageModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="charactersManageTitle"
+     onclick="if(event.target===this) closeCharactersManageModal()">
+  <div class="models-card" style="width: min(640px, 96vw)">
+    <div class="models-head">
+      <h2 id="charactersManageTitle">Manage characters</h2>
+      <button class="ghost-btn" onclick="closeCharactersManageModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      Rename changes the display name only — the trigger word is locked
+      into the trained weights and can't be changed. Delete removes the
+      LoRA files; your training dataset under <code>state/train_character/</code>
+      stays intact so you can retrain.
+    </div>
+    <div class="chars-manage-list" id="charactersManageList">
+      <div class="hint">Loading…</div>
+    </div>
+  </div>
+</div>
 
 <!-- ============== CIVITAI MODAL ============== -->
 <!-- LoRA discovery + install modal. Hits /civitai/search to populate
@@ -18204,10 +18941,59 @@ function imgStudioRenderSlot(idx) {
     `;
   }
   imgStudioUpdateValidity();
+  imgStudioUpdateRefWarning();
   // Recent strip's "in-use" highlight depends on which paths are bound to
   // slots — re-render the strip so freshly-cleared slots release their
   // selection ring.
   if (typeof imgStudioMarkRecentInUse === 'function') imgStudioMarkRecentInUse();
+}
+
+// Multi-subject prompt-format coaching (2026-05-18 round 2).
+//
+// Both engines we ship — Qwen-Image-Edit-2511 and HiDream-O1-Dev-BF16 —
+// support multi-reference subject composition at the model level. The
+// issue is the prompt: when the user writes "two characters sitting at
+// dinner" with no language anchor pointing each character to a specific
+// reference image, the model blends/conflates them (the smile-woman-
+// fused-to-arms ghost rendering Salo reported on 2026-05-18).
+//
+// Both engines respond well to the same explicit pattern:
+//   "the person from reference 1 + the person from reference 2 + scene"
+//
+// This banner surfaces the pattern with a copyable example whenever the
+// user has 2+ refs loaded, regardless of engine selection.
+function imgStudioUpdateRefWarning() {
+  const box = document.getElementById('imgStudioRefWarn');
+  const prompt = document.getElementById('imgStudioPrompt');
+  if (!box) return;
+  const refsCount = (IMG_STUDIO.refs || []).filter(r => r && r.path).length;
+  // Also swap the prompt placeholder so the example the user sees in
+  // empty state matches the situation. Single-ref / no-ref keep the
+  // cinematic-portrait placeholder; 2+ refs swap to a multi-subject
+  // example that anchors each reference explicitly.
+  if (prompt) {
+    if (refsCount >= 2) {
+      prompt.placeholder =
+        'the man from reference 1 and the woman from reference 2 sitting at a candlelit dinner, warm tungsten light, soft bokeh, photorealistic';
+    } else {
+      prompt.placeholder =
+        'A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic';
+    }
+  }
+  if (refsCount < 2) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `
+    <strong>Multi-subject tip:</strong> the model can't tell which reference is which subject
+    unless you name them explicitly. Use the pattern
+    <em>"the &lt;A&gt; from reference 1 and the &lt;B&gt; from reference 2 …"</em>.
+    Example:
+    <code>the man from reference 1 and the woman from reference 2 sitting at a candlelit dinner, warm tungsten light, photorealistic</code>.
+    Without those anchors both Qwen Edit and HiDream blend the references and produce ghost-arm fusions like the one you just got.
+  `;
 }
 
 // ---- Engine status pill + wall-time estimate ----
@@ -20066,15 +20852,33 @@ async function trainVoiceUpload(file) {
       filename: j.filename,
       path: j.path,
       size: j.size,
+      // Server-side ffprobe duration — authoritative since it uses the
+      // same ffmpeg the trainer uses to decode. The client-side
+      // <audio>.duration reading is still a fallback for browsers that
+      // can't decode the format inline (rare but possible for FLAC).
+      durationSeconds: typeof j.duration_seconds === 'number' ? j.duration_seconds : null,
       audioUrl,
       originalName: file.name,
     };
     TRAIN.voiceEnabled = true;     // auto-on after a successful upload
     trainRenderVoice();
     trainUpdateStartLabel();
-    if (status) status.textContent =
-      `Voice clip ready (${(j.size / 1024 / 1024).toFixed(2)} MB). ` +
-      'Press play above to preview, then start training.';
+    if (status) {
+      const sizeMB = (j.size / 1024 / 1024).toFixed(2);
+      const dur = TRAIN.voiceFile.durationSeconds;
+      // Soft warning band: anything outside the 10–25 s sweet spot but
+      // still inside [min, max] passes the upload but gets a friendly
+      // nudge. Under min already 400'd at the server.
+      let durMsg = '';
+      if (typeof dur === 'number') {
+        durMsg = ` · ${dur.toFixed(1)} s`;
+        if (dur > 30) durMsg += ' (long — consider trimming to 10–25 s)';
+        else if (dur < 5) durMsg += ' (short — recommend ≥5 s)';
+      }
+      status.textContent =
+        `Voice clip ready (${sizeMB} MB${durMsg}). ` +
+        'Press play above to preview, then start training.';
+    }
   } catch (e) {
     if (status) status.textContent =
       'Voice upload failed: ' + (e.message || 'unknown');
@@ -20185,24 +20989,20 @@ async function trainRefreshLoraList() {
       list.innerHTML = '<div class="hint" style="padding:12px 0">No trained LoRAs yet. Start your first run above.</div>';
       return;
     }
+    // Compact name-only chips (rewritten 2026-05-18 per Salo). Each
+    // chip is a link that switches to the Video tab + drops the LoRA
+    // into the picker. The previous per-row "Use in T2V / I2V / Copy
+    // trigger / delete" chrome moved off this card; deletion lives in
+    // the LoRA picker's row controls and the trigger is one click away
+    // on the Video tab.
     list.innerHTML = items.map(it => {
-      const ageMs = Date.now() - (Number(it.created_at) || 0) * 1000;
-      const ageStr = trainFmtAge(ageMs);
       const safeTrig = (it.trigger || '').replace(/[<>&"']/g, c =>
         ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'})[c]);
       const safePath = (it.path || '').replace(/'/g, "\\'");
-      return `<div class="train-lora-row">
-        <span class="tl-name" title="${it.filename}">${it.name || it.filename}
-          <span class="tl-trigger"> · "${safeTrig}"</span>
-          <span class="tl-size"> · ${it.size_mb} MB · ${ageStr}</span>
-        </span>
-        <span class="tl-actions">
-          <button type="button" class="qchip" onclick="trainUseInVideo('${safePath}','${safeTrig}','t2v')">Use in T2V</button>
-          <button type="button" class="qchip" onclick="trainUseInVideo('${safePath}','${safeTrig}','i2v')">Use in I2V</button>
-          <button type="button" class="qchip" onclick="trainCopyTriggerCmd('${safeTrig}')">Copy trigger</button>
-          <button type="button" class="qchip" onclick="trainDeleteLora('${safePath}')" title="Delete .safetensors + sidecar"><svg class="ph" aria-hidden="true"><use href="#ph-trash-simple"/></svg></button>
-        </span>
-      </div>`;
+      const displayName = it.name || it.filename;
+      const title = `"${safeTrig}" — ${it.size_mb} MB · ${trainFmtAge(Date.now() - (Number(it.created_at) || 0) * 1000)}`;
+      return `<a href="#" class="train-lora-chip" title="${title}"
+        onclick="trainUseInVideo('${safePath}','${safeTrig}','t2v'); return false;">${displayName}</a>`;
     }).join('');
   } catch (e) {
     list.innerHTML = '<div class="hint">Load failed: ' + (e.message || 'unknown') + '</div>';
@@ -22128,9 +22928,19 @@ async function loadParams() {
       console.warn('characters loadParams failed, falling back to Manual:', e);
     }
   }
+  // Character renders are stored with mode='t2v' server-side (the
+  // helper actually runs t2v under the hood; 'character' is a UI-only
+  // intent that dispatches on character_id presence). Without this
+  // check Load Params on a character clip drops the user into plain
+  // Text mode and the picker stays hidden — confusing because the
+  // strength/quality/loras restore happens but the mode pill says
+  // Text. Fixed 2026-05-18: snap to Character mode when the sidecar
+  // carries a character_id so the form's UI state matches the saved
+  // intent, not the under-the-hood implementation.
   if (p.mode === 'extend') setMode('extend');
   else if (p.mode === 'keyframe') setMode('keyframe');
   else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
+  else if (p.character_id) setMode('character');
   else setMode('t2v');
   // Apply quality + aspect FIRST (these stomp on width/height), then
   // override with explicit sidecar values so any custom dims survive.
@@ -22157,7 +22967,18 @@ async function loadParams() {
   syncAvoidRowFromValue();
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
-  if (p.seed != null) document.getElementById('seed').value = p.seed;
+  // Prefer seed_used (the actual integer the helper picked at gen time)
+  // over seed (what the user submitted — often `-1` for random). Without
+  // this, Load Params on a -1 submission restores -1 and the next render
+  // gets a fresh random seed instead of reproducing the original clip.
+  // The user can still flip it back to -1 manually if they want a fresh
+  // random; the goal is reproducibility by default. Fixed 2026-05-18.
+  const seedToRestore = (p.seed_used != null && p.seed_used !== '')
+    ? p.seed_used
+    : p.seed;
+  if (seedToRestore != null) {
+    document.getElementById('seed').value = seedToRestore;
+  }
   // Image / start / end go through pickerSetImage so the preview tile
   // and recent-strip selection state update along with the hidden input.
   if (p.image)       pickerSetImage('image', p.image, { snapAspect: false });
@@ -22616,6 +23437,20 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     const original = fd.get('prompt') || '';
     const constraint = ' Audio: voice and ambient sounds only, no music, no soundtrack, no score, no melody.';
     if (!original.toLowerCase().includes('no music')) {
+      fd.set('prompt', original.trim() + constraint);
+    }
+  }
+  // No voice — drops the character's audio LoRA server-side (see
+  // make_job character_id branch) AND nudges the prompt toward ambient
+  // audio so the model doesn't fill the silence with generic speech.
+  // The toggle is only visible when a voice-capable character is
+  // selected, so we don't need to gate by character state here.
+  const noVoice = document.getElementById('noVoice');
+  if (noVoice && noVoice.checked) {
+    const original = fd.get('prompt') || '';
+    const constraint = ' Audio: ambient sounds and environmental noise only, no speech, no dialogue, no narration.';
+    if (!original.toLowerCase().includes('no speech') &&
+        !original.toLowerCase().includes('no dialogue')) {
       fd.set('prompt', original.trim() + constraint);
     }
   }
@@ -24165,43 +25000,42 @@ function _renderManualCharactersList() {
     return;
   }
   if (empty) empty.hidden = true;
-  const noneActive = !_selectedCharacterId;
   const chips = [];
-  // "None" chip — always first, so the deselect is one tap away.
-  chips.push(`
-    <span class="chars-chip none-chip ${noneActive ? 'active' : ''}"
-          onclick="selectManualCharacter('')"
-          title="No character — render with style LoRAs only">
-      None
-    </span>
-  `);
+  // 2026-05-18 round 3: no more "None" chip. Salo's point — no
+  // character is just plain video gen, which is what the Text mode
+  // already covers; an explicit None chip was redundant chrome.
+  // Deselect is now: click the active avatar again (toggles off).
+  //
+  // Avatars are 44 px (up from 32) so the faces are readable at a
+  // glance. The row wraps to multiple lines via flex-wrap on the
+  // container, so 20+ characters stack cleanly without a horizontal-
+  // scroll trap.
   for (const c of _manualCharacters) {
     const active = (c.id === _selectedCharacterId);
     const name = c.name || c.trigger || c.id;
     const trigger = c.trigger || c.id || '';
-    // Avatar: small round image when sample_image_url is present, else
-    // an initial-letter placeholder with the same gradient palette the
-    // Characters-tab cards use (visual continuity across the two surfaces).
     const initial = (name || '?').charAt(0).toUpperCase();
     const avatar = c.sample_image_url
-      ? `<img class="chars-avatar" src="${escapeHtml(c.sample_image_url)}" alt="">`
+      ? `<img class="chars-avatar-img" src="${escapeHtml(c.sample_image_url)}" alt="">`
       : `<span class="chars-avatar-ph">${escapeHtml(initial)}</span>`;
     const hasVoice = !!c.has_voice;
-    const badge = hasVoice
-      ? `<span class="chars-badge voice" title="Has voice LoRA + reference clip">voice</span>`
-      : `<span class="chars-badge silent" title="No audio LoRA on disk — face only">silent</span>`;
+    // Voice indicator — a small music-note badge for characters that
+    // have a voice LoRA. Silent characters get no badge (absence reads
+    // as 'silent' more cleanly than a gray badge fighting for
+    // attention). Tooltip on the avatar already mentions silent state.
+    const voiceBadge = hasVoice
+      ? `<span class="chars-avatar-voice" title="Has voice LoRA + reference clip"><svg class="ph"><use href="#ph-music-notes"/></svg></span>`
+      : '';
     const idAttr = JSON.stringify(c.id).replace(/"/g, '&quot;');
+    const tt = `${escapeHtml(name)} · ${escapeHtml(trigger)}${hasVoice ? ' · has voice' : ' · silent'}${active ? ' · click to deselect' : ''}`;
     chips.push(`
-      <span class="chars-chip ${active ? 'active' : ''}"
-            onclick="selectManualCharacter(${idAttr})"
-            title="Apply ${escapeHtml(name)} (trigger: ${escapeHtml(trigger)})">
+      <button type="button" class="chars-avatar-chip ${active ? 'active' : ''}"
+              onclick="selectManualCharacter(${idAttr})"
+              title="${tt}">
         ${avatar}
-        <span class="chars-info">
-          <span class="chars-name">${escapeHtml(name)}</span>
-          <span class="chars-trigger">${escapeHtml(trigger)}</span>
-        </span>
-        <span class="chars-badges">${badge}</span>
-      </span>
+        <span class="chars-avatar-name">${escapeHtml(name)}</span>
+        ${voiceBadge}
+      </button>
     `);
   }
   wrap.innerHTML = chips.join('');
@@ -24213,47 +25047,211 @@ function _renderManualCharactersList() {
       meta.textContent = `${_manualCharacters.length} available`;
     }
   }
-  // Strength slider visible only when a character is selected.
+  // Strength row stays in the DOM as a hidden carrier; the actual
+  // slider lives inline inside charsAppliedNote (rendered by
+  // _renderCharsAppliedNote). This keeps the picker compact — no
+  // separate full-width strength row pushing other controls down.
   const strengthRow = document.getElementById('charsStrengthRow');
-  if (strengthRow) strengthRow.classList.toggle('show', !!_selectedCharacterId);
+  if (strengthRow) strengthRow.hidden = !_selectedCharacterId;
   _renderCharsAppliedNote();
 }
 
 function _renderCharsAppliedNote() {
-  // Visible only when a character is selected. Tells the user EXACTLY
-  // which files will be applied — no black box. Mirrors the spec:
-  // "display a small note explaining face + audio + voice will be applied".
+  // Compact under-strip meta line (2026-05-18 redesign). Shows:
+  //   <name> · <trigger> · [strength slider 0-2] · [silent? indicator]
+  // The inline strength slider replaces the old full-width chars-
+  // strength-row; everything fits on one tight horizontal line under
+  // the avatars. Hidden when no character is selected.
+  //
+  // Side effect: keeps the No-voice toggle visibility in sync with the
+  // selection. The pill only makes sense for characters that HAVE a
+  // voice LoRA in the first place; for silent characters there's no
+  // voice to skip.
   const note = document.getElementById('charsAppliedNote');
+  const voicePill = document.getElementById('noVoicePill');
   if (!note) return;
   if (!_selectedCharacterId) {
     note.hidden = true;
     note.innerHTML = '';
+    if (voicePill) voicePill.hidden = true;
     return;
   }
   const c = _manualCharacters.find(x => x.id === _selectedCharacterId);
   if (!c) {
     note.hidden = true;
     note.innerHTML = '';
+    if (voicePill) voicePill.hidden = true;
     return;
   }
-  // Build a precise list: face is required (always present in a discovered
-  // character); audio + voice may be absent for "silent" characters.
-  const parts = [`<strong>face LoRA</strong>`];
-  if (c.audio_lora_path) parts.push(`<strong>audio LoRA</strong>`);
-  if (c.voice_sample)    parts.push(`<strong>voice ref</strong>`);
-  const triggerWord = c.trigger
-    ? ` Trigger word <code>${escapeHtml(c.trigger)}</code> — keep it in your prompt for full identity lock.`
+  // Show the No-voice pill only when the active character actually has
+  // a voice LoRA. Silent characters can't be made more silent. Also
+  // reset the checkbox when hiding so a stale check from a previous
+  // selection doesn't accidentally suppress voice on a silent character.
+  if (voicePill) {
+    voicePill.hidden = !c.audio_lora_path;
+    if (voicePill.hidden) {
+      const cb = document.getElementById('noVoice');
+      if (cb) cb.checked = false;
+    }
+  }
+  const name = escapeHtml(c.name || c.trigger || c.id);
+  const triggerCode = c.trigger
+    ? ` · trigger <code>${escapeHtml(c.trigger)}</code>`
     : '';
-  const silentSuffix = (!c.audio_lora_path)
-    ? ` <em>Silent character — no voice phase will run.</em>`
+  const silentBadge = (!c.audio_lora_path)
+    ? ` · <em title="No audio LoRA on disk — face only">silent</em>`
     : '';
-  note.innerHTML = `Selecting <strong>${escapeHtml(c.name || c.trigger || c.id)}</strong> applies: ${parts.join(', ')}.${triggerWord}${silentSuffix}`;
+  const cur = parseFloat(document.getElementById('characterStrength')?.value || '1.0');
+  note.innerHTML = `
+    <span><strong>${name}</strong>${triggerCode}${silentBadge}</span>
+    <span class="chars-inline-strength">
+      <span>strength</span>
+      <input type="range" min="0" max="2" step="0.05" value="${cur.toFixed(2)}"
+             oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(1); document.getElementById('characterStrength').value = this.value">
+      <output>${cur.toFixed(1)}</output>
+    </span>
+  `;
   note.hidden = false;
 }
 
+// ============== Manage characters modal (2026-05-18) ==============
+// Pencil icon in the avatar strip opens this modal. Lists every
+// trained character with rename + delete actions. Rename only touches
+// the bundle.json display name; delete removes face+audio LoRAs +
+// sidecars + voice clip + avatar cache (NOT the training dataset).
+function openCharactersManageModal() {
+  const modal = document.getElementById('charactersManageModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  // Use a fresh /characters fetch so deletes/renames in another tab
+  // are reflected immediately.
+  _renderCharactersManageList();
+}
+
+function closeCharactersManageModal() {
+  const modal = document.getElementById('charactersManageModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function _renderCharactersManageList() {
+  const list = document.getElementById('charactersManageList');
+  if (!list) return;
+  list.innerHTML = '<div class="hint">Loading…</div>';
+  try {
+    const data = await (await fetch('/characters')).json();
+    const chars = (data && Array.isArray(data.characters)) ? data.characters : [];
+    if (!chars.length) {
+      list.innerHTML = `<div class="hint" style="padding:18px 4px">
+        No trained characters yet — train one in the
+        <a href="#" onclick="closeCharactersManageModal(); workflowSwitch('train'); return false;">Train tab</a>.
+      </div>`;
+      return;
+    }
+    list.innerHTML = chars.map(c => {
+      const name = c.name || c.trigger || c.id;
+      const trigger = c.trigger || c.id || '';
+      const initial = (name || '?').charAt(0).toUpperCase();
+      const avatar = c.sample_image_url
+        ? `<img class="cm-avatar" src="${escapeHtml(c.sample_image_url)}" alt="">`
+        : `<span class="cm-avatar-ph">${escapeHtml(initial)}</span>`;
+      const idAttr = JSON.stringify(c.id).replace(/"/g, '&quot;');
+      return `<div class="chars-manage-row" data-cid="${escapeHtml(c.id)}">
+        ${avatar}
+        <input type="text" class="cm-name-input"
+               value="${escapeHtml(name)}" maxlength="120"
+               data-original="${escapeHtml(name)}">
+        <span class="cm-trigger" title="Trigger word — baked into the trained weights, can't be renamed">${escapeHtml(trigger)}</span>
+        <span class="cm-actions">
+          <button type="button" class="cm-btn cm-btn-save"
+                  onclick="_charactersManageSave(${idAttr}, this)">Save</button>
+          <button type="button" class="cm-btn cm-btn-delete"
+                  onclick="_charactersManageDelete(${idAttr}, this)">Delete</button>
+        </span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = `<div class="hint">Load failed: ${escapeHtml(e.message || 'unknown')}</div>`;
+  }
+}
+
+async function _charactersManageSave(cid, btn) {
+  const row = btn.closest('.chars-manage-row');
+  const input = row && row.querySelector('.cm-name-input');
+  if (!row || !input) return;
+  const newName = (input.value || '').trim();
+  if (!newName) {
+    alert('Name cannot be empty.');
+    input.focus();
+    return;
+  }
+  if (newName === input.dataset.original) return;  // no-op
+  btn.disabled = true;
+  try {
+    const fd = new URLSearchParams();
+    fd.set('name', newName);
+    const r = await fetch(`/characters/${encodeURIComponent(cid)}/rename`,
+                         { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Rename failed: ' + (data.error || `HTTP ${r.status}`));
+      btn.disabled = false;
+      return;
+    }
+    input.dataset.original = newName;
+    btn.textContent = 'Saved';
+    setTimeout(() => { btn.textContent = 'Save'; btn.disabled = false; }, 900);
+    // Refresh the inline avatar strip + LoRA picker so the new name
+    // appears immediately on the main form.
+    try { refreshManualCharacters(); } catch (_) {}
+  } catch (e) {
+    alert('Rename failed: ' + (e.message || e));
+    btn.disabled = false;
+  }
+}
+
+async function _charactersManageDelete(cid, btn) {
+  const row = btn.closest('.chars-manage-row');
+  const nameInput = row && row.querySelector('.cm-name-input');
+  const displayName = nameInput ? nameInput.value : cid;
+  if (!confirm(`Delete "${displayName}"?\n\nThis removes the face LoRA, audio LoRA, voice clip, and avatar cache. Your training dataset under state/train_character/ is kept so you can retrain.`)) {
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+  try {
+    const r = await fetch(`/characters/${encodeURIComponent(cid)}/delete`,
+                         { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Delete failed: ' + (data.error || `HTTP ${r.status}`));
+      btn.disabled = false;
+      btn.textContent = 'Delete';
+      return;
+    }
+    // Remove the row from the modal + refresh the avatar strip.
+    if (row) row.remove();
+    // If the deleted character was the active selection, clear it so
+    // the form doesn't ship a stale character_id on next submit.
+    if (_selectedCharacterId === cid) {
+      _selectedCharacterId = '';
+      const inp = document.getElementById('characterIdInput');
+      if (inp) inp.value = '';
+    }
+    try { refreshManualCharacters(); } catch (_) {}
+  } catch (e) {
+    alert('Delete failed: ' + (e.message || e));
+    btn.disabled = false;
+    btn.textContent = 'Delete';
+  }
+}
+
 function selectManualCharacter(id) {
-  // id === '' is the "None" chip — deselects.
-  _selectedCharacterId = id || '';
+  // Click-to-toggle: clicking the currently-active avatar deselects it
+  // (2026-05-18 round 3 — the explicit "None" chip is gone; this is
+  // how the user clears a selection now). Passing id === '' also
+  // deselects, kept for callsites that always want to clear.
+  const next = (id === _selectedCharacterId) ? '' : (id || '');
+  _selectedCharacterId = next;
   const inp = document.getElementById('characterIdInput');
   if (inp) inp.value = _selectedCharacterId;
   // Auto-insert the trigger word into the prompt so the user doesn't
@@ -24445,8 +25443,42 @@ function _wireCharacterQualityChips() {
 
 let _civitaiCursor = '';
 let _civitaiSearching = false;
+// Search context — 'video' (LTX-2.3) or 'image' (Flux/Qwen/HiDream). Picked
+// at modal-open time from the active workflow tab so the user sees LoRAs
+// that match the engine they're about to use. 2026-05-18.
+let _civitaiContext = 'video';
 
-function openCivitaiModal() {
+// Returns the search context the CivitAI modal should use given which
+// workflow tab the user is in. Studio (Images) → image; everything else
+// → video. The body[data-workflow] attribute is set by workflowSwitch
+// so this works for any callsite.
+function _civitaiContextForCurrentWorkflow() {
+  const wf = (document.body.dataset.workflow || '').toLowerCase();
+  if (wf === 'studio' || wf === 'image') return 'image';
+  return 'video';
+}
+
+function _civitaiContextMeta(ctx) {
+  if (ctx === 'image') {
+    return {
+      title: 'Browse CivitAI for image LoRAs',
+      hint: 'Flux.1, Flux.2, Qwen-Image, Qwen-Image-Edit, HiDream-i1.',
+      empty: 'No image LoRAs match',
+    };
+  }
+  return {
+    title: 'Browse CivitAI for LTX 2.3 LoRAs',
+    hint: 'LTX-Video 2.3.',
+    empty: 'No LTX 2.3 LoRAs match',
+  };
+}
+
+function openCivitaiModal(context) {
+  // Pick context from the active workflow if not explicitly passed.
+  _civitaiContext = context || _civitaiContextForCurrentWorkflow();
+  const meta = _civitaiContextMeta(_civitaiContext);
+  const titleEl = document.getElementById('civitaiModalTitle');
+  if (titleEl) titleEl.textContent = meta.title;
   document.getElementById('civitaiModal').style.display = 'flex';
   // Pull /loras to populate the dir text and the auth-banner state.
   fetch('/loras').then(r => r.json()).then(d => {
@@ -24574,6 +25606,7 @@ async function civitaiSearch() {
     if (q) params.set('query', q);
     if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
     params.set('limit', '24');
+    params.set('context', _civitaiContext);
     const r = await fetch('/civitai/search?' + params.toString());
     const data = await r.json();
     if (data.error) {
@@ -24586,7 +25619,8 @@ async function civitaiSearch() {
     _civitaiCursor = data.next_cursor || '';
     if (data.has_more) loadMore.style.display = '';
     if ((data.items || []).length === 0) {
-      grid.innerHTML = `<div class="hint">No LTX 2.3 LoRAs match "${escapeHtml(q || '')}"${document.getElementById('civitaiNsfw').checked ? '' : ' (try Show NSFW for more)'}.</div>`;
+      const meta = _civitaiContextMeta(_civitaiContext);
+      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${document.getElementById('civitaiNsfw').checked ? '' : ' (try Show NSFW for more)'}.</div>`;
     }
   } catch (e) {
     status.textContent = 'Network error: ' + (e.message || e);
@@ -24609,6 +25643,7 @@ async function civitaiLoadMore() {
     if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
     params.set('limit', '24');
     params.set('cursor', _civitaiCursor);
+    params.set('context', _civitaiContext);
     const r = await fetch('/civitai/search?' + params.toString());
     const data = await r.json();
     if (data.error) {
