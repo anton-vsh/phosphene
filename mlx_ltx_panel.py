@@ -16370,7 +16370,7 @@ HTML = r"""<!doctype html>
 
 <header>
   <a href="/" class="brand"><img src="/assets/phosphene_wordmark_compact_transparent.svg" alt="Phosphene"></a>
-  <span class="version-badge" title="Phosphene 2.0">2.0</span>
+  <span class="version-badge" title="Phosphene 3.0">3.0</span>
   __PROFILE_BADGE__
   <span class="spacer"></span>
   <!-- Hardware tier badge — clickable, opens a dialog explaining what

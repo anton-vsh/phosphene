@@ -3,265 +3,90 @@
 </p>
 
 <p align="center">
-  <strong>Local video and audio generation for Apple Silicon.</strong><br>
-  A free desktop panel for <a href="https://github.com/Lightricks/LTX-Video">LTX 2.3</a> running natively in <a href="https://github.com/ml-explore/mlx">MLX</a>.<br>
-  One-click install via <a href="https://pinokio.computer">Pinokio</a>. No cloud, no API key, no subscription.
+  <strong>Local generative video, image, and character training for Apple Silicon.</strong><br>
+  Native MLX. One-click install via <a href="https://pinokio.computer">Pinokio</a>. No cloud, no API key.<br>
+  <a href="https://x.com/PhospheneAI">@PhospheneAI</a> on X · <a href="https://github.com/mrbizarro/phosphene">github.com/mrbizarro/phosphene</a>
 </p>
 
-<p align="center">
-  <a href="https://x.com/AIBizarrothe">
-    <img src="assets/bizarro-avatar.jpg" width="40" height="40" style="border-radius: 50%;" alt="by Mr. Bizarro on X">
-  </a>
-  <br>
-  <em>by <a href="https://x.com/AIBizarrothe">Mr. Bizarro</a> on X</em>
-</p>
+<!-- HERO_CLIP_PLACEHOLDER -->
 
 ---
 
-> ### ⚠ Pinokio Update silently doing nothing?
->
-> A one-time history scrub on 2026-05-01 left some clones unable to
-> fast-forward to current main, so Pinokio's Update appears to fire
-> but nothing changes. **Just reinstall** — that's the cleanest fix:
->
-> 1. In Pinokio: **Reset** the Phosphene panel.
-> 2. **Install** it again.
->
-> Yes, this re-downloads the LTX weights (~28 GB total — Q4 + Gemma).
-> Annoying but quick on a decent connection, and from this point on
-> Pinokio's Reset preserves your models because `install.js` declares an
-> `fs.link` persistent drive (Y1.004+). So this is a one-time
-> inconvenience for clones that pre-date 2026-05-01; future Reset →
-> Install is fast and lossless.
->
-> If you'd rather not re-download, the repo includes a `recover.sh` that
-> resets the git repo to current main without touching your `mlx_models/`.
-> See its header comment for usage. (Most users: just reinstall.)
+## Phosphene 3.0
+
+3.0 is a new panel. Same single-window feel, but the surface is rebuilt
+around three workflows and a hardware-aware capability tier — so a 32 GB
+Mac sees a clean Q4 panel, and a 64 GB+ Mac sees the full thing.
+
+**Headline ships**
+
+- **Image Studio** is its own workflow. HiDream-O1-Image-Dev, Qwen-Image-Edit-2511, and the FLUX / Klein family. All native MLX. Multi-reference subject composition. Adaptive wall-time estimates that learn per-engine on your rig.
+- **Train Character** is in the panel. Drop 30–80 photos, click Train, walk away. Local Gemma 3 12B auto-captioner. Optional voice LoRA from a short clip. Letterbox-crop strategy preserves wide-shot proportions. ~3 hours for a face LoRA on M4 Max 64 GB.
+- **Character mode** is promoted from a buried chip to a first-class mode pill. Compact avatar picker at the top of the form, click to switch, voice / silent indicators, Manage Characters modal for rename + delete.
+- **Q8 HQ is the default character-quality path.** A 7-second character clip at 1024×576 lands in ~6 minutes on M4 Max — down from ~12+ min in 2.0 — thanks to the capability-tier refactor + Codex's skip-step optimization. Server-side guardrails refuse character + Q4 so identity can't silently degrade.
+- **Capability tier system.** `body[data-cap-tier="q4|q8"]` is set at boot from detected RAM. Q4 panel hides Q8-only intents (HQ, FFLF, Extend, Character). Q8 panel shows the full surface. One repo, two clean surfaces.
+- **TeaCache in Extend** (today). Plus the mflux image-gen path fix, mflux binary path resolver fix, and the Q8-HQ boot-cascade fix that kept the Fast pill from firing on first render.
+
+**Major behind-the-scenes**
+
+- Workflow tabs renamed and reordered: **Video / Images / Train Character**. Phone-icon orientation picker. Multi-subject prompt coaching when 2+ references are loaded. Vertical-player chrome moved outside the right edge so it stops covering 9:16 clips. Voice opt-out toggle for character generation. Improved Load Params (restores Character mode + actual seed used, not the -1 sentinel).
+- Boot-time HQ skip-step bug fixed. HF cache fallback hardened. Train preflight finds the dev transformer in either q4 or q8 dirs. Server-side validation for character + quality combinations.
+
+If you came from 2.0: **Stop · Update · Start** in Pinokio. Your renders, settings, queue, models, and LoRAs all survive (Pinokio's `fs.link` persistent drive). Update can take a few minutes the first time.
 
 ---
 
-## What's new in 2.0
+## What Phosphene does
 
-Phosphene 2.0 is the first major release after a sustained inference
-rewrite. **The fastest local way to make AI video on a Mac**, with
-synced audio, four modes, and HD upscaling on the Apple Neural Engine.
+- **Video** — text → video, image → video, first/last-frame keyframing, extend an existing clip. Every clip ships with synced audio in one diffusion pass (lip-sync, footsteps, ambient bed).
+- **Character** — generate with a trained face LoRA. Optional voice LoRA stacks automatically. Q8 HQ path, ~6 min for a 7 s 1024×576 clip on M4 Max.
+- **Image Studio** — HiDream-O1-Image-Dev (BF16), Qwen-Image-Edit-2511 (Q6/Q8 via mflux), FLUX.1 family. Single-shot or multi-reference subject composition. Edit by instruction ("change the white jacket to red") preserves scene + identity.
+- **Train Character** — in-panel LoRA training pipeline. Face LoRA + optional voice LoRA from one dataset. Gemma 3 12B auto-captions on-device.
+- **LoRAs and CivitAI** — drop `.safetensors` in `mlx_models/loras/`, or browse and install CivitAI LTX 2.3 LoRAs from the panel. Per-row rename, download, and companion-aware delete.
 
-**Headline benchmarks** (Apple M4 Max 64 GB, real wall-clock today):
-
-| Recipe | 5-sec clip | 10-sec clip |
-|---|---|---|
-| T2V · Balanced · Turbo · 720p Sharp | **3 m 30 s** | **8 m 07 s** |
-| I2V · Balanced · Turbo · 720p Sharp | 3 m 37 s | 8 m 26 s |
-| T2V · Standard · Exact (1280×704) | 7 m 40 s | — |
-| T2V · High Q8 two-stage (max quality) | 11 m 51 s | — |
-
-**What you actually get**:
-
-- **Sharp upscale on the Apple Neural Engine** via [PiperSR](https://github.com/ModelPiper/PiperSR) —
-  real x2 detail recovery, not Lanczos blur. Optional install (AGPL terms).
-- **Boost & Turbo speed modes** for Standard renders — adaptive denoise
-  caching cuts 23–34 % off wall time on stable scenes without breaking
-  faces / hands / typography.
-- **Q8 two-stage HQ tier** with TeaCache for cinematic-quality renders.
-- **Four modes**: T2V (text→video), I2V (image→video), **FFLF** (first/last
-  frame keyframing), **Extend** (append seconds with continuous audio).
-- **Joint audio + video** in one diffusion pass — lip-sync, footsteps,
-  ambient noise all align at the frame level.
-- **Hardware-aware tier system** — the panel detects your Mac's RAM
-  and shows realistic per-tier time estimates on the Quality pills.
-- **Streaming VAE decode** for long clips (10-sec at 720p actually
-  finishes; auto-skipped on short clips so you don't pay the overhead).
-- **Filtered downloads** — Q4 ≈ 20 GB, Q8 ≈ 37 GB, Gemma ≈ 7.5 GB.
-  Pre-2.0 builds bloated to Q4 = 56 GB / Q8 = 82 GB by including
-  duplicate transformer variants. New installs skip the dupes; existing
-  installs free ~80 GB on first Update.
-- **Phase-aware progress bar** in the Now-card — knows what step it's
-  on, gives an honest remaining-time estimate.
-- **Seamless gallery** — new clips appear instantly, no more 2-minute
-  black-frame waiting for the browser cache to expire.
-
-**Already a user?** In Pinokio → Phosphene: **Stop · Update · Start**.
-The Update step also reclaims ~80 GB on existing bloated installs.
-
-**New here?** Install [Pinokio](https://pinokio.computer), then in
-Discover paste `https://github.com/mrbizarro/phosphene` and click Install.
+Hardware tier auto-detected at boot. The panel shows you what's available; what isn't is hidden, not greyed out.
 
 ---
 
-## What it looks like
+## Hardware
 
-<p align="center">
-  <img src="assets/screenshot_panel_full.jpg" alt="Phosphene panel — full UI with mode pills, prompt area, output gallery" width="100%">
-</p>
-
-Single page, no node graph. Pick a mode, type a prompt, hit Generate.
-Outputs land in the gallery on the right. Every clip carries audio.
-
-<p align="center">
-  <img src="assets/screenshot_modes.jpg" alt="Mode and Quality pill selectors" width="65%">
-</p>
-
----
-
-## What's different
-
-The differentiator is **audio**. LTX 2.3 generates video and audio in
-**one forward pass** — they share the diffusion process, so timing is
-tied at the frame level. Footsteps land on the right frame. Lip
-movement matches dialogue. Ambient hum is conditioned on what you see.
-
-| | Phosphene | Wan / Hunyuan / Mochi (Mac) | Pika / Runway | ComfyUI + LTX 2.3 |
-|---|---|---|---|---|
-| Joint audio + video | ✅ one pass | ❌ silent | ✅ (cloud) | ✅ |
-| Native MLX (no torch shim) | ✅ | ❌ MPS shim | n/a | ❌ |
-| Local, no API | ✅ | ✅ | ❌ | ✅ |
-| One-click install | ✅ Pinokio | varies | n/a | ❌ node graph |
-| Persistent batch queue | ✅ crash-resume | ❌ | ✅ | ❌ |
-| Lossless H.264 output | ✅ yuv444p crf 0 | yuv420p | varies | yuv420p |
-
----
-
-## Modes
-
-Four generation modes. All produce video + synced audio.
-
-| Mode | Inputs | Use case |
-|---|---|---|
-| **T2V** — text → video | prompt | The default. Type a scene, get 5 seconds with sound. |
-| **I2V** — image → video | prompt + reference image | Animate a still. Auto cover-crop to model dimensions. |
-| **FFLF** — first / last frame | prompt + start image + end image | Two images bookend the clip; the model fills the motion between. Requires Q8. |
-| **Extend** — continue a clip | existing mp4 + prompt | Append seconds onto a previous render. Audio continuous across the join. Requires Q8. |
-
-Plus a **Prompt Enhance** button that uses Gemma 3 12B (4-bit, locally)
-to rewrite your prompt in the structure LTX 2.3 was trained on.
-
----
-
-## Quality tiers
-
-Four render levels picked per-job. All use the same prompt; the model
-and step count change.
-
-| Tier | Model | Default size / time | Use case |
-|---|---|---|---|
-| **Quick** | Q4 distilled | 640×480 · ~2 min | Fast sanity checks. 4:3 native output. |
-| **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Default. Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
-| **Standard** | Q4 distilled | 1280×704 · ~8 min | The daily driver. Q4 weights (~20 GB on disk). Boost/Turbo Speed shaves ~23 % / ~34 %. |
-| **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~37 GB extra). Required for FFLF and Extend. |
-
-The **Export** control can also run a lightweight ffmpeg Lanczos pass after
-generation:
-
-- **Native** writes the generated dimensions unchanged.
-- **720p fit** scales into 1280×720 (or 720×1280 vertical) and pads any
-  remainder. It never crops or distorts; 1024×576 fills exactly.
-- **2×** doubles the generated width and height while preserving the exact
-  aspect ratio.
-
-Exported/upscaled files use the same **Output format** setting as native
-renders. Standard stays compact (`yuv420p` / CRF 18); Video production stays
-lossless (`yuv444p` / CRF 0).
-
-The **Fast** export method uses ffmpeg Lanczos. The optional **Sharp** export
-method uses PiperSR, a lightweight Apple Neural Engine 2× post-upscaler, then
-ffmpeg handles the final fit/pad/encode step. It is not bundled in the default
-install because PiperSR has separate AGPL/model-license terms; install it from
-the Pinokio menu only if those terms work for you. The old experimental LTX
-latent x2 upscaler can still be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it
-is hidden by default: the official LTX upscaler is meant to be followed by a
-second-stage denoise/refinement pass, and direct decode distorted faces in
-release tests.
-
-Dev builds also include a PiperSR comparison tool for testing Sharp against
-Lanczos on any existing clip:
-
-```bash
-ltx-2-mlx/env/bin/python scripts/upscale_compare_pipersr.py path/to/input.mp4
-```
-
-Standard T2V/I2V also has an opt-in **Speed** control:
-
-- **Exact** is the default full sampler.
-- **Boost** skips up to two stable middle denoise calls.
-- **Turbo** skips up to three stable middle denoise calls.
-
-Boost/Turbo are experimental acceleration modes. They keep the same
-prompt, seed, dimensions, and output format, but they are not bit-for-bit
-or visually identical to Exact. They are disabled for High, Extend, and
-FFLF. The sampler keeps the first two steps and final third of the
-schedule exact, so the cached steps stay in the middle where speed wins
-are least likely to soften hands, faces, and typography. Per-render
-sidecars record the cached/full step counts for debugging and comparison.
-
----
-
-## Hardware tiers
-
-The panel detects your Mac's RAM at boot and gates features to fit.
-Apple Silicon only — no Intel, no Linux, no Windows path. MLX is
-Apple-only by design.
+Apple Silicon only. MLX is Apple-only by design — no Intel, no Linux, no Windows.
 
 | RAM | Tier | What runs |
 |---|---|---|
-| < 48 GB | Compact | T2V / I2V at smaller dimensions (≤ 768 long-side) |
-| 48–79 GB | Comfortable | Full 1280×704 at all modes — the canonical tier (M-Studio 64 GB) |
-| 80–119 GB | Roomy | Longer clips, full Q8, FFLF unrestricted |
-| ≥ 120 GB | Studio | No clamps |
+| **Under 48 GB** | Compact (Q4 surface) | Text / Image video at smaller sizes (≤ 768 px long side). Image Studio works. Character / FFLF / Extend / HQ hidden — they need Q8. |
+| **48–79 GB** | Comfortable (Q8 surface) | The canonical tier — built on M4 Max 64 GB. Every mode works. FFLF / Extend capped at 768 px. |
+| **80–119 GB** | Roomy | Most modes at full size. FFLF / Extend up to 1024 px. |
+| **120 GB+** | Studio | No size limits. |
 
-LTX 2.3's working memory is real — there is no shortcut around it.
-Standard 1280×704 generation peaks around 22 GiB resident; High mode
-with the Q8 dev transformer (~19 GiB on disk) is closer to 38 GiB.
-The tier system enforces this honestly instead of letting you queue
-jobs that fall out of the OOM killer.
+LTX 2.3's working memory is real — there's no shortcut. Standard 1280×704 generation peaks ~22 GiB resident; HQ with the Q8 dev transformer is closer to 38 GiB. The tier system enforces this honestly instead of letting jobs fall out of the OOM killer.
+
+Use `LTX_FORCE_CAP_TIER=q4` to view the Q4 surface from a Q8 machine (useful for testing or just to see what the entry-level panel looks like).
 
 ---
 
 ## Install
 
-### Option A — Pinokio one-click (recommended)
+### Via Pinokio (recommended)
 
-1. Open Pinokio.
-2. **Discover → Download from URL** → paste
-   `https://github.com/mrbizarro/phosphene`
-3. Click **Install**. Pinokio handles the rest:
-   - Apple Silicon hardware gate
-   - Clones [`dgrauet/ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx),
-     creates a Python 3.11 venv via `uv`, installs the MLX pipelines
-     at the locked versions
-   - Applies the codec + memory-overlap patches (idempotent, fails
-     loud on upstream drift)
-   - Downloads Q4 model (~20 GB) + Gemma encoder (~7.5 GB) via `hf
-     download` — resumable, filtered to only the files the panel loads
-4. Click **Start** → **Open Panel** → http://127.0.0.1:8198
+1. Install [Pinokio](https://pinokio.computer).
+2. In Pinokio: **Discover → Download from URL** → paste `https://github.com/mrbizarro/phosphene`.
+3. Click **Install**.
+4. Click **Start** → **Open Panel** → http://127.0.0.1:8198.
 
-For the High quality tier (Q8 two-stage + TeaCache), download the Q8
-model afterward via the **Download Q8** button in the panel sidebar
-(one-time, ~37 GB extra).
+Pinokio handles the rest: Apple Silicon hardware gate, the upstream `dgrauet/ltx-2-mlx` clone, the uv-managed Python 3.11 venv, the codec + memory patches, and the filtered model download (~28 GB: Q4 + Gemma encoder).
 
-### Faster downloads (recommended for Q8)
+<!-- PINOKIO_INSTALL_SCREENSHOT_PLACEHOLDER -->
 
-Hugging Face throttles unauthenticated downloads. With a token,
-downloads run **~10× faster** — particularly relevant for the optional
-37 GB Q8 model.
+For the Q8 HQ tier (required for Character, FFLF, Extend), click **Download Q8** in the panel sidebar after first launch (~37 GB, one-time).
 
-Two options, no terminal required for either:
+For ~10× faster downloads, open **⚙ Settings** in the panel and paste a Hugging Face token. The same token unlocks gated LoRAs (HDR + Lightricks Control LoRAs).
 
-1. **In-app**: open ⚙ Settings in the panel and paste your HF token
-   into the *Hugging Face token* field. Get a token at
-   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-   (read access is enough). The same token unlocks gated LoRAs (HDR
-   and the Lightricks Control LoRAs).
-2. **Terminal**: `hf auth login` once and paste the token. The `hf`
-   binary inside Pinokio's install reads the same cached token file.
-
-### Option B — manual
+### Manual install
 
 ```bash
-# 1. Clone this panel
 git clone https://github.com/mrbizarro/phosphene.git
 cd phosphene
-
-# 2. Clone ltx-2-mlx alongside (default panel layout assumes ./ltx-2-mlx/)
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
 cd ltx-2-mlx
 uv venv --python 3.11 --seed env
@@ -269,261 +94,102 @@ uv venv --python 3.11 --seed env
 ./env/bin/pip install pillow numpy 'huggingface-hub>=1.0' \
   'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
 cd ..
-
-# 3. Apply patches (codec + memory-overlap)
 ./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py
-
-# 4. Run the panel
 ./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
-# → http://127.0.0.1:8198
 ```
 
-> **Why the version pins?** `mlx 0.31.2` introduced a numerical change
-> that attenuates the LTX 2.3 vocoder output by ~22 dB (verified
-> empirically: same prompt + seed + weights → -42 dB peak on 0.31.2 vs
-> -9 dB peak on 0.31.1). Pinning to 0.31.1 is the recovery. See
-> `CLAUDE.md` for the full version-pin rationale.
+> **Why the version pins?** `mlx 0.31.2` attenuates the LTX vocoder by ~22 dB. Stay on 0.31.1.
 
 ---
 
-## LoRAs
+## Quick start
 
-LTX 2.3 supports LoRA adapters — small files that fuse into the model
-weights to add a style, effect, or specialization. Phosphene exposes
-them three ways:
+<!-- PANEL_SCREENSHOT_PLACEHOLDER -->
 
-### HDR — one-click toggle
+Pick a workflow at the top: **Video**, **Images**, or **Train Character**. Each one is a single page.
 
-The official Lightricks **HDR** LoRA is exposed as a plain toggle in
-the form (next to *Enhance with Gemma*). Click it on, generate. First
-HDR job triggers a one-time ~330 MB download of the LoRA weights from
-Hugging Face; subsequent jobs share the cache.
+**Text → video**
+1. Video tab → **Text** mode pill.
+2. Type a prompt. Describe the soundscape the same way you describe the scene.
+3. Pick a Quality pill (Quick / Balanced / Standard / High).
+4. Generate.
 
-The HDR LoRA is **gated** — you'll need to accept Lightricks' license
-at https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR and have
-a Hugging Face token. Open ⚙ Settings in the panel and paste your token
-into the *Hugging Face token* field (get one at
-[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens),
-read access is enough). No terminal, no env vars.
+**Image → video**
+1. Video tab → **Image** mode pill.
+2. Drop a reference image. The panel covers and crops to model dims for you.
+3. Prompt with explicit motion beats (not the still-image description). ~1 beat per 2–3 seconds of clip.
+4. Generate.
 
-### Custom LoRAs from disk
+**Character (trained face + voice)**
+1. Video tab → **Character** mode pill.
+2. Pick an avatar from the chip strip at the top of the form.
+3. Type a prompt that includes your character's trigger word.
+4. Q8 Draft (736×416) for fast iteration, Q8 Pro (1024×576) for final.
+5. Generate. ~6 min for a 7 s clip on M4 Max.
 
-Drop any `.safetensors` LoRA into `mlx_models/loras/` and it appears
-in the LoRA picker (collapsible section above the prompt). Each row
-gets an enable checkbox + strength slider (-2.0 to 2.0, clamped).
+**Image Studio**
+1. **Images** tab.
+2. Pick an engine. HiDream-O1 (Fast / Medium / Quality) for photoreal at HD. Qwen-Image-Edit-2511 for instruction edits and subject composition.
+3. Drop 1–3 reference images for edit / multi-ref work, or leave empty for text-only.
+4. Generate. Cards land in the unified Outputs gallery — click **Animate** on a card to pre-fill the I2V form.
 
-Optional sidecar metadata: a `<name>.json` next to the `.safetensors`
-carries `name`, `description`, `trigger_words`, `recommended_strength`,
-and a `preview_url`. The CivitAI installer below writes these
-automatically.
-
-### CivitAI browser
-
-Built into the LoRA picker: **Browse CivitAI** opens a modal that
-searches CivitAI filtered to `LTXV 2.3` LoRAs. Click Install on a
-card → downloads into `mlx_models/loras/` + writes the sidecar.
-
-CivitAI requires an API token for downloads as of 2025. Open ⚙ Settings,
-paste your token into the *CivitAI API key* field (get one at
-[civitai.com/user/account](https://civitai.com/user/account) → Account
-→ API Keys → Add). Stored locally in `panel_settings.json` and never
-sent anywhere except CivitAI itself.
-
-### How fusion works
-
-LoRAs are fused into the transformer weights at pipeline load time.
-This is *weight-level* fusion, not a runtime adapter — switching the
-LoRA set forces a pipeline reload (~30s on a cold cache, instant on a
-warm one). The panel detects no-op LoRA changes and reuses the cached
-pipeline when the set is the same.
-
-Strengths beyond ±1.5 are unusual and may produce numerical artifacts
-in the fused weights; the panel clamps to ±2.0 as a safety rail.
+**Train Character**
+1. **Train Character** tab.
+2. Drop 30–80 photos of one person. Optional: drop a short voice clip (15–60s of clean speech).
+3. Pick a crop strategy: **Center crop** for tight portraits, **Letterbox** for wide-shot proportions.
+4. Click **Auto-caption** (Gemma 3 runs locally, ~90 s for 37 images), or write captions yourself.
+5. Pick a preset (rank 32, alpha 32, 5000 steps is the validated default).
+6. **Train**. ~3 hours for a face LoRA on M4 Max 64 GB. The avatar shows up under Character mode when it's done.
 
 ---
 
-## Prompting for sound
+## Architecture notes
 
-LTX 2.3 conditions audio on prompt content. A visual-only prompt
-produces near-silent ambient. A prompt with explicit audio cues
-produces layered foreground sound.
+- **`mlx_ltx_panel.py`** — the panel HTTP server. Single file (~22 k lines). HTML + CSS + JS inlined as the page string. Worker thread + helper subprocess management. Capability tier detection.
+- **`mlx_warm_helper.py`** — long-running inference subprocess. Holds T2V / I2V / Extend / HQ / Keyframe pipelines from `ltx_pipelines_mlx`. Reads job specs from stdin, emits events to stdout.
+- **`image_engine.py`** — Image Studio dispatch. Backends: `hidream`, `mflux`, `mock`. Each engine spawns its own subprocess with `start_new_session=True` so `/stop` can kill the whole tree.
+- **`patch_ltx_codec.py`** — idempotent runtime patches against the installed upstream. Codec → lossless H.264, free-DiT-before-decode, VAE temporal streaming for long clips.
+- **`lora_lab/`** — vendored from the [`lora-lab`](https://github.com/mrbizarro/lora-lab) authoring tree. In-panel character LoRA training works out of the box for installer-only users. Set `LTX_LORA_LAB_ROOT` to iterate against an external clone.
+- **`mlx_models/`** — weights (~63 GB, fs.link symlink). Persists across Pinokio Reset.
+- **`mlx_outputs/`** — rendered mp4s + sidecar JSON. Persists across Reset.
 
-| Prompt | Audio result |
-|---|---|
-| `"wizard in a forest"` | quiet room tone |
-| `"wizard in a forest — low whispered chant, ember crackle, distant owl"` | audible chant + crackle + owl, all timed to the visuals |
-
-**Pro tip:** describe the soundscape the same way you describe the
-scene. Voice quality first ("clear, confident voice"), specific sound
-events, then ambient. The Prompt Enhance button enforces this
-structure automatically.
-
-If you don't want music in the output (because music is hard to
-remove cleanly in post), toggle the **🚫 No music** pill next to
-Enhance — it appends an audio constraint to the prompt at submit time.
-
-The optional **Avoid** field is stored separately in sidecars. On Q4
-Quick/Balanced/Standard it is folded into the prompt as avoid terms because
-that distilled path runs without CFG. On High / FFLF / Extend paths it extends
-the native CFG negative prompt used by the upstream pipeline.
+**MLX ports (Salo's own work):**
+- **HiDream-O1-Image-Dev BF16** — published to `mlx-community/HiDream-O1-Image-Dev-mlx-bf16`. 8B Qwen3-VL backbone, unified pixel-patch transformer (no VAE). MIT. Native edit + multi-reference at 1024 / 1440 / 2048 trained dims. See [/Users/salo/HIDREAM-O1-MLX-LAB-active](https://huggingface.co/Mrbizarro) for the standalone lab.
+- **Qwen-Image-Edit-2511** — runs via mflux (Q6 / Q8). Instruction edit + multi-subject composition.
 
 ---
 
-## Output format
-
-Pick a preset from the **⚙ Settings** modal in the panel header. Three
-built-ins, plus a Custom mode for advanced overrides:
-
-| Preset | pix_fmt | CRF | ~Size (5s @ 1280×704) | Use case |
-|---|---|---|---|---|
-| **Standard** ⭐ default | yuv420p | 18 | ~7 MB | Visually lossless to most viewers. Plays everywhere — X, Instagram, Discord. The default for new installs. |
-| **Video production** | yuv444p | 0 | ~50 MB | Mathematically lossless, full 4:4:4 chroma. For color grading, compositing, VFX — workflows that re-encode downstream and need every frame intact. |
-| **Web** | yuv420p | 23 | ~3 MB | Smallest files. For mobile, embedding, or quick previews. |
-| **Custom** | choose | 0–30 | varies | 10-bit HDR, format-specific delivery, etc. |
-
-Settings persist to `panel_settings.json` and apply to every new
-render. The helper subprocess restarts automatically when you change
-codec settings, so the change takes effect on the next render.
-
-**`+faststart`** is always on, regardless of preset. The `moov` atom
-sits at the front of the file so gallery thumbnails render the first
-frame instantly without downloading the full clip.
-
-For social uploads (X especially rejects `yuv444p`), re-encode with:
-
-```bash
-ffmpeg -i in.mp4 \
-  -c:v h264_videotoolbox -profile:v high -pix_fmt yuv420p \
-  -b:v 8M -maxrate 12M -bufsize 16M \
-  -movflags +faststart \
-  -c:a aac -b:a 192k \
-  out.mp4
-```
-
----
-
-## Performance reference
-
-Wall-clock times on an **M4-class Mac, 64 GB**:
-
-| Mode | Resolution | Frames | Steps | ~Time |
-|---|---|---|---|---|
-| T2V Quick | 640×480 | 121 (5s) | 8 | ~2 min |
-| T2V Balanced | 1024×576 → 1280×720 | 121 (5s) | 8 | ~5 min |
-| T2V Standard | 1280×704 | 121 (5s) | 8 | ~8 min |
-| I2V Standard | 1280×704 | 121 (5s) | 8 | ~9 min |
-| High (Q8 two-stage) | 1280×704 | 121 | s1=15 + s2=3 | ~12 min |
-| FFLF (Q8) | 768×416 | 121 | s1=15 + s2=3 | ~6 min |
-| Extend (Q8 dev, cfg=1.0) | 768×416 | +3s | 12 | ~16 min |
-
-Experimental Speed smoke test on the same 64 GB machine, I2V Standard,
-768×512, 121 frames, 8 steps:
-
-| Speed | Time | Notes |
-|---|---:|---|
-| Exact | 186 s | Full sampler |
-| Boost | 145 s | 2 cached denoise calls |
-| Turbo | 126 s | 3 cached denoise calls |
-
-M-Max divides by ~3×. M-Ultra by ~6×. Compact tier (< 48 GB) takes
-roughly 2× longer at clamped resolutions because of swap pressure.
-
----
-
-## Configuration via env vars
-
-Every path is overridable. Defaults are auto-detected.
-
-| Env var | Default | What |
-|---|---|---|
-| `LTX_PORT` | `8198` | Panel HTTP port |
-| `LTX_MODEL` | `dgrauet/ltx-2.3-mlx-q4` | Q4 model path or HF id |
-| `LTX_MODEL_HQ` | `mlx_models/ltx-2.3-mlx-q8` | Q8 model path |
-| `LTX_GEMMA` | `mlx-community/gemma-3-12b-it-4bit` | Gemma encoder path or HF id |
-| `LTX_HELPER_PYTHON` | `ltx-2-mlx/env/bin/python3.11` | Python that runs the helper |
-| `LTX_HELPER_IDLE_TIMEOUT` | `1800` | Helper auto-exits after this many seconds idle |
-| `LTX_LOW_MEMORY` | `true` | Drop pipeline weights between jobs to free RAM |
-| `LTX_OUTPUT_PIX_FMT` | `yuv444p` | Output codec pix_fmt |
-| `LTX_OUTPUT_CRF` | `0` | H.264 CRF — 0 = lossless |
-| `LTX_TIER_OVERRIDE` | _(unset)_ | Force a hardware tier (`base \| standard \| high \| pro`) — testing only |
-
----
-
-## Credits
-
-This is a wrapper, not a fork. All the hard model work belongs to:
-
-- **[Lightricks](https://github.com/Lightricks/LTX-Video)** — original
-  LTX 2.3 model, weights, and joint audio + video architecture
-- **[@dgrauet](https://github.com/dgrauet/ltx-2-mlx)** — the MLX
-  port (`ltx-2-mlx`). Without their work there is no LTX on Apple
-  Silicon worth talking about. Q4 / Q8 quantized weights on Hugging
-  Face. Phosphene wraps their package.
-- **[Apple ML team](https://github.com/ml-explore/mlx)** — the MLX
-  framework that makes Metal-native ML on Mac fast enough to run
-  generative video locally
-- **[mlx-community](https://huggingface.co/mlx-community)** — the
-  Gemma 3 12B 4-bit text encoder distribution
-- **[@cocktailpeanut](https://twitter.com/cocktailpeanut)** —
-  Pinokio itself, which makes one-click installers like this
-  possible
-- **[ModelPiper PiperSR](https://github.com/ModelPiper/PiperSR)** —
-  optional Sharp export upscaling on Apple Neural Engine
-
-The panel adds: persistent batch queue, warm helper subprocess,
-hardware-tier feature gating, lossless H.264 + faststart output,
-output gallery with sidecar params, and the Pinokio install scripts.
-
----
-
-## Known limits
-
-- **Apple Silicon only.** No Intel, Linux, or Windows. MLX is
-  Apple-only by design.
-- **Memory pressure can SIGKILL the helper** on Macs at full RAM.
-  Patches in `patch_ltx_codec.py` reduce peak by ~6 GiB during I2V
-  denoise; closing Chrome, Slack, and iOS Simulator before a Standard
-  render is the safest single thing a user can do. The panel surfaces
-  the exit signal name (SIGKILL / SIGSEGV / SIGABRT) when the helper
-  dies non-gracefully so issues are diagnosable.
-- **Boost/Turbo are quality trade-offs.** They are useful for fast
-  iteration, but Exact remains the default and safest choice for final
-  renders, faces, typography, and client work.
-- **Localhost only.** The panel binds to `127.0.0.1` with no auth.
-  Not designed for LAN exposure or tunneling.
-- **A2V (audio → video) not yet wired.** Upstream supports it; the
-  panel UI does not expose it. v1.1.
-
----
-
-## Roadmap
-
-- [ ] A2V mode in the panel (upstream `a2vid_two_stage.py` exists)
-- [ ] Pre-flight RAM advisory before submitting heavy jobs
-- [ ] In-app HF token field (currently requires `hf auth login` in
-      Terminal)
-- [ ] Audio mode dropdown: With music / Voice + ambient / SFX-only / Silent
-- [ ] Bisect `mlx 0.31.1 → 0.31.2` to identify and file the audio
-      regression upstream
-
----
-
-## License
+## License + credits
 
 **Panel:** MIT — see [LICENSE](LICENSE).
+**LTX Video 2.3 weights:** Lightricks' own license.
+**MLX:** Apache 2.0. **Gemma 3 12B:** Google's terms. **PiperSR:** AGPL-3.0 (model usage requires ModelPiper attribution).
 
-**LTX Video 2.3 weights:** Lightricks' own license. Read it before
-commercial use.
+Phosphene is a wrapper over good model work. Credits to:
 
-**MLX framework:** Apache 2.0.
+- **[Lightricks](https://github.com/Lightricks/LTX-Video)** — LTX 2.3, weights, joint audio + video architecture
+- **[@dgrauet](https://github.com/dgrauet/ltx-2-mlx)** — the MLX port. The reason LTX runs on Apple Silicon.
+- **[Apple ML team](https://github.com/ml-explore/mlx)** — MLX
+- **[HiDream-ai](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev)** — HiDream-O1 weights + reference implementation
+- **[filipstrand/mflux](https://github.com/filipstrand/mflux)** — MLX-native FLUX / Qwen-Edit family
+- **[mlx-community](https://huggingface.co/mlx-community)** — Gemma 3 12B 4-bit
+- **[ModelPiper / PiperSR](https://github.com/ModelPiper/PiperSR)** — optional Sharp 2× upscale on the Apple Neural Engine
+- **[@cocktailpeanut](https://twitter.com/cocktailpeanut)** — Pinokio
 
-**Gemma 3 12B weights:** Google's terms.
+Phosphene adds: persistent batch queue, warm helper subprocess, hardware-tier feature gating, lossless H.264 + faststart output, output gallery with sidecars, the capability-tier UI surface, in-panel character training pipeline, Image Studio dispatch + adaptive estimates, and the Pinokio install scripts.
 
-**PiperSR:** code is AGPL-3.0; model usage requires ModelPiper attribution
-and may require separate commercial licensing. Review its model license before
-commercial redistribution.
+---
 
-**Network note:** Phosphene runs locally and has no telemetry. On clean
-production installs it checks GitHub every 30 minutes for an update badge, and
-it reaches Hugging Face/CivitAI only when you download models or LoRAs. Disable
-the update badge with `PHOSPHENE_DISABLE_VERSION_CHECK=1`.
+## Support development
+
+Phosphene is free and open source.
+
+- Follow [@PhospheneAI](https://x.com/PhospheneAI) on X for releases and clips
+- Patreon: <!-- PATREON_LINK_PLACEHOLDER --> (coming soon — https://www.patreon.com/PhospheneAI)
+- Issues + PRs: https://github.com/mrbizarro/phosphene
+
+---
+
+## Network note
+
+Phosphene runs locally. No telemetry. Clean production installs check GitHub every 30 minutes for an update badge, and reach Hugging Face / CivitAI only when you download models or LoRAs. Disable the update check with `PHOSPHENE_DISABLE_VERSION_CHECK=1`. Panel binds to `127.0.0.1` with no auth — not designed for LAN exposure or tunneling.
