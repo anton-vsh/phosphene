@@ -3512,7 +3512,28 @@ def list_uploads(limit: int = 40) -> list[dict]:
     return out
 
 
-def list_outputs(include_hidden: bool = False) -> list[dict]:
+def list_outputs(
+    include_hidden: bool = False,
+    limit: int = 60,
+    offset: int = 0,
+    return_total: bool = False,
+):
+    """Return a slice of the unified outputs gallery (videos + images).
+
+    Default limit=60 matches the polling fast path (/status). The /outputs
+    endpoint passes a larger limit (e.g. 10000) so the carousel's "Show all"
+    button can surface the full history without bloating every poll. The
+    "Show all" UX was added 2026-05-18 after a user with 882 mp4s realized
+    only the newest 60 ever appeared on screen.
+
+    Args:
+        include_hidden: if True, paths in HIDDEN_PATHS are NOT filtered out.
+        limit: max items to return after offset. <=0 means "no cap".
+        offset: skip this many items from the newest-first ordering.
+        return_total: if True, returns (outputs, total_count) where
+            total_count is the number BEFORE offset/limit applied (used by
+            "Show all" to know how many older entries exist).
+    """
     # Newest-first ordering (mtime DESC): the horizontal carousel reads
     # left→right as "most recent → older", which is the convention the
     # user expects (matches the manual gallery's prior behavior + the
@@ -3526,16 +3547,24 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
     # mode=='image' queue worker drops Studio renders). Each entry
     # carries a `kind` field ('video' | 'image') so the right-pane viewer
     # and filter chips can branch without re-detecting from the suffix.
-    video_files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
+    #
+    # Discovery caps: we used to slice video_files at [:120] and images at
+    # MAX_IMG=200, so on a panel with hundreds of clips the older ones
+    # simply never reached the carousel even with the post-build limit
+    # raised. Now we scan everything (sorted once, mtime DESC) and the
+    # post-build limit is what governs how much we send to the browser.
+    # The scan cost is dominated by stat() calls — 1000 mp4s on APFS is
+    # <50 ms in practice, well inside the 1.5 s poll cadence.
+    video_files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
     image_root = UPLOADS / "library" / "manual"
     image_exts = {".png", ".jpg", ".jpeg", ".webp"}
     image_candidates: list[tuple[Path, float]] = []
     if image_root.exists():
-        # Bounded recursive walk — date-bucketed dirs already keep this
-        # cheap, but we cap at 200 so a runaway library can't stall the
-        # status poll. Same MAX_DEPTH as /library/images so the worst case
-        # is the same shape.
-        MAX_IMG = 200
+        # Safety bound — still cap at a generous value so a misconfigured
+        # library (someone pointing panel_uploads at /Users) can't stall
+        # the request. 5000 is well above any realistic single-machine
+        # gallery while keeping the worst-case rglob bounded.
+        MAX_IMG = 5000
         try:
             for p in image_root.rglob("*"):
                 if len(image_candidates) >= MAX_IMG:
@@ -3549,16 +3578,15 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
         except OSError:
             pass
     image_candidates.sort(key=lambda t: t[1], reverse=True)
-    # Merge-sort videos + images by mtime DESC before the bounded scan
-    # below so the 60-cap doesn't filter out recent images just because
-    # there's a backlog of older mp4s in OUTPUT (or vice versa).
+    # Merge-sort videos + images by mtime DESC so the limit applies to the
+    # unified newest-first stream (no kind-specific imbalance).
     combined: list[tuple[Path, float]] = []
     for p in video_files:
         try:
             combined.append((p, p.stat().st_mtime))
         except OSError:
             continue
-    combined.extend(image_candidates[:120])
+    combined.extend(image_candidates)
     combined.sort(key=lambda t: t[1], reverse=True)
     files = [p for (p, _) in combined]
     # Y1.039 — skip files that ffmpeg is still writing.
@@ -3674,9 +3702,20 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
             # the agent-stage pane (commit af5c184).
             "kind": "image" if is_image else "video",
         })
-        if len(out) >= 60:
-            break
-    return out
+    total = len(out)
+    # Apply offset + limit. limit<=0 means "no cap"; otherwise slice. This
+    # is what /status uses to keep the polling payload bounded (limit=60)
+    # while letting /outputs return the full history when the user clicks
+    # "Show all".
+    if offset < 0:
+        offset = 0
+    if limit <= 0:
+        sliced = out[offset:]
+    else:
+        sliced = out[offset:offset + limit]
+    if return_total:
+        return sliced, total
+    return sliced
 
 
 def write_sidecar(path: Path, payload: dict) -> None:
@@ -7179,7 +7218,14 @@ class Handler(BaseHTTPRequestHandler):
                     "pid": STATE["pid"], "pgid": STATE["pgid"],
                 })
                 hidden_count = len(HIDDEN_PATHS)
-            payload["outputs"] = list_outputs(include_hidden=include_hidden)
+            # Polling fast path — newest 60 only. outputs_total tells the
+            # carousel header "X older outputs not shown" so the "Show all"
+            # button can surface them via the /outputs endpoint.
+            _outs, _outs_total = list_outputs(
+                include_hidden=include_hidden, limit=60, return_total=True,
+            )
+            payload["outputs"] = _outs
+            payload["outputs_total"] = _outs_total
             payload["hidden_count"] = hidden_count
             payload["memory"] = get_memory()
             payload["comfy_pids"] = find_comfy_pids()
@@ -7281,6 +7327,33 @@ class Handler(BaseHTTPRequestHandler):
             # whether to keep the inline models card hidden.
             payload["settings"] = get_settings_public()
             self._json(payload)
+            return
+        if parsed.path == "/outputs":
+            # Paginated unified gallery — full history, not just the newest
+            # 60 that /status surfaces. Carousel's "Show all (N)" button
+            # calls this when the user wants to scroll older renders.
+            # Defaults: include_hidden=0, limit=10000 (effectively all on
+            # a typical install), offset=0. Negative values are rejected.
+            qs = parse_qs(parsed.query)
+            include_hidden = qs.get("include_hidden", ["0"])[0] == "1"
+            try:
+                limit = int(qs.get("limit", ["10000"])[0])
+                offset = int(qs.get("offset", ["0"])[0])
+            except (TypeError, ValueError):
+                self._json({"error": "limit/offset must be integers"}, 400); return
+            if limit < 0 or offset < 0:
+                self._json({"error": "limit/offset must be >= 0"}, 400); return
+            _outs, _total = list_outputs(
+                include_hidden=include_hidden, limit=limit, offset=offset,
+                return_total=True,
+            )
+            self._json({
+                "outputs": _outs,
+                "total": _total,
+                "offset": offset,
+                "limit": limit,
+                "returned": len(_outs),
+            })
             return
         if parsed.path == "/uploads":
             # Recent panel_uploads/* images for the picker's "click to reuse"
@@ -18487,6 +18560,15 @@ HTML = r"""<!doctype html>
                   onclick="setMainOutputsFilter('photos')">Photos</button>
         </div>
         <span class="ch-spacer"></span>
+        <!-- "Show all (N)" — surfaces older renders that /status's polling
+             fast path (newest 60) doesn't include. The button is hidden
+             when total == shown; poll() reveals it with the live count
+             whenever an older entry exists. Clicking fetches /outputs
+             (no polling on that endpoint) and re-renders the carousel
+             with the full unified list. -->
+        <button type="button" class="ghost-btn" id="outputsShowAllBtn"
+                style="display:none" title="Load every render in the gallery (not just the newest 60)"
+                onclick="outputsLoadAll()">Show all</button>
         <button type="button" class="open-folder-btn" id="openOutputsFolderBtn"
                 title="Reveal the outputs folder in Finder"
                 aria-label="Reveal the outputs folder in Finder"
@@ -18996,10 +19078,56 @@ function isPhotoOutputMain(o) {
 // Apply the main filter on top of currentOutputs. Returns the filtered
 // array; callers also use this for the count badge so the filter and
 // the rendered cells agree.
+// `currentOutputs` is the polling fast-path payload (newest 60 from /status).
+// When the user clicks "Show all", we fetch the full unified list via the
+// /outputs endpoint and merge anything that isn't already in currentOutputs
+// into `_olderOutputs`. The carousel renders the union, sorted newest-first,
+// so a render that completes after "Show all" still slots in at the top
+// without forcing another refresh.
+window._olderOutputs = window._olderOutputs || [];
+window._showingAllOutputs = window._showingAllOutputs || false;
+
 function filteredMainOutputs() {
-  if (mainOutputsFilter === 'all') return currentOutputs;
-  if (mainOutputsFilter === 'photos') return currentOutputs.filter(isPhotoOutputMain);
-  return currentOutputs.filter(o => !isPhotoOutputMain(o));
+  // Union of polled + older, deduped by path (polled wins because it has
+  // the freshest mtime/sidecar state for in-flight files).
+  let all;
+  if (window._showingAllOutputs && window._olderOutputs.length) {
+    const seen = new Set(currentOutputs.map(o => o.path));
+    const extras = window._olderOutputs.filter(o => !seen.has(o.path));
+    all = currentOutputs.concat(extras);
+  } else {
+    all = currentOutputs;
+  }
+  if (mainOutputsFilter === 'all') return all;
+  if (mainOutputsFilter === 'photos') return all.filter(isPhotoOutputMain);
+  return all.filter(o => !isPhotoOutputMain(o));
+}
+
+// "Show all (N)" button handler — fetches the full unified gallery from
+// /outputs. limit=10000 is effectively "all" on any realistic install;
+// the server caps image discovery at MAX_IMG=5000 + however many mp4s
+// exist in OUTPUT. Idempotent: clicking twice just refetches and re-
+// renders.
+async function outputsLoadAll() {
+  const btn = document.getElementById('outputsShowAllBtn');
+  if (btn) { btn.textContent = 'Loading…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/outputs?limit=10000&offset=0');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    window._olderOutputs = Array.isArray(d.outputs) ? d.outputs : [];
+    window._showingAllOutputs = true;
+    if (btn) { btn.style.display = 'none'; btn.disabled = false; }
+    renderCarousel();
+    // Update the title count to reflect the new visible total.
+    const _visible = filteredMainOutputs();
+    const _kindLabel = mainOutputsFilter === 'all' ? '' : ` ${mainOutputsFilter}`;
+    const t = document.getElementById('carouselTitle');
+    if (t) t.textContent = `Outputs · ${_visible.length}${_kindLabel}`;
+  } catch (e) {
+    if (btn) { btn.textContent = 'Show all'; btn.disabled = false; }
+    console.warn('outputsLoadAll failed:', e);
+  }
 }
 function _updateMainFilterChips() {
   const a = document.getElementById('mainOutputsFilterAll');
@@ -22990,6 +23118,23 @@ async function poll() {
   document.getElementById('carouselTitle').textContent =
     filterMode === 'hidden' ? 'Hidden outputs'
                             : `Outputs · ${_visible.length}${_kindLabel}`;
+
+  // "Show all (N)" button — reveal whenever the server reports more
+  // outputs total than the polling fast path returned, and the user
+  // hasn't already loaded the full list. Hides itself again once
+  // outputsLoadAll() has merged the older entries into _olderOutputs.
+  const _showAllBtn = document.getElementById('outputsShowAllBtn');
+  if (_showAllBtn) {
+    const _total = typeof s.outputs_total === 'number' ? s.outputs_total : (s.outputs ? s.outputs.length : 0);
+    const _polledShown = currentOutputs.length;
+    const _hasOlder = _total > _polledShown;
+    if (window._showingAllOutputs || !_hasOlder) {
+      _showAllBtn.style.display = 'none';
+    } else {
+      _showAllBtn.textContent = `Show all (${_total})`;
+      _showAllBtn.style.display = '';
+    }
+  }
 
   // Train Character integration: detect newly-completed train jobs and
   // refresh both the trained-LoRA list AND the global LoRA picker so a
