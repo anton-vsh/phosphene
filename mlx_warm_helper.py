@@ -1015,6 +1015,23 @@ def _free_pipe_for_decode(pipe):
 
 
 def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
+    # On second+ runs the video/audio decoders (~2.5 GB combined) remain
+    # resident from the previous job's decode phase.  During the
+    # block-by-block DiT+LoRA materialization that follows (48 blocks ×
+    # ~300 MB each), the combined Metal heap can stall allocation past the
+    # 10-second GPU watchdog threshold.  Free decoders here so they don't
+    # compete with the DiT load; they reload lazily when decode starts.
+    if LOW_MEMORY:
+        if hasattr(pipe, "video_decoder_block"):
+            pipe.video_decoder_block.free()
+        if hasattr(pipe, "audio_decoder_block"):
+            pipe.audio_decoder_block.free()
+        try:
+            from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+            _ac()
+        except Exception:
+            pass
+
     # Pre-refactor packages: old TextToVideoPipeline.generate /
     #   ImageToVideoPipeline.generate_from_image — single-stage Q4
     #   path with explicit frame_rate plumbing.
@@ -1423,6 +1440,7 @@ def configure_acceleration(mode: str) -> str:
 
     import ltx_pipelines_mlx.ti2vid_one_stage as ti2vid
     import ltx_pipelines_mlx.utils.samplers as samplers
+    import ltx_pipelines_mlx.distilled as distilled_mod
 
     if _ORIGINAL_DENOISE_LOOP is None:
         _ORIGINAL_DENOISE_LOOP = samplers.denoise_loop
@@ -1436,14 +1454,17 @@ def configure_acceleration(mode: str) -> str:
     if requested == "off":
         samplers.denoise_loop = _ORIGINAL_DENOISE_LOOP
         ti2vid.denoise_loop = _ORIGINAL_DENOISE_LOOP
+        distilled_mod.denoise_loop = _ORIGINAL_DENOISE_LOOP
     elif requested == "boost":
         loop = _build_adaptive_x0_loop("boost", max_skips=2, video_thresh=0.02, audio_thresh=0.02)
         samplers.denoise_loop = loop
         ti2vid.denoise_loop = loop
+        distilled_mod.denoise_loop = loop
     else:
         loop = _build_adaptive_x0_loop("turbo", max_skips=3, video_thresh=0.03, audio_thresh=0.03)
         samplers.denoise_loop = loop
         ti2vid.denoise_loop = loop
+        distilled_mod.denoise_loop = loop
 
     _CURRENT_ACCEL_MODE = requested
     emit({"event": "log", "line": f"accel:mode {requested}"})
