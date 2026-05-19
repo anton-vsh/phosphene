@@ -568,6 +568,23 @@ def run_training(
     lab_train._patch_compute_video_positions_fps_kwarg()
     lab_train._patch_lora_target_exclude_audio()
 
+    # Pin Python/numpy RNG before LtxvTrainer touches them. The upstream
+    # trainer seeds `mx.random` with `cfg.seed=42` (see ltx_trainer_mlx/
+    # trainer.py:114) but the dataset shuffle at trainer.py:978 uses
+    # Python's stdlib `random.shuffle(indices)` which is NEVER seeded by
+    # the trainer. Result: with batch=1 over 5000 steps, two identical-
+    # recipe runs traverse the dataset in different orders and land at
+    # different minima — exactly the variance Mr Bizarro saw between the
+    # OLD elontrn_v2 (good) and the 2026-05-18 retrain (worse). Pinning
+    # stdlib + numpy RNG here closes the biggest reproducibility hole.
+    # (MLX/Metal matmul nondeterminism still remains as a smaller second-
+    # order source — documented, unfixable today.)
+    import random as _stdlib_random
+    import numpy as _np
+    _seed = int(cfg.get("seed", 42))
+    _stdlib_random.seed(_seed)
+    _np.random.seed(_seed)
+
     total_steps = int(cfg["steps"])
     emit("train_start", total_steps=total_steps, estimated_wall_s=int(estimated_wall_s))
 

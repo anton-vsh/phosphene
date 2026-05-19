@@ -732,30 +732,39 @@ LORA_LAB_RUN_SH = Path(
                    str(ROOT / "scripts" / "lora_lab_run.sh"))
 )
 
-# Quality preset → training hyperparams. The lab's train_character.py reads
-# these out of the spec JSON; the values here are the contract surface. The
-# wall-time estimate the UI shows is derived from `steps * seconds_per_step`
-# (measured 1.75 s/step at rank-8 / 512×320 on M4 Max — see lora-lab/STATE.md).
+# Quality preset → training hyperparams. lora_lab/train_character.py reads
+# these out of the spec JSON; the values here are the contract surface.
+#
+# Step counts are NOT hardcoded — they're derived from `epochs × image_count`
+# at job-build time (see make_job). The validated v2 recipe was 5000 steps
+# at 50 images = 100 epochs; that ratio is what each preset preserves as
+# the dataset grows. 79 images on "high" → 7900 steps, not 5000. Power
+# users can override per-run via the advanced "steps" field in the Train
+# tab — make_job honors form["steps"] when present.
+#
+# `seconds_per_step` is the per-step wall-time measurement on M4 Max at the
+# preset's rank/resolution (1.75 s/step at rank-8 / 512×320 — see
+# lora-lab/STATE.md). ETA = preprocess + steps * seconds_per_step.
 TRAIN_PRESETS = {
-    "quick":  {"steps": 1500, "rank": 8,  "lr": 1e-4, "resolution": 512,
+    "quick":  {"epochs":  30, "rank": 8,  "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 1.5,  "ram_peak_gb": 12,
                "label": "Quick",
-               "subtitle": "~30 min · rank 8 · 512px",
+               "subtitle": "~30 epochs · rank 8 · 512px",
                "checkpoint_interval": 500},
-    "medium": {"steps": 3000, "rank": 16, "lr": 1e-4, "resolution": 576,
+    "medium": {"epochs":  60, "rank": 16, "lr": 1e-4, "resolution": 576,
                "seconds_per_step": 2.2,  "ram_peak_gb": 18,
                "label": "Medium",
-               "subtitle": "~2 h · rank 16 · 576px",
+               "subtitle": "~60 epochs · rank 16 · 576px",
                "checkpoint_interval": 500},
-    # high tier mirrors the validated CLI recipe in the ltx-lora skill
-    # (rank 32 / 5000 steps / lr 1e-4 / 512px). The earlier 5e-5 LR was a
-    # mistake — it slowed convergence vs the proven 1e-4 (Aria_v2,
-    # Bizarro_v2 both trained at 1e-4). 512px portrait-friendly resolution
-    # matches the lora-lab preprocess defaults and what Aria/Bizarro used.
-    "high":   {"steps": 5000, "rank": 32, "lr": 1e-4, "resolution": 512,
+    # high tier mirrors the validated CLI recipe (rank 32 / 100 epochs /
+    # lr 1e-4 / 512px) — at 50 images that's the legacy 5000 steps. The
+    # earlier 5e-5 LR was a mistake; 1e-4 is the proven default
+    # (Aria_v2, Bizarro_v2 both trained at 1e-4). 512px portrait-
+    # friendly resolution matches the lora-lab preprocess defaults.
+    "high":   {"epochs": 100, "rank": 32, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 2.0,  "ram_peak_gb": 28,
                "label": "High",
-               "subtitle": "~2 h 50 min · rank 32 · 5000 steps · 512px",
+               "subtitle": "~100 epochs · rank 32 · 512px (validated v2 recipe)",
                "checkpoint_interval": 250},
 }
 
@@ -767,37 +776,60 @@ TRAIN_PRESETS = {
 # Why the table looks different from TRAIN_PRESETS:
 #   - Style benefits less from very high rank than character does — rank 32
 #     is the validated capacity ceiling for our LTX-2.3 stack (Aria_v2,
-#     Bizarro_v2). For style, "high" tier adds STEPS, not rank.
+#     Bizarro_v2). For style, "high" tier adds EPOCHS, not rank.
 #   - Default Quick uses rank 16 (not rank 8) because style coverage needs a
 #     bit more attention budget than identity, even at the fast tier.
 #   - 512px resolution across the board — style training benefits from a
 #     single fixed bucket so the model sees the same aspect / detail level
 #     across the dataset.
 TRAIN_STYLE_PRESETS = {
-    "quick":  {"steps": 1500, "rank": 16, "lr": 1e-4, "resolution": 512,
+    "quick":  {"epochs":  30, "rank": 16, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 1.5,  "ram_peak_gb": 12,
                "label": "Quick",
-               "subtitle": "~30 min · rank 16 · 512px",
+               "subtitle": "~30 epochs · rank 16 · 512px",
                "checkpoint_interval": 500},
-    "medium": {"steps": 3000, "rank": 32, "lr": 1e-4, "resolution": 512,
+    "medium": {"epochs":  60, "rank": 32, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 2.0,  "ram_peak_gb": 18,
                "label": "Medium",
-               "subtitle": "~1 h 40 min · rank 32 · 512px",
+               "subtitle": "~60 epochs · rank 32 · 512px",
                "checkpoint_interval": 500},
-    # high adds steps not rank (see note above).
-    "high":   {"steps": 5000, "rank": 32, "lr": 1e-4, "resolution": 512,
+    "high":   {"epochs": 100, "rank": 32, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 2.0,  "ram_peak_gb": 28,
                "label": "High",
-               "subtitle": "~2 h 50 min · rank 32 · 5000 steps · 512px",
+               "subtitle": "~100 epochs · rank 32 · 512px",
                "checkpoint_interval": 250},
 }
+
+
+def _preset_steps_for(preset_cfg: dict, image_count: int) -> int:
+    """Compute steps for a preset given the dataset size.
+
+    `epochs × image_count` is the contract. Floor of 1 (so a degenerate
+    image_count=0 doesn't yield zero-step training, which would just
+    skip the loop and emit a useless artifact). No upper bound here —
+    if a power user uploads 200 images to a "high" preset and wants
+    20000 steps (~11h), the system honors that. The Train tab's wall-
+    time chip surfaces the cost up-front so it's their informed call.
+    """
+    epochs = int(preset_cfg.get("epochs", 0))
+    return max(1, epochs * max(1, int(image_count or 0)))
 
 # Train-type values accepted by /train/start and stamped onto job params.
 TRAIN_TYPES = ("character", "style")
 
 # Dataset rules.
 TRAIN_MIN_IMAGES = 15
-TRAIN_MAX_IMAGES = 50
+# Soft cap on the per-character dataset size. The old 50-image limit
+# was a friendly-default-misread-as-hard-rule — many users wanted to
+# train against 80-200 photos for richer identity capture, and the
+# panel was silently refusing extra uploads. With epoch-based presets
+# (epochs × image_count → steps), larger datasets just take longer;
+# there's no quality-side reason to refuse them. 500 is a safety
+# bound so a misclick on "select 5000 photos" doesn't fill the disk;
+# real users who need more can edit this constant or drop files in
+# state/train_character/<id>/images/ directly (the trainer reads the
+# dir, it doesn't re-check the upload cap).
+TRAIN_MAX_IMAGES = 500
 TRAIN_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 TRAIN_MAX_BYTES_PER_IMAGE = 32 * 1024 * 1024     # 32 MB per image upload
 
@@ -1089,7 +1121,8 @@ def _train_estimate_seconds(preset: str, image_count: int, *,
     its seconds_per_step from TRAIN_STYLE_PRESETS, not TRAIN_PRESETS."""
     table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
     cfg = table.get(preset) or table["quick"]
-    steps = steps_override if steps_override else cfg["steps"]
+    # Steps derive from epochs × image_count; advanced override wins.
+    steps = steps_override if steps_override else _preset_steps_for(cfg, image_count)
     preprocess = 3.0 * max(0, image_count)
     train = float(steps) * float(cfg["seconds_per_step"])
     return int(preprocess + train + 30)  # +30 s for setup + checkpoint write
@@ -4388,7 +4421,12 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 return default
         cfg = preset_table[preset]
         rank = _int_or("rank", cfg["rank"])
-        steps = _int_or("steps", cfg["steps"])
+        # Steps default scales with dataset size: epochs × image_count
+        # (preserves the validated v2 recipe shape regardless of how many
+        # photos the user uploaded). The form field "steps" still wins
+        # when the advanced section sets it explicitly — that's the
+        # power-user escape hatch.
+        steps = _int_or("steps", _preset_steps_for(cfg, image_count))
         lr = _float_or("lr", cfg["lr"])
         resolution = _int_or("resolution", cfg["resolution"])
         caption_strategy = (f("caption_strategy", "trigger_simple")
@@ -20225,24 +20263,29 @@ const TRAIN = {
   // Local mirror of the preset table; server has the authoritative copy in
   // TRAIN_PRESETS but the JS-side estimator is instant — saves a /status
   // round-trip per keystroke. Keep these in sync with TRAIN_PRESETS in py.
+  //
+  // Schema change 2026-05-19: presets describe EPOCHS, not steps. Actual
+  // step count is computed from `epochs × image_count` at the consumer
+  // (trainComputeSteps below) so the same preset auto-scales with
+  // dataset size. Advanced trainSteps override still wins.
   presets: {
-    quick:  { steps: 1500, rank: 8,  resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
-              label: 'Quick',  subtitle: '~30 min · rank 8 · 512px' },
-    medium: { steps: 3000, rank: 16, resolution: 576, seconds_per_step: 2.2, ram_peak_gb: 18,
-              label: 'Medium', subtitle: '~2 h · rank 16 · 576px' },
-    high:   { steps: 5000, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
-              label: 'High',   subtitle: '~2 h 50 min · rank 32 · 5000 steps · 512px' },
+    quick:  { epochs:  30, rank: 8,  resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
+              label: 'Quick',  subtitle: '~30 epochs · rank 8 · 512px' },
+    medium: { epochs:  60, rank: 16, resolution: 576, seconds_per_step: 2.2, ram_peak_gb: 18,
+              label: 'Medium', subtitle: '~60 epochs · rank 16 · 576px' },
+    high:   { epochs: 100, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
+              label: 'High',   subtitle: '~100 epochs · rank 32 · 512px (v2 recipe)' },
   },
   // Mirror of the server-side TRAIN_STYLE_PRESETS. Style table differs from
-  // character: quick uses rank 16 (not rank 8), and "high" adds steps not
+  // character: quick uses rank 16 (not rank 8), and "high" adds epochs not
   // rank (rank 32 is the validated capacity ceiling for our LTX-2.3 stack).
   stylePresets: {
-    quick:  { steps: 1500, rank: 16, resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
-              label: 'Quick',  subtitle: '~30 min · rank 16 · 512px' },
-    medium: { steps: 3000, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 18,
-              label: 'Medium', subtitle: '~1 h 40 min · rank 32 · 512px' },
-    high:   { steps: 5000, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
-              label: 'High',   subtitle: '~2 h 50 min · rank 32 · 5000 steps · 512px' },
+    quick:  { epochs:  30, rank: 16, resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
+              label: 'Quick',  subtitle: '~30 epochs · rank 16 · 512px' },
+    medium: { epochs:  60, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 18,
+              label: 'Medium', subtitle: '~60 epochs · rank 32 · 512px' },
+    high:   { epochs: 100, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
+              label: 'High',   subtitle: '~100 epochs · rank 32 · 512px' },
   },
   // Voice (optional) state. `voiceFile` is the server-saved record once
   // an upload completes; `voiceEnabled` mirrors the toggle.
@@ -21530,11 +21573,20 @@ function trainEffectiveSteps() {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Mirrors py-side _preset_steps_for(): steps = epochs × image_count.
+// Used by trainUpdateEstimate to keep the ETA chip honest as the user
+// drops more photos in. Floor of 1 image so n=0 doesn't yield zero
+// steps (matches server behavior).
+function trainComputeSteps(preset, imageCount) {
+  const epochs = parseInt(preset.epochs, 10) || 0;
+  return Math.max(1, epochs * Math.max(1, imageCount | 0));
+}
+
 function trainUpdateEstimate() {
-  const preset = TRAIN.presets[TRAIN.preset] || TRAIN.presets.quick;
+  const preset = (trainActivePresets()[TRAIN.preset]) || trainActivePresets().quick;
   const stepOverride = trainEffectiveSteps();
-  const steps = stepOverride || preset.steps;
   const n = TRAIN.images.length;
+  const steps = stepOverride || trainComputeSteps(preset, n);
   const sec = Math.round(3 * Math.max(0, n) + steps * preset.seconds_per_step + 30);
   // Estimate row is hidden until the user has dropped at least one
   // image. Before that, the row reads as missing data — not a useful
