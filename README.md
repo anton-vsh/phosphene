@@ -12,25 +12,37 @@
   <img src="assets/screenshots/phos_01_video_tab.png" alt="Phosphene panel — Video tab" width="100%">
 </p>
 
-## You can train a character on your laptop now
+## Overview
 
-Drop 15 to 50 photos of a face into the Train tab. Click Train. Walk away. About three hours later you have a character LoRA, with optional voice, both ready to use from the Video tab. The captions are written by a local Gemma 3. Nothing leaves the machine.
+Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) and an MLX port of [HiDream-O1-Image-Dev](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys, no telemetry.
 
-This is the part of Phosphene 3.0 I keep showing people first, because it's still the thing nobody believes works until they watch a clip render. A 7-second 1024x576 character clip lands in about six minutes on an M4 Max.
+3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab with two MLX-native engines, hardware capability tiering, and an agentic prompt enhancer / shot planner driven by the same local Gemma 3 12B used for auto-captioning.
 
-The panel adapts to your Mac. Under 48 GB? You get a simple surface with Q4 video and the image tab. 64 GB or more? Character training, first/last-frame keyframing, extend, and the Q8 HQ modes all show up. There is one repo and two clean surfaces. You don't have to know which one you're on.
+A 7-second character clip with synced audio renders in roughly 6 minutes on an M4 Max 64 GB. The delivered file is **1280×720 HD** after the built-in 2× upscale; clips are generated at 1024×576 internally and upscaled before mux. Voice + face LoRAs from a 50-image dataset finish in ~3 hours on the same hardware.
 
-## What's actually in there
+The interface adapts to the machine it runs on. Under 48 GB of unified memory, the panel exposes only what fits in that envelope (text-to-video, image-to-video, and the Image tab). At 48 GB and above, character mode, first/last-frame keyframing, clip extension, and the Q8 HQ pipelines become available. Tier detection runs once at boot and the unsupported surfaces are hidden rather than greyed out.
 
-**Video.** Text-to-video, image-to-video, and audio-to-video. Every clip comes back with synced audio in the same diffusion pass: lip-sync, footsteps, room tone, whatever the prompt described. First/last-frame keyframing and clip extension are there on the Q8 surface.
+## Features
 
-**Images.** Two engines on the same tab. Qwen-Image-Edit-2511 for instruction edits and multi-subject composition. HiDream-O1-Image-Dev for photoreal at HD (separate one-time clone — see Setup below). Both are MLX ports, so they share GPU memory cleanly when you switch between them. Cards drop into a unified gallery, and there's an Animate button on each one that pre-fills the I2V form.
+### Video
 
-**Train Character.** A full LoRA training pipeline inside the panel. Face plus optional voice from the same dataset. Letterbox crop preserves wide-shot proportions, which used to be the silent killer of identity capture. Auto-captioning runs Gemma 3 12B on-device in about ninety seconds for 37 images. The validated default (rank 32, alpha 32, 5000 steps) is the preset, and it is load-bearing. Every time I tuned it I made it worse.
+Text-to-video, image-to-video, and audio-to-video, all delivered as MP4 with joint audio (lip-sync, footsteps, ambience) in a single diffusion pass. Output is 1280×720 after the built-in 2× upscale. Character mode renders against the Q8 dev transformer with a fused character LoRA; the server-side validator refuses Q4 + character to prevent silent identity drift. First/last-frame keyframing and clip extension are available on the Q8 surface, with TeaCache wired through both.
 
-**Audio-to-Video.** New as of today. Drop a WAV or MP3, optionally drop a reference image to anchor frame zero, hit Generate. The audio drives the video. Two-stage pipeline: low-res with CFG, then full-res with the distilled LoRA fused on top. Original input audio is muxed onto the result.
+### Image Studio
 
-**LoRAs and CivitAI.** Drop `.safetensors` into `mlx_models/loras/`, or browse and install LTX 2.3 LoRAs from CivitAI inside the panel. Rename, download, and delete from each row.
+Two MLX-native engines share the same tab and the same GPU memory pool. Qwen-Image-Edit-2511 handles instruction edits ("change the white jacket to red") and multi-subject composition with up to three reference images. HiDream-O1-Image-Dev handles photoreal at HD — the MLX port of HiDream-O1 ships with Phosphene (8B Qwen3-VL backbone, unified pixel-patch transformer, MIT-licensed; weights at `mlx-community/HiDream-O1-Image-Dev-mlx-bf16`). It lives in a sibling clone, loaded on demand. Both engines drop cards into a unified gallery, each with an Animate button that pre-fills the I2V form with the source still.
+
+### Train Character
+
+End-to-end LoRA training inside the panel. The dataset uploader accepts 15 to 500 images per character. Captions are written by a local Gemma 3 12B (MLX, 4-bit) in roughly 90 seconds for a 37-image dataset, in the `[VISUAL]: <trigger>, <description>` format the LTX trainer expects. The default recipe is rank 32, alpha 32, 100 epochs, lr 1e-4, 512 px resolution, letterbox crop; total step count auto-scales with the dataset (e.g. 50 images → 5000 steps, 100 images → 10000 steps) so adding photos doesn't shift the trained-epochs target. Power users can override any of those in an advanced section. Optional voice LoRA from the same training run.
+
+### Audio-to-Video
+
+New workflow tab in 3.0. WAV or MP3 in, MP4 out — the audio drives motion in the generated video, and an optional reference image anchors frame zero. The pipeline runs in two stages: low-resolution with classifier-free guidance, then full-resolution with the distilled LoRA fused on top. The original input audio is muxed onto the final clip so the result is a single self-contained MP4. Requires Q8 + ≥64 GB unified memory.
+
+### LoRAs
+
+Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX 2.3 LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
 
 ## Hardware
 
@@ -43,7 +55,7 @@ Apple Silicon only. MLX is Apple-only by design.
 | 80 to 119 GB | Roomy | Most modes at full size. FFLF and Extend up to 1024 px. |
 | 120 GB+ | Studio | No size limits. |
 
-LTX 2.3's working memory is real. Standard 1280x704 generation peaks around 22 GiB resident. HQ with the Q8 dev transformer is closer to 38 GiB. Tier detection is at boot, from `body[data-cap-tier="q4|q8"]`, and the panel hides things rather than greying them out. If you want to see what the Q4 surface looks like from a 64 GB machine, set `LTX_FORCE_CAP_TIER=q4`.
+Working-memory footprint is non-negotiable: standard 1280×704 generation peaks at roughly 22 GiB resident, and HQ with the Q8 dev transformer at roughly 38 GiB. Tier is detected once at boot from RAM and exposed to the UI via `body[data-cap-tier="q4|q8"]`. Set `LTX_FORCE_CAP_TIER=q4` to preview the Compact surface from a higher-tier machine.
 
 ## Install
 
@@ -113,9 +125,9 @@ HF_HUB_ENABLE_HF_TRANSFER=1 ./ltx-2-mlx/env/bin/hf download \
 
 About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to `v0.14.0` — upstream is about to ship breaking changes. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against.
 
-## Using it
+## Interface
 
-There are four workflow tabs at the top: **Video**, **Images**, **Audio**, **Train Character**. Each one is a single page.
+Four workflow tabs at the top of the panel: Video, Images, Audio, Train Character. Each is a single page; the helper subprocess and model state persist across tab switches.
 
 <table>
 <tr>
@@ -136,26 +148,27 @@ There are four workflow tabs at the top: **Video**, **Images**, **Audio**, **Tra
 </tr>
 </table>
 
-A few things worth knowing as you go:
+Prompting notes:
 
-- **Video, text mode.** Describe the soundscape the same way you describe the scene. The audio generation reads your prompt.
-- **Video, image mode.** Prompt with motion beats, not the still-image description. About one beat per two to three seconds of clip.
-- **Video, character mode.** Pick an avatar, include your trigger word in the prompt. Q8 Draft (736x416) for iteration, Q8 Pro (1024x576) for final.
-- **Images.** Drop one to three references for edit or multi-ref work. Empty zone is text-only. Qwen-Image-Edit handles instructions like "change the white jacket to red" while preserving the rest of the scene.
-- **Train Character.** Center crop is for tight portraits. Letterbox is for wide-shot proportions. The rank-32, alpha-32, 5000-step preset is the one I'd start with.
+- Video / text mode: describe sound the same way you describe scene; the audio path reads the same prompt as the visual.
+- Video / image mode: prompt with motion beats rather than describing the still. Roughly one beat per 2–3 seconds of clip length.
+- Video / character mode: select an avatar from the picker, include the trigger word in the prompt. Q8 Draft (736×416) for iteration, Q8 Pro (1024×576 → 1280×720 final) for delivery.
+- Images: zero to three reference slots. Empty zone is text-to-image. Qwen-Image-Edit instructions are read literally — "change the white jacket to red" preserves the rest of the scene.
+- Train Character: center crop for tight portraits, letterbox for wide-shot proportions. The default preset (rank 32, alpha 32, 100 epochs, lr 1e-4) is validated end-to-end and recommended as the starting point.
 
 ## Migrating from 2.0
 
-Quit Pinokio (or the panel terminal), then **Update**, then **Start**. Renders, settings, queue, models, and LoRAs all survive (Pinokio's `fs.link` persistent drive). The first update can take a few minutes.
+Quit Pinokio (or the panel terminal), then click Update, then Start. Renders, settings, queue, models, and LoRAs all persist across the upgrade via Pinokio's `fs.link` persistent drive. The first update takes a few minutes.
 
-> **If you came from 2.0 and Train Character or auto-caption look broken after the first Update, click Update once more.** The first run uses the old 2.0 update script that already sits on your disk; only after that does the new 3.0 script land. Running Update a second time installs the trainer and mlx-vlm packages 3.0 added.
+> **Click Update twice on the first v2 → v3 upgrade.** Pinokio loads the user's existing on-disk `update.js` before pulling the new one, which means the v2.x script runs first and doesn't install the new dependencies (ltx-trainer package, mlx-vlm, the trainer's transitive deps). The second Update click runs the new 3.0 script and installs everything. This only applies to the very first migration from a v2.x install.
 
-A few other things worth knowing about 3.0:
+Behavioral changes worth noting in 3.0:
 
-- Character is its own mode pill on Video now, not a buried chip.
-- Q8 HQ is the default for character clips. The server refuses Q4 with a character selected, so identity can't silently degrade.
-- TeaCache is wired through Extend and A2V stage 1.
-- Vertical-player chrome lives outside the right edge, so 9:16 clips aren't covered.
+- Character is a first-class mode pill on the Video tab, no longer a chip nested inside T2V.
+- Q8 HQ is the default quality for character renders. The server-side validator rejects Q4 + character combinations to prevent identity-degraded output.
+- TeaCache is wired through both Extend and Audio-to-Video stage 1.
+- Vertical-player chrome is positioned outside the right edge so 9:16 clips are no longer occluded by controls.
+- Training presets now scale step count by `epochs × image_count`. The 100-epoch "high" preset that produced the validated v2 LoRAs preserves its shape regardless of dataset size.
 
 ## What's in the repo
 
@@ -166,24 +179,24 @@ A few other things worth knowing about 3.0:
 - `lora_lab/` is vendored from the [`lora-lab`](https://github.com/mrbizarro/lora-lab) authoring tree. Training works out of the box; set `LTX_LORA_LAB_ROOT` to iterate against an external clone.
 - `mlx_models/` and `mlx_outputs/` both persist across Pinokio Reset via fs.link.
 
-I also ported [HiDream-O1-Image-Dev BF16](https://huggingface.co/mlx-community/HiDream-O1-Image-Dev-mlx-bf16) (8B Qwen3-VL backbone, unified pixel-patch transformer, MIT) for the Images tab. HiDream is a separate one-time clone (see Setup below).
+An MLX port of [HiDream-O1-Image-Dev BF16](https://huggingface.co/mlx-community/HiDream-O1-Image-Dev-mlx-bf16) (8B Qwen3-VL backbone, unified pixel-patch transformer, MIT) is included for the Image tab. HiDream lives in a sibling clone (see Setup).
 
 ## License and credits
 
-Panel: MIT, see [LICENSE](LICENSE). LTX Video 2.3 weights: Lightricks' license. MLX: Apache 2.0. Gemma 3 12B: Google's terms. PiperSR: AGPL-3.0.
+Panel: MIT, see [LICENSE](LICENSE). LTX-Video 2.3 weights: Lightricks' license. MLX: Apache 2.0. Gemma 3 12B: Google's terms. PiperSR: AGPL-3.0.
 
-Phosphene is a wrapper over good model work. The names that matter:
+Phosphene depends on the following projects:
 
-- [Lightricks](https://github.com/Lightricks/LTX-Video) for LTX 2.3 and the joint audio-plus-video architecture
-- [@dgrauet](https://github.com/dgrauet/ltx-2-mlx) for the MLX port. The reason any of this runs on Apple Silicon.
-- [Apple ML team](https://github.com/ml-explore/mlx) for MLX
-- [HiDream-ai](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) for HiDream-O1 weights and the reference implementation
-- [filipstrand/mflux](https://github.com/filipstrand/mflux) for the MLX-native FLUX and Qwen-Edit family
-- [mlx-community](https://huggingface.co/mlx-community) for Gemma 3 12B 4-bit
-- [ModelPiper / PiperSR](https://github.com/ModelPiper/PiperSR) for optional 2x upscale on the Apple Neural Engine
-- [@cocktailpeanut](https://twitter.com/cocktailpeanut) for Pinokio
+- [Lightricks](https://github.com/Lightricks/LTX-Video) — LTX 2.3 and the joint audio + video architecture
+- [@dgrauet](https://github.com/dgrauet/ltx-2-mlx) — MLX port of LTX-Video; the foundation everything else builds on
+- [Apple ML team](https://github.com/ml-explore/mlx) — MLX
+- [HiDream-ai](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) — HiDream-O1 weights and reference implementation
+- [filipstrand/mflux](https://github.com/filipstrand/mflux) — MLX-native FLUX and Qwen-Edit family
+- [mlx-community](https://huggingface.co/mlx-community) — Gemma 3 12B 4-bit
+- [ModelPiper / PiperSR](https://github.com/ModelPiper/PiperSR) — optional 2× upscale on the Apple Neural Engine
+- [@cocktailpeanut](https://twitter.com/cocktailpeanut) — Pinokio
 
-What Phosphene adds on top: persistent batch queue, warm helper subprocess, hardware-tier feature gating, lossless H.264 output with sidecars, the capability-tier UI surface, the in-panel character training pipeline, the Image tab dispatch and adaptive estimates, and the Pinokio install scripts.
+What Phosphene adds on top of those: a persistent batch queue, a warm helper subprocess with capability-tier feature gating, lossless H.264 output with JSON sidecars, the in-panel character + voice LoRA training pipeline, the Image tab dispatch layer with adaptive wall-time estimates, the agentic prompt-enhancer / shot planner, and the Pinokio install + update lifecycle scripts.
 
 ## Support development
 
