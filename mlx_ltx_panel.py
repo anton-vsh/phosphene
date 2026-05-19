@@ -10406,7 +10406,13 @@ class Handler(BaseHTTPRequestHandler):
                 # per-character subdirectories.
                 if char_cache.is_dir() and char_cache.is_relative_to(_CHARACTERS_CACHE_PATH.resolve()):
                     try:
-                        import shutil
+                        # NOTE: shutil is imported at module level (line 25).
+                        # Do NOT add a local `import shutil` here — Python
+                        # scans the whole function and would mark `shutil`
+                        # as a local across all of do_POST, which made the
+                        # /output/delete handler ~30 lines up raise
+                        # UnboundLocalError on every call. Module-level
+                        # shutil is sufficient for shutil.rmtree below.
                         shutil.rmtree(char_cache)
                         removed.append(str(char_cache))
                     except OSError as e:
