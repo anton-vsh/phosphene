@@ -16226,47 +16226,32 @@ HTML = r"""<!doctype html>
       text-decoration: none;
     }
     body > header .brand img {
-      /* Phosphene brand mark — concentric radiating dashes that go
-         pink → magenta → cyan around a yellow core, on transparent
-         background. Provided by Mr Bizarro (`phospene logo.png` 1254×1254
-         RGBA). Glow re-enabled 2026-05-12 — a soft brand-pink halo
-         that lifts the mark off the navy void without muddying the
-         dashes (uses drop-shadow filter so transparent regions stay
-         transparent). */
-      content: url('/assets/phosphene_brand.png');
-      height: 64px;
-      width: 64px;
+      /* Phosphene brand mark — the rings + wordmark composed as ONE wide
+         banner (1291×392, transparent bg). Replaces the previous setup
+         where the small ring mark (`phosphene_brand.png`) was injected
+         via `content: url()` and the wordmark text was added via
+         `::after` with a CSS gradient. The banner ships both as a
+         single PNG so the gradient + spacing + letterforms are pinned
+         exactly as designed instead of approximated by CSS gradient on
+         a system font. Glow on the whole banner is OK because the PNG
+         has transparent background — drop-shadow only paints where
+         pixels are non-transparent.
+         The natural <img src=""> attribute now wins because nothing
+         overrides it; height controls scale, width auto preserves
+         aspect ratio (banner is ~3.29:1). */
+      height: 80px;
+      width: auto;
+      max-width: 100%;
       display: block;
       filter:
         drop-shadow(0 0 14px rgba(255, 95, 168, 0.55))
         drop-shadow(0 0 6px rgba(79, 214, 255, 0.35));
     }
-    body > header .brand::after {
-      content: 'Phosphene';
-      /* Perceptual gradient: pink → cyan through OKLCh color space. RGB
-         interpolation produces muddy brown/grey mid-tones at large sizes;
-         OKLCh stays on the saturated hue ring (pink → magenta → purple →
-         blue-purple → cyan), which is what reads as a "real" gradient.
-         5-stop fallback for older browsers; modern ones (Safari 16.4+,
-         Chrome 111+) use the in-oklch override below. */
-      background: linear-gradient(92deg,
-        #FF2E9F 0%,
-        #E135C2 25%,
-        #B14AFF 50%,
-        #7777FF 75%,
-        #5EEAFF 100%);
-      background: linear-gradient(in oklch 92deg, #FF2E9F, #5EEAFF);
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
-      font-weight: 700;
-      font-size: 44px;
-      letter-spacing: -0.02em;
-      /* Halo glow matching the gradient endpoints. */
-      text-shadow:
-        0 0 24px rgba(255, 46, 159, 0.32),
-        0 0 10px rgba(94, 234, 255, 0.22);
-    }
+    /* (previous `.brand::after { content: 'Phosphene' }` removed
+       2026-05-19 — wordmark text is now baked into the banner PNG so
+       the panel doesn't need to re-render it via CSS gradient. Kept
+       this comment as a tombstone in case someone greps for the
+       old gradient-text trick.) */
     /* Hide the existing version-badge styling and re-render it Linear-style
        (mono "v2.0" in a chip). Keep the element so the JS doesn't break. */
     body > header .version-badge {
@@ -16910,7 +16895,7 @@ HTML = r"""<!doctype html>
 </svg>
 
 <header>
-  <a href="/" class="brand"><img src="/assets/phosphene_wordmark_compact_transparent.svg" alt="Phosphene"></a>
+  <a href="/" class="brand"><img src="/assets/phosphene_cycle_word_transparent.png" alt="Phosphene"></a>
   <span class="version-badge" title="Phosphene 3.0">3.0</span>
   __PROFILE_BADGE__
   <span class="spacer"></span>
