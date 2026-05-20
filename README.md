@@ -26,10 +26,14 @@ The interface adapts to the machine it runs on. Under 48 GB of unified memory, t
 ## Features
 
 ### Video
+<img width="872" height="141" alt="image" src="https://github.com/user-attachments/assets/f8e6d839-0ef5-4310-8b83-4f0a76a58779" />
+
 
 Text-to-video, image-to-video, and audio-to-video, all delivered as MP4 with joint audio (lip-sync, footsteps, ambience) in a single diffusion pass. Output is 1280×720 after the built-in 2× upscale. Character mode renders against the Q8 dev transformer with a fused character LoRA; the server-side validator refuses Q4 + character to prevent silent identity drift. First/last-frame keyframing and clip extension are available on the Q8 surface, with TeaCache wired through both.
 
 ### Image Studio
+<img width="1920" height="843" alt="image" src="https://github.com/user-attachments/assets/8e2f52de-b34c-44cf-9283-df30c4079607" />
+
 
 Two MLX-native engines share the same tab and the same GPU memory pool. Qwen-Image-Edit-2511 handles instruction edits ("change the white jacket to red") and multi-subject composition with up to three reference images. HiDream-O1-Image-Dev handles photoreal at HD — the MLX port of HiDream-O1 ships with Phosphene (8B Qwen3-VL backbone, unified pixel-patch transformer, MIT-licensed; weights at `mlx-community/HiDream-O1-Image-Dev-mlx-bf16`). It lives in a sibling clone, loaded on demand. Both engines drop cards into a unified gallery, each with an Animate button that pre-fills the I2V form with the source still.
 
