@@ -23755,6 +23755,24 @@ function _relTimeFromMtime(mtime) {
   return Math.round(sec / 86400) + ' d ago';
 }
 
+// Helper — look up an output entry by path across BOTH the polled
+// top-60 (currentOutputs) and the older pool loaded via /outputs (when
+// Show all or the auto-fetch has fired). Three callers needed this
+// after d29de9c started surfacing older photos automatically — without
+// it they hit the currentOutputs-only path, which returns undefined
+// for any older entry and falls through to broken codepaths:
+// - selectOutput: falls back to /file?path=, wraps a PNG in <video>,
+//   browser stalls trying to play a still image as video (the "super
+//   slow preview" report immediately after d29de9c shipped).
+// - openExpandLightbox: bails out, lightbox never opens.
+// - animateActive: animates with no sidecar prompt for older photos.
+function findOutputByPath(path) {
+  let o = currentOutputs.find(x => x.path === path);
+  if (!o && window._olderOutputs && window._olderOutputs.length) {
+    o = window._olderOutputs.find(x => x.path === path);
+  }
+  return o || null;
+}
 function selectOutput(path) {
   activePath = path;
   document.querySelectorAll('.car-card').forEach(el => el.classList.toggle('active', el.dataset.path === path));
@@ -23764,7 +23782,7 @@ function selectOutput(path) {
   // cache-bust v=N param) instead of reconstructing from path. Otherwise
   // the player ends up on the cached stale-bytes URL and re-shows black
   // until the browser cache expires.
-  const o = currentOutputs.find(x => x.path === path);
+  const o = findOutputByPath(path);
   const isPhoto = isPhotoOutputMain(o);
   // Photo entries don't go through /file (which is OUTPUT-bound and
   // serves video with Range headers). Use /image which supports both
@@ -23859,7 +23877,7 @@ function selectOutput(path) {
 // both image and video. Closed by Esc, backdrop click, or the × button.
 function openExpandLightbox() {
   if (!activePath) return;
-  const o = currentOutputs.find(x => x.path === activePath);
+  const o = findOutputByPath(activePath);
   if (!o) return;
   const lb = document.getElementById('expandLightbox');
   const stage = document.getElementById('expandStage');
@@ -23964,7 +23982,7 @@ function phosToast(message, opts) {
 // the user can type their own.
 async function animateActive() {
   if (!activePath) return;
-  const o = currentOutputs.find(x => x.path === activePath);
+  const o = findOutputByPath(activePath);
   let prompt = '';
   if (o && o.has_sidecar) {
     try {
