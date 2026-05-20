@@ -18019,11 +18019,13 @@ HTML = r"""<!doctype html>
           <span class="h2-hint">character identity, or a visual style</span>
         </h2>
         <div class="pill-group cols-2" id="trainTypeGroup">
-          <button type="button" class="pill-btn active" data-train-type="character">
+          <button type="button" class="pill-btn active" data-train-type="character"
+                  onclick="setTrainType('character')">
             <span>Character</span>
             <span class="sub">face (+ voice) of one person</span>
           </button>
-          <button type="button" class="pill-btn" data-train-type="style">
+          <button type="button" class="pill-btn" data-train-type="style"
+                  onclick="setTrainType('style')">
             <span>Style</span>
             <span class="sub">cinematic look · color · lighting</span>
           </button>
@@ -20940,7 +20942,9 @@ function trainInit() {
     TRAIN.initialised = true;
     trainWireDropZone();
     trainWireBundleDropZone();
-    trainWireTrainType();
+    // Note: train-type pill clicks are now handled by `setTrainType()`
+    // wired directly via the buttons' onclick=, not via this init
+    // path. See setTrainType definition below for context.
     trainWirePresetButtons();
     trainWireAdvancedFields();
     trainWireVoice();
@@ -20965,54 +20969,48 @@ function trainInit() {
   trainGuidanceRestore();
 }
 
-// Wires the Train-type pill group (Character / Style). Without this the
-// pills had no JS handler and clicking Style did nothing — train_type
-// stayed locked to 'character' on the form, the voice card stayed
-// visible, and POSTing a style training was impossible from the UI.
-// Reported 2026-05-20 by Mr Bizarro ("not clickable and not working").
+// Train-type pill click handler. Top-level (not behind trainInit's
+// initialised-once gate) so it always works regardless of how the user
+// got to the Train tab — including page reloads where the JS engine
+// kept a previous TRAIN.initialised=true in memory. Same pattern as
+// setMode / setQuality / setAccel (direct onclick from the HTML).
 //
-// On click:
-//   1. Toggle `.active` between the two pills
-//   2. Update TRAIN.trainType so trainActivePresets() reads the right table
-//   3. Show/hide the guidance bodies (character vs style — both already
-//      shipped in the HTML, the style one was just `hidden` by default)
-//   4. Hide the voice card for style (styles don't have voices)
-//   5. Refresh the start button label + estimate + button state so the
-//      UI re-renders with the new train type
-function trainWireTrainType() {
+// First attempt (d1a8f9e, addEventListener inside trainInit) was
+// reported as still-not-clickable on 2026-05-20; suspect the gate
+// kept it from firing on subsequent train-tab opens. Direct onclick
+// at the button is bulletproof.
+window.setTrainType = function(t) {
+  if (t !== 'character' && t !== 'style') return;
+  // 1. Toggle .active across the pill group
   const group = document.getElementById('trainTypeGroup');
-  if (!group) return;
-  const pills = group.querySelectorAll('.pill-btn[data-train-type]');
-  pills.forEach((b) => {
-    b.addEventListener('click', () => {
-      const t = b.dataset.trainType;
-      if (t !== 'character' && t !== 'style') return;
-      // 1. Toggle .active
-      pills.forEach((p) => p.classList.toggle('active', p === b));
-      // 2. State
-      TRAIN.trainType = t;
-      // Reset preset to the new table's "quick" — preset name "quick" exists
-      // in both TRAIN.presets and TRAIN.stylePresets so this is safe.
-      if (TRAIN.preset && !(t === 'style' ? TRAIN.stylePresets : TRAIN.presets)[TRAIN.preset]) {
-        TRAIN.preset = 'quick';
-      }
-      // 3. Swap guidance bodies
-      const gc = document.getElementById('trainGuidanceBodyCharacter');
-      const gs = document.getElementById('trainGuidanceBodyStyle');
-      if (gc) gc.hidden = (t === 'style');
-      if (gs) gs.hidden = (t !== 'style');
-      // 4. Hide voice card for style
-      const vc = document.getElementById('trainVoiceCard');
-      if (vc) vc.hidden = (t === 'style');
-      // 5. Re-render downstream UI
-      if (typeof trainUpdatePresetButtons === 'function') trainUpdatePresetButtons();
-      if (typeof trainUpdateAdvancedFields === 'function') trainUpdateAdvancedFields();
-      trainUpdateEstimate();
-      trainUpdateButtonState();
-      trainUpdateStartLabel();
+  if (group) {
+    group.querySelectorAll('.pill-btn[data-train-type]').forEach((p) => {
+      p.classList.toggle('active', p.dataset.trainType === t);
     });
-  });
-}
+  }
+  // 2. State
+  if (typeof TRAIN === 'object' && TRAIN) {
+    TRAIN.trainType = t;
+    // Reset preset to "quick" if the new type's table doesn't carry the
+    // current preset name. (Both tables have "quick" so this is safe.)
+    const table = (t === 'style') ? TRAIN.stylePresets : TRAIN.presets;
+    if (table && !table[TRAIN.preset]) TRAIN.preset = 'quick';
+  }
+  // 3. Swap guidance bodies (both shipped in HTML; one starts hidden)
+  const gc = document.getElementById('trainGuidanceBodyCharacter');
+  const gs = document.getElementById('trainGuidanceBodyStyle');
+  if (gc) gc.hidden = (t === 'style');
+  if (gs) gs.hidden = (t !== 'style');
+  // 4. Hide voice card for style (styles don't have voices)
+  const vc = document.getElementById('trainVoiceCard');
+  if (vc) vc.hidden = (t === 'style');
+  // 5. Re-render downstream UI bits if they exist
+  if (typeof trainUpdatePresetButtons === 'function') trainUpdatePresetButtons();
+  if (typeof trainUpdateAdvancedFields === 'function') trainUpdateAdvancedFields();
+  if (typeof trainUpdateEstimate === 'function') trainUpdateEstimate();
+  if (typeof trainUpdateButtonState === 'function') trainUpdateButtonState();
+  if (typeof trainUpdateStartLabel === 'function') trainUpdateStartLabel();
+};
 
 // "How to train well" guidance — open by default, dismissible. The dismissed
 // state persists in localStorage so power users don't see the panel every
