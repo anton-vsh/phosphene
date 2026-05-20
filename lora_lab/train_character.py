@@ -144,21 +144,43 @@ def resolve_preset(preset: str, advanced: dict[str, Any] | None) -> dict[str, An
     return cfg
 
 
+def _wh_from_advanced(cfg: dict[str, Any]) -> tuple[int, int]:
+    """Resolve (width, height) from a cfg dict.
+
+    Backwards-compat: if `width` and `height` aren't both present, falls
+    back to a square `resolution × resolution` canvas (the legacy v2
+    behavior). The 2026-05-20 widescreen-training change adds independent
+    W/H so character LoRAs can train at the same aspect as inference
+    (1024×576 widescreen) without baking square + letterbox-bar artifacts
+    into the weights.
+    """
+    w = cfg.get("width")
+    h = cfg.get("height")
+    if w and h:
+        return int(w), int(h)
+    res = int(cfg.get("resolution") or 576)
+    return res, res
+
+
 def estimate_wall_seconds(image_count: int, preset: str, advanced: dict[str, Any] | None) -> float:
     """Estimate end-to-end wall seconds for a job.
 
     Formula (panel JS must mirror this exactly):
-        per_step_s   = 2.4 * (res/576)^2 * (0.95 if rank <= 16 else 1.0)
+        per_step_s   = 2.4 * (W*H / 576^2) * (0.95 if rank <= 16 else 1.0)
         preprocess_s = 90 + 2.0 * image_count
         total_s      = preprocess_s + steps * per_step_s
+
+    Pre-2026-05-20 this used (res/576)^2 assuming square training.
+    Widescreen training (e.g. 1024×576) needs the token-budget scale
+    expressed as the actual pixel ratio to match per-step compute.
     """
     cfg = resolve_preset(preset, advanced)
-    res = int(cfg["resolution"])
+    w, h = _wh_from_advanced({**cfg, **(advanced or {})})
     rank = int(cfg["rank"])
     steps = int(cfg["steps"])
-    res_scale = (res / 576.0) ** 2
+    pixel_scale = (w * h) / (576.0 * 576.0)
     rank_scale = 0.95 if rank <= 16 else 1.0
-    per_step_s = _BASE_STEP_S * res_scale * rank_scale
+    per_step_s = _BASE_STEP_S * pixel_scale * rank_scale
     preprocess_s = _PREPROCESS_FIXED_S + _PREPROCESS_PER_IMAGE_S * image_count
     return preprocess_s + steps * per_step_s
 
@@ -212,6 +234,7 @@ def load_spec(spec_path: Path) -> dict[str, Any]:
     if not isinstance(spec.get("advanced"), dict):
         spec["advanced"] = {}
     for k in ("rank", "alpha", "steps", "lr", "resolution",
+              "width", "height",
               "caption_strategy", "crop_strategy"):
         if k in spec and k not in spec["advanced"]:
             spec["advanced"][k] = spec[k]
@@ -274,11 +297,19 @@ def crop_and_caption(
     images_renamed_dir: Path,
     trigger: str,
     caption_strategy: str,
-    resolution: int,
+    resolution: int | None = None,
     crop_strategy: str = "center",
+    *,
+    width: int | None = None,
+    height: int | None = None,
 ) -> tuple[list[Path], list[str]]:
-    """Scale + (optionally) crop sources to a `resolution`x`resolution` square,
+    """Scale + (optionally) crop sources to a `(width × height)` canvas,
     rename sequentially, write captions.
+
+    Backwards-compat: callers that pass `resolution=N` get a square N×N
+    canvas (legacy v2 behavior). New callers pass `width` + `height`
+    independently to produce non-square canvases that match the
+    inference aspect (e.g. 1024×576 widescreen).
 
     `crop_strategy` ∈ {"center", "letterbox"} controls how non-square sources
     fit into the square training canvas:
@@ -319,7 +350,17 @@ def crop_and_caption(
             f"(want 'center' or 'letterbox')"
         )
 
-    emit("crop_start", total=len(source_files), crop_strategy=crop_strategy)
+    # Resolve target canvas dims. New callers pass width + height
+    # explicitly; legacy callers pass resolution (square fallback).
+    if width and height:
+        target_w, target_h = int(width), int(height)
+    elif resolution:
+        target_w = target_h = int(resolution)
+    else:
+        raise ValueError("crop_and_caption requires width+height or resolution")
+
+    emit("crop_start", total=len(source_files), crop_strategy=crop_strategy,
+         width=target_w, height=target_h)
 
     out_paths: list[Path] = []
     out_captions: list[str] = []
@@ -328,40 +369,35 @@ def crop_and_caption(
         try:
             img = Image.open(src).convert("RGB")
             src_w, src_h = img.size
-            target = resolution
 
             if crop_strategy == "letterbox":
-                # Scale so the LONGER source dim = target. Pad the shorter
-                # dim with black bars to fill the square. Trainer sees a
-                # uniform (target × target) canvas across all samples —
-                # preprocess + dataloader unchanged — but each image
-                # retains its native aspect ratio. Model learns the bars
-                # as a constant feature (they're identical across every
-                # training sample) and the actual subject geometry stays
-                # uncompressed.
-                scale = min(target / src_w, target / src_h)
+                # Scale so the source FITS INSIDE (target_w × target_h)
+                # without distortion. Pad with black to fill the canvas.
+                # On non-square canvases this can produce smaller bars
+                # (or even none, when source aspect matches target).
+                scale = min(target_w / src_w, target_h / src_h)
                 new_w = int(round(src_w * scale))
                 new_h = int(round(src_h * scale))
                 scaled = img.resize((new_w, new_h), Image.LANCZOS)
-                cropped_full = Image.new("RGB", (target, target), (0, 0, 0))
-                paste_x = (target - new_w) // 2
-                paste_y = (target - new_h) // 2
+                cropped_full = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+                paste_x = (target_w - new_w) // 2
+                paste_y = (target_h - new_h) // 2
                 cropped_full.paste(scaled, (paste_x, paste_y))
             else:
-                # "center" — scale-and-center-crop to a SQUARE at
-                # `resolution`. Mirrors the logic in preprocess_images.
-                # _load_image_as_1frame_tensor (square crop is the right
-                # call for character training — the preprocessor will
-                # re-crop to whatever target_h/target_w is configured
-                # downstream; we keep this square + lossless so the same
-                # source can be reused for any preset).
-                scale = max(target / src_w, target / src_h)
+                # "center" — scale-and-center-crop to fill (target_w ×
+                # target_h). Mirrors preprocess_images._load_image_as_1frame_tensor:
+                # scale so the SHORTER side hits its target, then crop
+                # the longer side. On widescreen targets this is the
+                # right call — for portrait sources it center-crops
+                # vertically (head usually survives unless the source
+                # is unusually tall).
+                scale = max(target_w / src_w, target_h / src_h)
                 new_w = int(round(src_w * scale))
                 new_h = int(round(src_h * scale))
                 scaled = img.resize((new_w, new_h), Image.LANCZOS)
-                left = (new_w - target) // 2
-                top = (new_h - target) // 2
-                cropped_full = scaled.crop((left, top, left + target, top + target))
+                left = (new_w - target_w) // 2
+                top = (new_h - target_h) // 2
+                cropped_full = scaled.crop((left, top, left + target_w, top + target_h))
 
             stem = f"char_{i:03d}"
             png_path = images_renamed_dir / f"{stem}.png"
@@ -425,8 +461,11 @@ def run_preprocess(
     images_dir: Path,
     captions_dir: Path,
     output_root: Path,
-    resolution: int,
-    total: int,
+    resolution: int | None = None,
+    total: int = 0,
+    *,
+    width: int | None = None,
+    height: int | None = None,
 ) -> None:
     """Encode images + captions into the layout PrecomputedDataset expects.
 
@@ -434,10 +473,22 @@ def run_preprocess(
     can be intermixed cleanly. We emit a coarse start/end pair; the inner
     preprocessor logs its own prints to stderr (we route them away from
     stdout to keep the JSON-lines stream pure).
+
+    Resolution params: pass `width` and `height` for non-square training
+    (1024×576 widescreen etc.), or pass `resolution=N` for the legacy
+    square N×N canvas. The preprocessor already exposes target_height
+    and target_width independently so this is a contract change only.
     """
     from lora_lab import preprocess_images as pp  # local import — heavy deps
 
-    emit("preprocess_start", total=total)
+    if width and height:
+        target_w, target_h = int(width), int(height)
+    elif resolution:
+        target_w = target_h = int(resolution)
+    else:
+        raise ValueError("run_preprocess requires width+height or resolution")
+
+    emit("preprocess_start", total=total, width=target_w, height=target_h)
 
     # Pipe inner module's stdout into stderr so JSON-lines on our stdout
     # stay clean. The preprocessor uses bare print(); duplicate fd2.
@@ -451,8 +502,8 @@ def run_preprocess(
             # this the preprocessor falls back to the HF repo id and
             # may duplicate-download ~6 GB to HF_HOME (or fail offline).
             gemma_model_id=DEFAULT_TEXT_ENCODER,
-            target_height=resolution,
-            target_width=resolution,
+            target_height=target_h,
+            target_width=target_w,
             captions_dir=str(captions_dir),
             caption_ext=".txt",
         )
@@ -678,13 +729,21 @@ def write_sidecar(
         "alpha": int(cfg["alpha"]),
         "steps": int(cfg["steps"]),
         "lr": float(cfg["lr"]),
-        "resolution": int(cfg["resolution"]),
+        # Legacy `resolution` field — kept for backwards-compat with
+        # consumers that still read it. Set to width when widescreen,
+        # to the single square value when legacy.
+        "resolution": int(cfg.get("width") or cfg.get("resolution") or 576),
+        "width": int(cfg.get("width") or cfg.get("resolution") or 576),
+        "height": int(cfg.get("height") or cfg.get("resolution") or 576),
         "image_count": image_count,
         "caption_strategy": cfg["caption_strategy"],
         "training_wall_seconds": round(float(training_wall_s), 1),
         "created_at": _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "base_model": "Lightricks/LTX-2.3 (dgrauet/ltx-2.3-mlx-q4 dev transformer)",
-        "training_resolution": [int(cfg["resolution"]), int(cfg["resolution"])],
+        "training_resolution": [
+            int(cfg.get("width") or cfg.get("resolution") or 576),
+            int(cfg.get("height") or cfg.get("resolution") or 576),
+        ],
         "lora_lab_version": "iter5",
         "loadable_via": "ltx_core_mlx.loader.fuse_loras.apply_loras",
     }
@@ -761,12 +820,21 @@ def run_pipeline(spec_path: Path) -> int:
         )
         crop_strategy = "center"
 
-    # Validate resolution.
-    resolution = int(cfg["resolution"])
-    if resolution % 32 != 0:
+    # Resolve target dims (width × height). Spec may provide `width`
+    # and `height` independently (widescreen training, 2026-05-20+) OR
+    # a legacy `resolution` which is interpreted as a square canvas.
+    target_w, target_h = _wh_from_advanced(cfg)
+    if target_w % 32 != 0 or target_h % 32 != 0:
         emit_error_and_exit(
-            "config", f"resolution {resolution} must be divisible by 32"
+            "config",
+            f"target dims {target_w}×{target_h} must both be divisible by 32",
         )
+    # Stamp resolved dims back onto cfg so downstream sidecar + estimator
+    # see consistent values even when only `resolution` was set.
+    cfg["width"] = target_w
+    cfg["height"] = target_h
+    # Legacy single-int — keep for any consumer that still reads it.
+    resolution = target_w  # NB: when widescreen, this is just the WIDTH
 
     # Source images.
     try:
@@ -808,7 +876,8 @@ def run_pipeline(spec_path: Path) -> int:
             images_renamed_dir=images_renamed_dir,
             trigger=trigger,
             caption_strategy=caption_strategy,
-            resolution=resolution,
+            width=target_w,
+            height=target_h,
             crop_strategy=crop_strategy,
         )
     except Exception as exc:  # noqa: BLE001
@@ -820,7 +889,8 @@ def run_pipeline(spec_path: Path) -> int:
             images_dir=images_renamed_dir,
             captions_dir=captions_dir,
             output_root=data_root,
-            resolution=resolution,
+            width=target_w,
+            height=target_h,
             total=len(renamed),
         )
     except Exception as exc:  # noqa: BLE001

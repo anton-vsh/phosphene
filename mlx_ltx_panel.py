@@ -4428,7 +4428,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # power-user escape hatch.
         steps = _int_or("steps", _preset_steps_for(cfg, image_count))
         lr = _float_or("lr", cfg["lr"])
+        # Training canvas dims. Form may pass `width` and `height`
+        # independently (widescreen training added 2026-05-20), in which
+        # case `resolution` becomes informational only. Otherwise legacy
+        # square: width = height = resolution.
         resolution = _int_or("resolution", cfg["resolution"])
+        train_width = _int_or("width", 0) or resolution
+        train_height = _int_or("height", 0) or resolution
         caption_strategy = (f("caption_strategy", "trigger_simple")
                             or "trigger_simple").lower()
         # Crop strategy for the training preprocess.
@@ -4492,6 +4498,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "steps": steps,
                 "lr": lr,
                 "resolution": resolution,
+                "width": train_width,
+                "height": train_height,
                 "caption_strategy": caption_strategy,
                 "crop_strategy": crop_strategy,
                 "image_count": image_count,
@@ -5348,6 +5356,13 @@ def run_train_job_inner(job: dict) -> None:
     # care which it is.
     spec_schema = ("phosphene/train_style@1" if is_style
                    else "phosphene/train_character@1")
+    # Resolve training canvas dims (width × height). Spec may carry
+    # `width` and `height` independently (widescreen training, added
+    # 2026-05-20 after the elontrn v3 diagnostic showed square-trained
+    # LoRAs degrade on widescreen inference). Falls back to legacy
+    # `resolution` for backwards-compat with v2 spec consumers.
+    _train_w = p.get("width") or p.get("resolution")
+    _train_h = p.get("height") or p.get("resolution")
     spec = {
         "schema": spec_schema,
         "job_id": train_job_id,
@@ -5357,7 +5372,14 @@ def run_train_job_inner(job: dict) -> None:
         "rank": p.get("rank"),
         "steps": p.get("steps"),
         "lr": p.get("lr"),
-        "resolution": p.get("resolution"),
+        # `resolution` is the legacy v2 field — keep it for back-compat
+        # (some external tools still read it). For widescreen training
+        # we just write the width into this slot; consumers reading
+        # `width`/`height` get the truth, consumers reading `resolution`
+        # see a sane single number.
+        "resolution": _train_w,
+        "width": _train_w,
+        "height": _train_h,
         "caption_strategy": caption_strategy,
         "crop_strategy": p.get("crop_strategy", "center"),
         "images_dir": str(images_dir),
