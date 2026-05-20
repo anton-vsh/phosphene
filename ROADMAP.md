@@ -117,6 +117,38 @@ The new default TC=1.8 (reverted from a wrongly-calibrated 1.0 on
 may want to dial it for specific scenes. Expose `teacache_thresh`
 as a slider on the advanced section of the Generate form.
 
+### `[ ]` HDR via IC-LoRA pipeline
+
+The HDR toggle shipped in v2 (commit 2d5e0ad) but never worked: it was
+wired through the regular `_pending_loras` fusion hook on the standard
+T2V/I2V/HQ pipelines. The Lightricks HDR LoRA is actually an **IC-LoRA**
+(in-context LoRA) — it needs the dedicated `ICLoraPipeline`
+(`ltx_pipelines_mlx.ic_lora`), a reference video for the conditioning
+input, AND a LogC3 pre/post transform to land 16-bit dynamic range in
+the normal number range. Without all three pieces, the LoRA fuses
+silently and produces no HDR effect. The UI toggle was removed in v3.0
+to stop misleading users.
+
+Proper implementation lands when we wire:
+1. The `ICLoraPipeline` class into `mlx_warm_helper.py` (it exists
+   upstream — just needs to be hooked).
+2. A reference-video source. For pure T2V/I2V, run a low-res Stage 1
+   render first and use that as the IC reference (matches what the
+   Lightricks ComfyUI workflow does).
+3. LogC3 transform application in the post-process step.
+4. Re-expose the HDR pill in the UI (commented out HTML at
+   `mlx_ltx_panel.py:17310`).
+
+The HDR LoRA repo also ships a companion `scene-emb.safetensors` file —
+need to investigate whether it's required or optional.
+
+### `[ ]` Motion-Track and Union Control IC-LoRAs
+
+Both are listed in `CURATED_LORAS` and pass the same gated-repo
+machinery as HDR — they're also IC-LoRAs and won't work until the
+above IC-LoRA pipeline plumbing lands. Add toggles + a "reference
+video" picker to expose them properly once the infrastructure is in.
+
 ## Mid term
 
 ### `[ ]` In-panel "Report bug" button

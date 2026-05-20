@@ -17307,12 +17307,29 @@ HTML = r"""<!doctype html>
             <span id="avoidToggleLabel">Avoid +</span>
           </button>
           <span class="ct-spacer"></span>
-          <label class="toggle-pill" id="hdrPill"
-                 title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer. First HDR job spawns a one-time download (~120 MB) of the LoRA weights from Hugging Face, then renders share the cache.">
-            <input type="checkbox" id="hdr" name="hdr">
-            <span class="toggle-dot"></span>
-            <span>HDR</span>
-          </label>
+          <!-- HDR toggle hidden 2026-05-20 (Mr Bizarro: "HDR is not working
+               and never worked, actually never"). The Lightricks HDR LoRA
+               is an IC-LoRA: it needs the dedicated ICLoraPipeline
+               (upstream ltx_pipelines_mlx.ic_lora), a reference video for
+               the in-context conditioning input, AND LogC3 pre/post
+               transforms to actually produce HDR output. The toggle was
+               wired through the regular _pending_loras hook on the
+               standard pipelines — which loads the weights but never
+               fires the conditioning path, so the LoRA silently does
+               nothing. Hidden in the UI + path stays in the backend for
+               when proper IC-LoRA support is implemented (tracked in
+               ROADMAP.md). The hidden input still exists below so any
+               saved-form state / API callers that include `hdr=on`
+               degrade gracefully (server ignores it on the standard
+               pipelines as before).
+            <label class="toggle-pill" id="hdrPill"
+                   title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer.">
+              <input type="checkbox" id="hdr" name="hdr">
+              <span class="toggle-dot"></span>
+              <span>HDR</span>
+            </label>
+          -->
+          <input type="hidden" id="hdr" name="hdr" value="off">
           <label class="toggle-pill" id="noMusicPill"
                  title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
             <input type="checkbox" id="noMusic" name="no_music">
