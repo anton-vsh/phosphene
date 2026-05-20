@@ -4705,15 +4705,22 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # the advanced fields.
             "stage1_steps": max(1, int(f("stage1_steps", "10") or 10)),
             "stage2_steps": max(0, int(f("stage2_steps", "3") or 3)),
-            # HQ TeaCache default — 1.0 is the calibrated sweet spot per
-            # ti2vid_two_stages_hq.LTX2_HQ_TEACACHE_THRESH ("~52% skip,
-            # ~2× speedup, sweet spot"). 2.0 was the panel's previous
-            # default and sat WAY past the calibration cliff at ~1.0,
-            # causing near-100% skip rate — late denoise steps reused
-            # ancient cached residuals and produced visible ghost-frame
-            # fusion (two faces, motion smear). Mr Bizarro caught this
-            # in a real render on 2026-05-18.
-            "teacache_thresh": float(f("teacache_thresh", "1.0") or 1.0),
+            # HQ TeaCache default — 1.8 is the empirically-measured sweet
+            # spot for character mode. The upstream calibration constant
+            # (LTX2_HQ_TEACACHE_THRESH) claims 1.0 is optimal, but that
+            # number was calibrated for non-character content; character
+            # LoRA fusion changes the latent dynamics such that 1.0
+            # produces a regression:
+            #   - 2.0 → ghost frames (cliff overshoot, ~100% skip)
+            #   - 1.0 → comparison overhead with little actual caching;
+            #           runs SLOWER than TC=0.0 and produces dust specks
+            #   - 1.8 → clean caching, ~5 min wall vs ~6.3 min at 1.0,
+            #           visibly cleaner output (matches Bizarrotrn v2 and
+            #           Salotrn v2 era when 1.8 shipped as default)
+            # Mr Bizarro confirmed visually 2026-05-20 on the elontrn v3
+            # diagnostic batch. Revert from the ill-calibrated 1.0 back
+            # to 1.8.
+            "teacache_thresh": float(f("teacache_thresh", "1.8") or 1.8),
             "cfg_scale": float(f("cfg_scale", "3.0") or 3.0),
             # Bongmath inner-loop cap for HQ res_2s sampler. Default 100
             # (matches upstream). Lower values save latent algebra time
@@ -6261,9 +6268,10 @@ def run_job_inner(job: dict) -> None:
         if int(p.get("stage1_steps") or 10) == 15:
             p["stage1_steps"] = 10
         p.setdefault("stage2_steps", 3)
-        # No teacache_thresh override — let the upstream default of 1.0
-        # (calibrated) win unless the user explicitly asks for something
-        # else via the form.
+        # No teacache_thresh override here — the make_job default (1.8
+        # empirical sweet spot for character mode, see line ~4716) flows
+        # through unless the user explicitly asks for something else
+        # via the form.
 
     temporal_mode = (p.get("temporal_mode") or "native").strip().lower()
     if temporal_mode not in ("native", "fps12_interp24"):
@@ -6395,10 +6403,10 @@ def run_job_inner(job: dict) -> None:
                 # by mistake (copy from standard params); fixed here.
                 "stg_scale": 0.0,
                 "enable_teacache": True,
-                # HQ TeaCache default — see make_job comment. 1.0 is the
-                # calibrated sweet spot; 2.0 (prior default) sat past the
-                # skip cliff and produced ghost-frame artifacts.
-                "teacache_thresh": float(p.get("teacache_thresh", 1.0)),
+                # HQ TeaCache default — see make_job comment. 1.8 is the
+                # empirical sweet spot for character mode (revert from
+                # 1.0 after the 2026-05-20 elontrn v3 diagnostic).
+                "teacache_thresh": float(p.get("teacache_thresh", 1.8)),
                 "bongmath_max_iter": int(p.get("bongmath_max_iter", 100)),
                 "video_skip_step": int(p.get("video_skip_step", 0)),
                 "audio_skip_step": int(p.get("audio_skip_step", 0)),
@@ -9279,9 +9287,11 @@ class Handler(BaseHTTPRequestHandler):
                 "temporal_mode": ["native"],
                 "stage1_steps": [_val("stage1_steps", "10")],
                 "stage2_steps": [_val("stage2_steps", "3")],
-                # HQ TeaCache default — was 1.8 (past calibrated cliff
-                # at ~1.0). Matches the /run + make_job default now.
-                "teacache_thresh": [_val("teacache_thresh", "1.0")],
+                # HQ TeaCache default — 1.8 is the empirical sweet spot for
+                # character mode (see make_job comment). Reverted from 1.0
+                # after the 2026-05-20 elontrn v3 diagnostic confirmed 1.0
+                # produces specks + slower wall than 1.8.
+                "teacache_thresh": [_val("teacache_thresh", "1.8")],
                 "cfg_scale": [_val("cfg_scale", "3.0")],
                 "bongmath_max_iter": [_val("bongmath_max_iter", "100")],
                 "video_skip_step": [_val("video_skip_step", "1")],
