@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/phos_01_video_tab.png" alt="Phosphene panel — Video tab" width="100%">
+<img width="1920" height="993" alt="image" src="https://github.com/user-attachments/assets/0c504d54-1666-4a64-8872-7d471682c8f0" />
+
 </p>
 
 ## Overview
