@@ -20940,6 +20940,7 @@ function trainInit() {
     TRAIN.initialised = true;
     trainWireDropZone();
     trainWireBundleDropZone();
+    trainWireTrainType();
     trainWirePresetButtons();
     trainWireAdvancedFields();
     trainWireVoice();
@@ -20962,6 +20963,55 @@ function trainInit() {
   trainUpdateStartLabel();
   trainCheckPreflight();
   trainGuidanceRestore();
+}
+
+// Wires the Train-type pill group (Character / Style). Without this the
+// pills had no JS handler and clicking Style did nothing — train_type
+// stayed locked to 'character' on the form, the voice card stayed
+// visible, and POSTing a style training was impossible from the UI.
+// Reported 2026-05-20 by Mr Bizarro ("not clickable and not working").
+//
+// On click:
+//   1. Toggle `.active` between the two pills
+//   2. Update TRAIN.trainType so trainActivePresets() reads the right table
+//   3. Show/hide the guidance bodies (character vs style — both already
+//      shipped in the HTML, the style one was just `hidden` by default)
+//   4. Hide the voice card for style (styles don't have voices)
+//   5. Refresh the start button label + estimate + button state so the
+//      UI re-renders with the new train type
+function trainWireTrainType() {
+  const group = document.getElementById('trainTypeGroup');
+  if (!group) return;
+  const pills = group.querySelectorAll('.pill-btn[data-train-type]');
+  pills.forEach((b) => {
+    b.addEventListener('click', () => {
+      const t = b.dataset.trainType;
+      if (t !== 'character' && t !== 'style') return;
+      // 1. Toggle .active
+      pills.forEach((p) => p.classList.toggle('active', p === b));
+      // 2. State
+      TRAIN.trainType = t;
+      // Reset preset to the new table's "quick" — preset name "quick" exists
+      // in both TRAIN.presets and TRAIN.stylePresets so this is safe.
+      if (TRAIN.preset && !(t === 'style' ? TRAIN.stylePresets : TRAIN.presets)[TRAIN.preset]) {
+        TRAIN.preset = 'quick';
+      }
+      // 3. Swap guidance bodies
+      const gc = document.getElementById('trainGuidanceBodyCharacter');
+      const gs = document.getElementById('trainGuidanceBodyStyle');
+      if (gc) gc.hidden = (t === 'style');
+      if (gs) gs.hidden = (t !== 'style');
+      // 4. Hide voice card for style
+      const vc = document.getElementById('trainVoiceCard');
+      if (vc) vc.hidden = (t === 'style');
+      // 5. Re-render downstream UI
+      if (typeof trainUpdatePresetButtons === 'function') trainUpdatePresetButtons();
+      if (typeof trainUpdateAdvancedFields === 'function') trainUpdateAdvancedFields();
+      trainUpdateEstimate();
+      trainUpdateButtonState();
+      trainUpdateStartLabel();
+    });
+  });
 }
 
 // "How to train well" guidance — open by default, dismissible. The dismissed
@@ -21686,6 +21736,13 @@ async function trainStart() {
   }
   const fd = new URLSearchParams();
   fd.set('train_job_id', TRAIN.jobId);
+  // train_type drives whether the /train/start server treats this as
+  // a character (face + optional voice) or a style (look + color +
+  // lighting) training. The pill at the top of the Train tab sets
+  // TRAIN.trainType; without sending it here, the server would default
+  // to 'character' for every submission and clicking Style would
+  // silently train a character LoRA against style frames.
+  fd.set('train_type', TRAIN.trainType || 'character');
   fd.set('trigger', trig);
   fd.set('preset', TRAIN.preset);
   fd.set('image_count', String(TRAIN.images.length));
@@ -21747,6 +21804,7 @@ async function trainStart() {
 // ============================================================
 
 function trainStartLabelText() {
+  if (TRAIN.trainType === 'style') return 'Train Style';
   return (TRAIN.voiceEnabled && TRAIN.voiceFile)
     ? 'Train Character + Voice'
     : 'Train Character';
