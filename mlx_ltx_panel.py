@@ -19255,8 +19255,26 @@ function setMainOutputsFilter(mode) {
   mainOutputsFilter = mode;
   try { localStorage.setItem('phos_main_outputs_filter', mode); } catch (e) {}
   _updateMainFilterChips();
+  // If the user filtered to a kind that's not in the polled top-60 (e.g.
+  // photos when the recent 60 are all videos — a common state after a
+  // big overnight render batch), auto-trigger Show all so the missing
+  // kind loads in from /outputs. Without this, the gallery looks empty
+  // and users assume their photos "disappeared" when they're just
+  // paginated out of the polling default.
+  let visible = filteredMainOutputs();
+  if (visible.length === 0 && mode !== 'all' && !window._showingAllOutputs
+      && typeof outputsLoadAll === 'function') {
+    outputsLoadAll().then(() => {
+      // After Show all loads, the carousel + selection will already be
+      // refreshed by outputsLoadAll's own renderCarousel call.
+      visible = filteredMainOutputs();
+      if (visible.length && !visible.some(o => o.path === activePath)) {
+        selectOutput(visible[0].path);
+      }
+    });
+    return;
+  }
   // If the active selection was filtered out, switch to the first match.
-  const visible = filteredMainOutputs();
   if (visible.length && !visible.some(o => o.path === activePath)) {
     selectOutput(visible[0].path);
   }
