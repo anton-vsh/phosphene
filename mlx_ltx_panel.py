@@ -19222,25 +19222,36 @@ function filteredMainOutputs() {
 // exist in OUTPUT. Idempotent: clicking twice just refetches and re-
 // renders.
 async function outputsLoadAll() {
+  // Re-entrancy guard. The poll loop, a chip click, and a mode switch can
+  // all race to call this simultaneously when the filter is empty; without
+  // the in-flight flag, /outputs gets hit two or three times in parallel
+  // and the latter responses clobber each other's renders.
+  if (window._outputsLoadAllInFlight) return window._outputsLoadAllInFlight;
   const btn = document.getElementById('outputsShowAllBtn');
   if (btn) { btn.textContent = 'Loading…'; btn.disabled = true; }
-  try {
-    const r = await fetch('/outputs?limit=10000&offset=0');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
-    window._olderOutputs = Array.isArray(d.outputs) ? d.outputs : [];
-    window._showingAllOutputs = true;
-    if (btn) { btn.style.display = 'none'; btn.disabled = false; }
-    renderCarousel();
-    // Update the title count to reflect the new visible total.
-    const _visible = filteredMainOutputs();
-    const _kindLabel = mainOutputsFilter === 'all' ? '' : ` ${mainOutputsFilter}`;
-    const t = document.getElementById('carouselTitle');
-    if (t) t.textContent = `Outputs · ${_visible.length}${_kindLabel}`;
-  } catch (e) {
-    if (btn) { btn.textContent = 'Show all'; btn.disabled = false; }
-    console.warn('outputsLoadAll failed:', e);
-  }
+  const p = (async () => {
+    try {
+      const r = await fetch('/outputs?limit=10000&offset=0');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      window._olderOutputs = Array.isArray(d.outputs) ? d.outputs : [];
+      window._showingAllOutputs = true;
+      if (btn) { btn.style.display = 'none'; btn.disabled = false; }
+      renderCarousel();
+      // Update the title count to reflect the new visible total.
+      const _visible = filteredMainOutputs();
+      const _kindLabel = mainOutputsFilter === 'all' ? '' : ` ${mainOutputsFilter}`;
+      const t = document.getElementById('carouselTitle');
+      if (t) t.textContent = `Outputs · ${_visible.length}${_kindLabel}`;
+    } catch (e) {
+      if (btn) { btn.textContent = 'Show all'; btn.disabled = false; }
+      console.warn('outputsLoadAll failed:', e);
+    } finally {
+      window._outputsLoadAllInFlight = null;
+    }
+  })();
+  window._outputsLoadAllInFlight = p;
+  return p;
 }
 function _updateMainFilterChips() {
   const a = document.getElementById('mainOutputsFilterAll');
@@ -19249,6 +19260,26 @@ function _updateMainFilterChips() {
   if (a) a.classList.toggle('active', mainOutputsFilter === 'all');
   if (v) v.classList.toggle('active', mainOutputsFilter === 'videos');
   if (p) p.classList.toggle('active', mainOutputsFilter === 'photos');
+}
+// Shared "filter is empty, the missing kind is paginated out of /status,
+// pull it in via /outputs" auto-fetch. Returns true if a fetch was kicked
+// (caller should bail out — outputsLoadAll will do the render itself).
+// Called by BOTH setMainOutputsFilter (chip clicks) AND
+// _autoMainOutputsFilterForMode (mode-switch implicit filter change), so
+// users landing on an empty Photos/Videos view never see a blank gallery
+// regardless of HOW they got to that filter.
+function _maybeAutoLoadAllForEmptyFilter(mode) {
+  if (mode === 'all') return false;
+  if (window._showingAllOutputs) return false;
+  if (typeof outputsLoadAll !== 'function') return false;
+  if (filteredMainOutputs().length !== 0) return false;
+  outputsLoadAll().then(() => {
+    const visible = filteredMainOutputs();
+    if (visible.length && !visible.some(o => o.path === activePath)) {
+      selectOutput(visible[0].path);
+    }
+  });
+  return true;
 }
 function setMainOutputsFilter(mode) {
   if (mode !== 'all' && mode !== 'videos' && mode !== 'photos') mode = 'all';
@@ -19261,19 +19292,8 @@ function setMainOutputsFilter(mode) {
   // kind loads in from /outputs. Without this, the gallery looks empty
   // and users assume their photos "disappeared" when they're just
   // paginated out of the polling default.
-  let visible = filteredMainOutputs();
-  if (visible.length === 0 && mode !== 'all' && !window._showingAllOutputs
-      && typeof outputsLoadAll === 'function') {
-    outputsLoadAll().then(() => {
-      // After Show all loads, the carousel + selection will already be
-      // refreshed by outputsLoadAll's own renderCarousel call.
-      visible = filteredMainOutputs();
-      if (visible.length && !visible.some(o => o.path === activePath)) {
-        selectOutput(visible[0].path);
-      }
-    });
-    return;
-  }
+  if (_maybeAutoLoadAllForEmptyFilter(mode)) return;
+  const visible = filteredMainOutputs();
   // If the active selection was filtered out, switch to the first match.
   if (visible.length && !visible.some(o => o.path === activePath)) {
     selectOutput(visible[0].path);
@@ -19301,10 +19321,23 @@ function _autoMainOutputsFilterForMode(mode) {
   let target = null;
   if (mode === 'image') target = 'photos';
   else if (mode === 't2v' || mode === 'i2v' || mode === 'keyframe' || mode === 'extend') target = 'videos';
-  if (!target || target === mainOutputsFilter) return;
+  if (!target) return;
+  // Same-filter early-return is conditional now: if the filter is already
+  // on `target` but the visible list is empty AND we haven't loaded the
+  // full /outputs payload yet, we still need to kick the auto-fetch. The
+  // old early-return left Image-mode users stuck on an empty Photos view
+  // (the 0246be3 chip-click fix never fired because the chip was already
+  // active, and re-clicking an active chip isn't a habit users have).
+  if (target === mainOutputsFilter) {
+    _maybeAutoLoadAllForEmptyFilter(target);
+    return;
+  }
   mainOutputsFilter = target;
   // No localStorage write — see comment above.
   _updateMainFilterChips();
+  // Same auto-fetch as setMainOutputsFilter — empty after a mode switch
+  // means /status's top-60 had no items of this kind. Pull /outputs.
+  if (_maybeAutoLoadAllForEmptyFilter(target)) return;
   if (typeof renderCarousel === 'function') renderCarousel();
   const titleEl = document.getElementById('carouselTitle');
   if (titleEl && filterMode !== 'hidden') {
@@ -23305,6 +23338,15 @@ async function poll() {
     if (!activePath) {
       const visible = filteredMainOutputs();
       if (visible.length) selectOutput(visible[0].path);
+    }
+    // If the saved filter (from localStorage) selects a kind that's not
+    // in /status's top-60, the carousel is empty on boot and the user
+    // never clicks the chip (it's already active). Kick the auto-fetch
+    // here so a hard-refresh with a saved Photos filter still populates.
+    // _maybeAutoLoadAllForEmptyFilter is idempotent and re-entrant safe
+    // via outputsLoadAll's _outputsLoadAllInFlight guard.
+    if (typeof _maybeAutoLoadAllForEmptyFilter === 'function') {
+      _maybeAutoLoadAllForEmptyFilter(mainOutputsFilter);
     }
     // The Extend source dropdown is video-only — Extend mode operates on
     // mp4 input. Filter to videos so the user can't accidentally pick a
