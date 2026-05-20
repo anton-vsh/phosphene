@@ -198,6 +198,13 @@ Phosphene depends on the following projects:
 
 What Phosphene adds on top of those: a persistent batch queue, a warm helper subprocess with capability-tier feature gating, lossless H.264 output with JSON sidecars, the in-panel character + voice LoRA training pipeline, the Image tab dispatch layer with adaptive wall-time estimates, the agentic prompt-enhancer / shot planner, and the Pinokio install + update lifecycle scripts.
 
+## Roadmap
+
+Upcoming work — three-aspect character LoRAs, scene/room LoRAs for
+location continuity across clips, a real multi-character workflow,
+and stacking-aware strength balance — is tracked in [ROADMAP.md](ROADMAP.md).
+Contributors and feature requests welcome via GitHub Issues.
+
 ## Support development
 
 Phosphene is free and open source.
