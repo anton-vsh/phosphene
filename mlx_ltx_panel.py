@@ -25712,14 +25712,20 @@ async function refreshLoras() {
   // round-trip count to one and avoids re-fetching every time the
   // user flips mode/engine.
   //
-  // 2026-05-17: pass `exclude_characters=1` so character bundles' face /
-  // audio / voice files don't appear in the regular picker — they live
-  // exclusively in the new Manual-tab Characters picker (and the
-  // top-level Characters tab). Image Studio already hides video LoRAs
-  // via the client-side mode filter, so it doesn't lose anything.
+  // 2026-05-20: dropped `exclude_characters=1` (Mr Bizarro report:
+  // "LoRA for character disappears. Also, normal video loras are not
+  // loading again"). The exclude flag was added 2026-05-17 to avoid
+  // duplicate entries between the new Characters tab and the regular
+  // LoRA picker — but it also hid trained character bundles from T2V
+  // and I2V modes, where users legitimately want to stack them on top
+  // of a non-character render. The Characters tab still has its own
+  // avatar picker for the curated character UX; the regular picker now
+  // ALSO shows the trained bundles so users can pick them manually
+  // anywhere LoRAs are allowed. Per-row "trained" kind badge already
+  // distinguishes them visually in renderLorasList.
   let data;
   try {
-    data = await (await fetch('/loras?exclude_characters=1')).json();
+    data = await (await fetch('/loras')).json();
   } catch (e) {
     return;
   }
