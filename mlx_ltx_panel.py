@@ -22876,7 +22876,20 @@ async function refreshUploadsStrip() {
 }
 
 // ====== Format helpers ======
-function fmtMem(m) { return `${m.used_gb.toFixed(1)} / ${m.total_gb.toFixed(0)} GB · swap ${m.swap_gb.toFixed(1)}`; }
+// Memory badge formatting. 2026-05-20 — switched from "· swap N.N" to
+// "· N% pressure". macOS swap accounting is sticky: once swap pages are
+// allocated they stay flagged-used even after the in-RAM copies are
+// paged back, so the swap number only ever decreases on reboot. Users
+// would see "swap 8.5" hours after the system stopped thrashing and
+// assume Phosphene was leaking. Memory pressure (active + wired +
+// compressed pages over total) is what actually drives system stress,
+// it tracks real-time, and it's what macOS's own Activity Monitor
+// surfaces in the Memory Pressure indicator. The swap value is still
+// included in /status payloads for any external tooling that wants it.
+function fmtMem(m) {
+  const p = (m.pressure_pct != null) ? `${m.pressure_pct}% pressure` : `swap ${(m.swap_gb || 0).toFixed(1)}`;
+  return `${m.used_gb.toFixed(1)} / ${m.total_gb.toFixed(0)} GB · ${p}`;
+}
 function fmtMin(s) { if (!s || s < 0) return '—'; const m = Math.floor(s/60); const sec = Math.round(s%60); return m > 0 ? `${m}m ${sec}s` : `${sec}s`; }
 function snippet(s, n = 70) { if (!s) return ''; s = s.replace(/\s+/g,' ').trim(); return s.length > n ? s.slice(0, n-1)+'…' : s; }
 function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -22989,9 +23002,14 @@ async function poll() {
   const m = s.memory;
   const memPill = document.getElementById('memPill');
   memPill.innerHTML = `<span class="dot"></span>${fmtMem(m)}`;
+  // 2026-05-20: color the badge by real pressure, not by sticky swap.
+  // Same reason fmtMem dropped swap from the visible label — swap is
+  // a high-water mark that only decreases on reboot, so keying the
+  // danger/warn colors off it kept the badge red long after pressure
+  // had fully recovered.
   let memCls = 'pill-good';
-  if (m.swap_gb > 8 || m.pressure_pct > 90) memCls = 'pill-danger';
-  else if (m.swap_gb > 4 || m.pressure_pct > 75) memCls = 'pill-warn';
+  if (m.pressure_pct > 90) memCls = 'pill-danger';
+  else if (m.pressure_pct > 75) memCls = 'pill-warn';
   memPill.className = 'pill ' + memCls;
 
   // Comfy (hidden when not running). Drives three things in lockstep —
