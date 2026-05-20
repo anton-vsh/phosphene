@@ -25775,23 +25775,42 @@ function renderLorasList() {
   // that the family wasn't auto-detected.
   let rows = allRows;
   let hiddenCount = 0;
+  let autoFellBack = false;            // image:* mode picker would have been empty; we relaxed the filter
   const showOtherModes = !!window._loraShowOtherModes;
   if (modeTag) {
-    rows = allRows.filter(r => {
+    const _matches = (r) => {
       const tags = r.compatible_modes || ['unknown'];
-      let matches;
       if (modeTag === 'image') {
         // Meta-tag: image-engine UNKNOWN (auto preset). Match any
         // specific `image:*` tag plus `unknown`. Hides `video` so LTX
         // LoRAs don't pollute the image picker even when we can't tell
         // exactly which mflux family the user has saved as default.
-        matches = tags.some(t => t === 'unknown' || (typeof t === 'string' && t.startsWith('image:')));
-      } else {
-        matches = tags.includes(modeTag) || tags.includes('unknown');
+        return tags.some(t => t === 'unknown' || (typeof t === 'string' && t.startsWith('image:')));
       }
-      if (!matches && !showOtherModes) hiddenCount++;
-      return matches || showOtherModes;
+      return tags.includes(modeTag) || tags.includes('unknown');
+    };
+    rows = allRows.filter(r => {
+      const m = _matches(r);
+      if (!m && !showOtherModes) hiddenCount++;
+      return m || showOtherModes;
     });
+    // Auto-fallback for image modes: if the strict filter would hide
+    // EVERY installed LoRA (typical case: user only has LTX-Video
+    // LoRAs but is exploring the Qwen / HiDream picker), show them
+    // anyway. Otherwise the picker reads as "empty / broken" — which
+    // is exactly what Mr Bizarro hit on 2026-05-20: "when you open
+    // the library, it doesn't open anything, nor Qwen LoRA and
+    // HiDream LoRA … the LoRA's [should] start appearing." The
+    // banner below explains the override so it's not silent. The
+    // per-row "wrong family" chip on inactive LoRAs (rendered in
+    // loraRowHtml when modeTag is passed) still warns per-LoRA that
+    // an LTX LoRA picked here likely won't apply.
+    if (rows.length === 0 && allRows.length > 0
+        && typeof modeTag === 'string' && modeTag.startsWith('image')) {
+      rows = allRows.slice();
+      autoFellBack = true;
+      hiddenCount = 0;
+    }
   }
   // Surface the filter input only when 5+ LoRAs (post-mode-filter)
   // remain; below that it's just visual noise.
@@ -25821,16 +25840,24 @@ function renderLorasList() {
   // escape hatch to manage them without switching engines first.
   if (banner) {
     let bannerHtml = `Library filter: <strong>${escapeHtml(_loraFilterLabel(modeTag))}</strong>`;
-    if (hiddenCount > 0) {
+    if (autoFellBack) {
+      // Strict filter would have shown zero LoRAs; we relaxed it to
+      // show everything. Tell the user honestly so the per-row
+      // "wrong family" chips make sense.
+      bannerHtml += ` · <span style="color:var(--muted)">No matching LoRAs in your library — showing everything you have installed. Per-row chips flag LoRAs that may not apply on this engine.</span>`;
+    } else if (hiddenCount > 0) {
       bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = true; renderLorasList()">Show ${hiddenCount} from other modes</a>`;
     } else if (showOtherModes) {
       bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = false; renderLorasList()">Hide other modes</a>`;
     }
     // Empty image-mode case — when the library has zero compatible
-    // LoRAs, point users at the install path so they don't think the
-    // picker's broken.
-    if (modeTag && modeTag.startsWith('image:') && rows.length === 0 && _knownUserLoras.length > 0) {
-      bannerHtml += ` · <span style="color:var(--muted)">No image LoRAs in your library — install one via the CivitAI browser, filter by Flux / Qwen Image base models.</span>`;
+    // LoRAs (and autoFellBack didn't surface anything either, i.e. the
+    // library is fully empty), point users at the install path so they
+    // don't think the picker's broken. autoFellBack already covers the
+    // common case where the user has LTX LoRAs but no image ones.
+    if (modeTag && modeTag.startsWith('image:') && rows.length === 0
+        && _knownUserLoras.length === 0) {
+      bannerHtml += ` · <span style="color:var(--muted)">No LoRAs installed — use the CivitAI browser tab to install Qwen Image or Flux LoRAs.</span>`;
     }
     banner.innerHTML = bannerHtml;
   }
