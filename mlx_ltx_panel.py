@@ -23672,14 +23672,33 @@ function renderCarousel() {
     // half-second is often a dark fade-in, so seeking to the middle
     // gets a representative frame). Photos use <img> directly with
     // the same /image?path=… cache-bust URL the server stamped.
+    //
+    // PERF: with the auto-fetch landing 658+ entries into the carousel,
+    // `preload="metadata"` on every <video> stalled the page — each
+    // metadata fetch downloads the moov atom + enough bytes to render
+    // the t=2.5 poster frame (~hundreds of KB), and 586 of those
+    // saturate the browser's 6-connection limit. The user's click-to-
+    // play request then queues behind ~580 thumbnail fetches and looks
+    // "stuck."
+    //
+    // Fix: ship the <video> with `data-src` instead of `src`. An
+    // IntersectionObserver (wired below renderCarousel) promotes
+    // `data-src` to `src` only when the card is within the viewport's
+    // ~2-screen-tall preload margin. Off-screen cards stay completely
+    // dormant. <img> already has loading="lazy" so it's fine; we keep
+    // the existing markup for photos.
     const thumbHtml = isPhoto
       ? `<img class="car-thumb" src="${o.url}" alt="${escapeHtml(o.name)}" loading="lazy">`
       // Hover-scrub: on enter, jump to 0 and play silently at 0.6×;
       // on leave, pause + snap back to the static 2.5s preview frame.
       // The play() promise can reject during a fast scrub (browser
       // says "play interrupted by pause") — swallow it.
-      : `<video src="${o.url}#t=2.5" preload="metadata" muted playsinline
-                onmouseenter="this.currentTime=0; this.playbackRate=0.6; this.play().catch(()=>{})"
+      // src is deferred — the IntersectionObserver below promotes
+      // data-src → src when the card scrolls into view. preload stays
+      // metadata so once src is set, the t=2.5 poster frame renders
+      // without the user having to hover.
+      : `<video data-src="${o.url}#t=2.5" preload="metadata" muted playsinline
+                onmouseenter="if (!this.src && this.dataset.src) this.src = this.dataset.src; this.currentTime=0; this.playbackRate=0.6; this.play().catch(()=>{})"
                 onmouseleave="this.pause(); this.currentTime=2.5; this.playbackRate=1"></video>`;
     // Per-card actions (revealed on hover) — kept deliberately minimal:
     //   * Photos get a small "Animate" chip (turns the still into i2v).
@@ -23730,6 +23749,31 @@ function renderCarousel() {
       </div>
     </div>`;
   }).join('');
+  // Lazy-load the just-rendered video thumbnails. <img> entries already
+  // have native loading="lazy" but <video> has no equivalent, so we
+  // observe each carousel card and promote `data-src` → `src` only when
+  // it crosses into a 2-screen-tall preload margin. Without this, all
+  // 586 videos start downloading their poster-frame bytes at once when
+  // _showingAllOutputs is true, and the user's click-to-play stalls
+  // behind the queue. The observer is single-shot per card (unobserve
+  // after promotion) and uses a shared instance reset on each render
+  // so previously-observed nodes (now detached) get GC'd.
+  if (window._carThumbObserver) {
+    try { window._carThumbObserver.disconnect(); } catch (_e) {}
+  }
+  window._carThumbObserver = new IntersectionObserver((entries, obs) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const v = e.target.querySelector('video[data-src]');
+      if (v && !v.src) v.src = v.dataset.src;
+      obs.unobserve(e.target);
+    }
+  }, { root: el, rootMargin: '200% 0px 200% 0px', threshold: 0 });
+  el.querySelectorAll('.car-card').forEach(c => {
+    if (c.querySelector('video[data-src]:not([src])')) {
+      window._carThumbObserver.observe(c);
+    }
+  });
 }
 
 // Relative-time helper for the player overlay meta line. Takes the
