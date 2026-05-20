@@ -18479,12 +18479,30 @@ HTML = r"""<!doctype html>
             <h2>Reference image
               <span class="h2-hint">optional · anchors frame 0 like I2V</span>
             </h2>
-            <div class="studio-ref-grid" style="grid-template-columns:1fr;">
-              <div class="studio-ref-slot" id="audioStudioImageSlot" data-slot="image">
-                <span class="ref-tag">Image</span>
+            <!-- Y2.005 — use the shared .picker component (same as I2V /
+                 FFLF) instead of the bespoke studio-ref-slot. Mr Bizarro
+                 report: "image preview and managing kinda shit in audio
+                 to video make it like the others." The picker brings the
+                 drop tile, big centered preview, X-clear button, and
+                 Recent-uploads strip, all consistent with the rest of
+                 the panel. Wired via pickerWire('a2v_image'). -->
+            <div class="picker" data-key="a2v_image">
+              <div class="picker-drop" id="picker_drop_a2v_image">
+                <div class="picker-empty">
+                  <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
+                  <div class="picker-cta">Drop an image here, or <strong>click to browse</strong></div>
+                  <div class="hint">PNG / JPG / WEBP — anchors frame 0 of the audio-driven clip</div>
+                </div>
+                <img class="picker-preview" id="picker_preview_a2v_image" alt="" style="display:none">
+                <button type="button" class="picker-clear" id="picker_clear_a2v_image" title="Clear" style="display:none"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+              </div>
+              <input type="file" id="picker_file_a2v_image" accept="image/*" style="display:none">
+              <input type="hidden" name="a2v_image" id="a2v_image" value="">
+              <div class="picker-recent" id="picker_recent_a2v_image_wrap" style="display:none">
+                <div class="picker-recent-label">Recent uploads · click to use</div>
+                <div class="picker-recent-strip" id="picker_recent_a2v_image"></div>
               </div>
             </div>
-            <input type="file" id="audioStudioImageInput" accept="image/*" style="display:none">
             <div class="hint" style="margin-top:6px">
               Leave empty for pure Audio → Video. Add an image to open the clip on that frame (e.g. a portrait for a talking-head shot).
             </div>
@@ -20095,14 +20113,16 @@ function imgStudioCopyPath(path) {
 
 // ====== Audio → Video pane ===================================================
 // State for the Audio workflow tab. Routes to make_job with mode='a2v'.
-// One drop-zone for audio (required), one for an optional reference image.
+// One drop-zone for audio (required) is owned here. The optional
+// reference image was migrated to the shared .picker component
+// (key='a2v_image') 2026-05-20 — its state lives in the hidden input
+// #a2v_image, wired automatically via PICKERS.forEach(pickerWire) at
+// boot, so this struct no longer carries an imagePath field.
 const AUDIO_STUDIO = {
   busy: false,
   audioPath: null,      // server-side path returned by /upload
   audioName: null,      // display name for the drop-zone tag
   audioDuration: null,  // probed duration (seconds) if ffprobe returns it
-  imagePath: null,
-  imageName: null,
   wired: false,         // init() runs once
 };
 
@@ -20111,10 +20131,10 @@ function audioStudioInit() {
   AUDIO_STUDIO.wired = true;
   const audioSlot = document.getElementById('audioStudioAudioSlot');
   const audioInput = document.getElementById('audioStudioAudioInput');
-  const imageSlot = document.getElementById('audioStudioImageSlot');
-  const imageInput = document.getElementById('audioStudioImageInput');
 
   // Audio drop-zone wiring — click to pick, drag-and-drop, paste.
+  // (Image drop-zone wiring lives in pickerWire('a2v_image'), called
+  // once at module boot from PICKERS.forEach(pickerWire).)
   if (audioSlot && audioInput) {
     audioSlot.addEventListener('click', () => audioInput.click());
     audioSlot.addEventListener('dragover', (e) => {
@@ -20132,28 +20152,6 @@ function audioStudioInit() {
     audioInput.addEventListener('change', () => {
       if (audioInput.files && audioInput.files[0]) {
         audioStudioUploadAudio(audioInput.files[0]);
-      }
-    });
-  }
-
-  // Image drop-zone wiring (optional reference frame 0).
-  if (imageSlot && imageInput) {
-    imageSlot.addEventListener('click', () => imageInput.click());
-    imageSlot.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      imageSlot.classList.add('drop-active');
-    });
-    imageSlot.addEventListener('dragleave', () => imageSlot.classList.remove('drop-active'));
-    imageSlot.addEventListener('drop', (e) => {
-      e.preventDefault();
-      imageSlot.classList.remove('drop-active');
-      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
-        audioStudioUploadImage(e.dataTransfer.files[0]);
-      }
-    });
-    imageInput.addEventListener('change', () => {
-      if (imageInput.files && imageInput.files[0]) {
-        audioStudioUploadImage(imageInput.files[0]);
       }
     });
   }
@@ -20181,30 +20179,11 @@ async function audioStudioUploadAudio(file) {
   }
 }
 
-async function audioStudioUploadImage(file) {
-  const status = document.getElementById('audioStudioStatus');
-  if (status) status.textContent = 'Uploading image…';
-  try {
-    const fd = new FormData();
-    fd.append('image', file);
-    const r = await fetch('/upload', { method: 'POST', body: fd });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    if (data.error) throw new Error(data.error);
-    AUDIO_STUDIO.imagePath = data.path || null;
-    AUDIO_STUDIO.imageName = file.name;
-    audioStudioRenderSlots();
-    if (status) status.textContent = '';
-  } catch (e) {
-    if (status) status.textContent = 'Image upload failed: ' + (e.message || 'unknown');
-  }
-}
-
-function audioStudioClearImage() {
-  AUDIO_STUDIO.imagePath = null;
-  AUDIO_STUDIO.imageName = null;
-  audioStudioRenderSlots();
-}
+// audioStudioUploadImage / audioStudioClearImage were retired
+// 2026-05-20 when the image slot was migrated to the shared .picker
+// component (key='a2v_image'). pickerUploadFile + pickerSetImage now
+// handle upload and clear, and the hidden input #a2v_image carries the
+// path that audioStudioGenerate() reads.
 
 function audioStudioClearAudio() {
   AUDIO_STUDIO.audioPath = null;
@@ -20214,51 +20193,35 @@ function audioStudioClearAudio() {
 }
 
 function audioStudioRenderSlots() {
+  // Only the audio slot is rendered here. The image slot is now a
+  // shared .picker (key='a2v_image') wired by pickerWire — it manages
+  // its own preview, clear button, and recent-uploads strip.
   const audioSlot = document.getElementById('audioStudioAudioSlot');
-  const imageSlot = document.getElementById('audioStudioImageSlot');
-  if (audioSlot) {
-    if (AUDIO_STUDIO.audioPath) {
-      const dur = (AUDIO_STUDIO.audioDuration != null)
-        ? ' · ' + AUDIO_STUDIO.audioDuration.toFixed(1) + ' s'
-        : '';
-      // escapeHtml — user-supplied filename can contain &, <, >, ", '
-      // that would otherwise break out of innerHTML into attribute/tag
-      // context. Same defense the rest of the panel uses for any user
-      // string that ends up in innerHTML.
-      const safeName = escapeHtml(AUDIO_STUDIO.audioName || 'audio');
-      audioSlot.innerHTML =
-        '<span class="ref-tag">Audio</span>' +
-        '<div style="padding:18px 12px;text-align:center;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;">' +
-        '<svg class="ph" aria-hidden="true" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;"><use href="#ph-music-notes"/></svg>' +
-        safeName + dur +
-        '<div class="hint" style="margin-top:8px;">' +
-          '<a href="#" onclick="event.stopPropagation();audioStudioClearAudio();return false;">Remove</a>' +
-        '</div>' +
-        '</div>';
-    } else {
-      audioSlot.innerHTML =
-        '<span class="ref-tag">Audio</span>' +
-        '<div class="hint" style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;">' +
-        'Drop a WAV / MP3 / M4A / FLAC here, or click to pick a file.' +
-        '</div>';
-    }
-  }
-  if (imageSlot) {
-    if (AUDIO_STUDIO.imagePath) {
-      imageSlot.innerHTML =
-        '<span class="ref-tag">Image</span>' +
-        '<img src="/uploads/' + encodeURIComponent(AUDIO_STUDIO.imagePath.split(/[/\\\\]/).pop()) + '" ' +
-        '     alt="" style="max-width:100%;max-height:240px;border-radius:6px;display:block;margin:8px auto;">' +
-        '<div class="hint" style="text-align:center;">' +
-          '<a href="#" onclick="event.stopPropagation();audioStudioClearImage();return false;">Remove</a>' +
-        '</div>';
-    } else {
-      imageSlot.innerHTML =
-        '<span class="ref-tag">Image</span>' +
-        '<div class="hint" style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;">' +
-        'Optional · click to add an image that anchors frame 0.' +
-        '</div>';
-    }
+  if (!audioSlot) return;
+  if (AUDIO_STUDIO.audioPath) {
+    const dur = (AUDIO_STUDIO.audioDuration != null)
+      ? ' · ' + AUDIO_STUDIO.audioDuration.toFixed(1) + ' s'
+      : '';
+    // escapeHtml — user-supplied filename can contain &, <, >, ", '
+    // that would otherwise break out of innerHTML into attribute/tag
+    // context. Same defense the rest of the panel uses for any user
+    // string that ends up in innerHTML.
+    const safeName = escapeHtml(AUDIO_STUDIO.audioName || 'audio');
+    audioSlot.innerHTML =
+      '<span class="ref-tag">Audio</span>' +
+      '<div style="padding:18px 12px;text-align:center;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;">' +
+      '<svg class="ph" aria-hidden="true" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;"><use href="#ph-music-notes"/></svg>' +
+      safeName + dur +
+      '<div class="hint" style="margin-top:8px;">' +
+        '<a href="#" onclick="event.stopPropagation();audioStudioClearAudio();return false;">Remove</a>' +
+      '</div>' +
+      '</div>';
+  } else {
+    audioSlot.innerHTML =
+      '<span class="ref-tag">Audio</span>' +
+      '<div class="hint" style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px;">' +
+      'Drop a WAV / MP3 / M4A / FLAC here, or click to pick a file.' +
+      '</div>';
   }
 }
 
@@ -20297,11 +20260,16 @@ async function audioStudioGenerate() {
   if (btn) btn.disabled = true;
   if (status) status.textContent = 'Queueing…';
   try {
+    // Image path lives in the shared .picker hidden input (#a2v_image),
+    // not AUDIO_STUDIO.imagePath anymore. Empty string when the user
+    // didn't pick one — pure A2V flow.
+    const a2vImageEl = document.getElementById('a2v_image');
+    const a2vImagePath = (a2vImageEl && a2vImageEl.value) || '';
     const fd = new URLSearchParams();
     fd.set('mode', 'a2v');
     fd.set('prompt', prompt);
     fd.set('audio', AUDIO_STUDIO.audioPath);
-    if (AUDIO_STUDIO.imagePath) fd.set('image', AUDIO_STUDIO.imagePath);
+    if (a2vImagePath) fd.set('image', a2vImagePath);
     fd.set('width', String(w));
     fd.set('height', String(h));
     fd.set('frames', String(frames));
@@ -22619,11 +22587,14 @@ function snapAspectToImage(path) {
 // still drives the actual transfer; the only change is which JS calls it.
 
 // ====== Image picker component ======
-// One implementation, three call sites: I2V image, FFLF start_image,
-// FFLF end_image. Each picker carries a `key` (the hidden field's name);
-// every DOM element it owns is suffixed with `_<key>` so we can wire
-// listeners by lookup instead of a per-instance closure.
-const PICKERS = ['image', 'start_image', 'end_image'];
+// One implementation, four call sites: I2V image, FFLF start_image,
+// FFLF end_image, A2V a2v_image. Each picker carries a `key` (the hidden
+// field's name); every DOM element it owns is suffixed with `_<key>` so
+// we can wire listeners by lookup instead of a per-instance closure.
+// `a2v_image` was added 2026-05-20 to replace the old bespoke
+// studio-ref-slot in the Audio-to-Video tab with the same drop +
+// preview + clear + recent-uploads-strip surface every other mode uses.
+const PICKERS = ['image', 'start_image', 'end_image', 'a2v_image'];
 
 function pickerEls(key) {
   return {
@@ -22655,8 +22626,12 @@ function pickerSetImage(key, path, opts = {}) {
       });
     }
     // FFLF anchors framing on the start frame; I2V anchors on its single
-    // image. End frame doesn't drive aspect (would override the start frame).
-    if (key !== 'end_image' && opts.snapAspect !== false) {
+    // image. End frame doesn't drive aspect (would override the start
+    // frame). a2v_image lives in the Audio→Video tab which has its own
+    // aspect dropdown (#audioStudioAspect) — calling snapAspectToImage
+    // would change the GLOBAL #aspect selector, not the A2V one, so
+    // skip it for a2v_image to avoid silently mutating an unrelated mode.
+    if (key !== 'end_image' && key !== 'a2v_image' && opts.snapAspect !== false) {
       snapAspectToImage(path);
     }
   } else {
