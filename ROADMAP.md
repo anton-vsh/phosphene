@@ -34,21 +34,61 @@ independently as of commit `3f49ca3`. Just needs the UI surface.
 
 Estimated effort: 2–3 hours panel work + 3.5h training per variant.
 
-### `[ ]` Scene / location / room LoRAs
+### `[ ]` Scene-continuity recipe (no-training, ship first)
 
-Train a LoRA on photos of a single environment so character clips
-can be locked to a consistent location with consistent lighting +
-decor. Use case: a dialogue between two characters in the same room
-across multiple cuts.
+Lock two characters into the same environment across cuts using
+existing Phosphene primitives — no scene-LoRA training required.
+Higher quality and lower operator risk than training a scene LoRA
+per location, per research conducted 2026-05-20.
 
-Builds on the existing style-training pipeline (`train_type=style`
-already wired in `/train/start`). Open questions: minimum dataset
-size, training time, and how the scene LoRA stacks with a character
-LoRA at inference without one drowning the other (the
-character-LoRA-dominates-style-LoRA finding from the 2026-05-20
-elontrn diagnostic is the relevant prior art).
+Workflow:
+1. Image Studio → Qwen-Image-Edit-2511 multi-ref. Drop 1–3 photos
+   of the target location (the room, the lighting, the props).
+   Generate a composed still with both characters present in the
+   scene.
+2. Pick the best still. Send to I2V (or FFLF) with no character
+   LoRAs — identity is carried by the still's VAE-encoded latent,
+   not by a LoRA delta.
+3. Repeat for each cut with the SAME location stills as references.
+   Lighting + decor stay consistent.
 
-Research in progress.
+Effort: ~0.5–1 day, docs + a small UX pass to surface the recipe
+from the Train tab (a "Lock to a location" link or hint). No code
+changes to the training pipeline.
+
+### `[ ]` Scene / location / room LoRAs (power-user follow-up)
+
+After the no-training recipe ships, add scene LoRAs as the path for
+users who want a reusable "location" they can stack with any
+character. Builds on the existing style-training pipeline
+(`train_type=style` already wired in `/train/start`).
+
+Validated training recipe (per 2026-05-20 research):
+- Dataset: 15–20 stills of one place, 4–8 angles, mix of with-people
+  / empty-room (60-70% / 30-40%)
+- Caption format: describe what VARIES across stills (lighting,
+  framing, who's in frame) but NOT the room itself — the trigger
+  carries the room. ("Caption everything your LoRA is *not*
+  supposed to control" — Civitai/Hunyuan rule of thumb.)
+- Resolution: 1024×576 widescreen (matches inference aspect; needs
+  the widescreen-training support from commit `3f49ca3`).
+- Preset: Quick (rank 16, 600 steps from 30 epochs × 20 imgs) at
+  ~30 min wall on M4 Max 64GB.
+
+Stacking with character LoRAs:
+- Documented LTX guidance: keep total combined strength under 2.0,
+  practical sweet spot below 1.5.
+- Starting weights: character 0.9–1.0, scene 0.5–0.7. The character
+  LoRA's larger weight deltas need the scene to be turned down so
+  the scene effect isn't drowned (matches the 2026-05-20 elontrn
+  diag observation about strength dominance).
+- Reduce `strength_clip` on the scene LoRA before `strength_model`
+  if the room effect is still too faint.
+
+Engineering: ~1.5 days. Extend `TRAIN_TYPES` to include `scene`,
+add a fallback caption body string, add a "Locations" subnav under
+the Train tab. Touch points: `mlx_ltx_panel.py:785-801, 818, 5241,
+5260, 5295-5358` and `lora_lab/train_character.py:277-290`.
 
 ### `[ ]` Multi-character workflow
 
