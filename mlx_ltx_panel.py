@@ -2672,45 +2672,35 @@ def _civitai_request(path: str, params: dict | None = None,
         raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
 
 
+# Sub-families for the image context. Each entry maps a UI family-pill id
+# to the list of CivitAI baseModel strings it covers. The "all" pill is
+# the union of every list below — built dynamically so adding a new
+# family stays a one-line edit. Probed against the live CivitAI API
+# 2026-05-20; CivitAI's taxonomy uses different names than what their
+# own model-card UI shows.
+#
+# Flux LoRAs are intentionally excluded — Phosphene's image engines are
+# Qwen-Image-Edit-2511 (via mflux) and HiDream-O1-Image-Dev. There's no
+# Flux engine exposed today, so surfacing Flux LoRAs in the browser
+# would just create install candidates that no engine can run.
+_CIVITAI_IMAGE_FAMILIES: dict[str, list[str]] = {
+    "qwen":    ["Qwen 2", "Qwen"],   # Qwen-Image-Edit-2511 + Qwen-Image (2509)
+    "hidream": ["HiDream-O1"],       # HiDream-O1-Image-Dev
+}
 _CIVITAI_BASE_MODELS_BY_CONTEXT = {
     # Video LoRAs — the default. LTX-2.3 is the only video base we support.
     # Verified 2026-05-20 by probing the CivitAI API: "LTXV 2.3" is the
     # only spelling that returns hits; "LTX 2.3", "LTX-Video 2.3", and
     # "LTXV2.3" all return zero.
     "video": ["LTXV 2.3"],
-    # Image LoRAs — covers the families exposed in the Images tab.
-    # CivitAI's baseModel taxonomy uses different names than what's on
-    # their model-card UI — verified by direct API probing 2026-05-20:
-    #
-    #   our engine          CivitAI baseModel
-    #   ------------------  ----------------------------------
-    #   Qwen-Image-Edit     "Qwen 2"   (NOT "Qwen-Image-Edit")
-    #   Qwen-Image (2509)   "Qwen"     (NOT "Qwen-Image")
-    #   HiDream-O1          "HiDream-O1"  (NOT "HiDream-i1")
-    #   Flux.1 D/S/Kontext  "Flux.1 D" / "Flux.1 S" / "Flux.1 Kontext"
-    #   Flux.2 Klein        "Flux.2 Klein 9B" / "Flux.2 Klein 4B" / "Flux.2 Klein 9B-base"
-    #
-    # The previous comma-separated string ("Flux.1 D,Flux.1 S,...") was
-    # silently dropped by the CivitAI API — the docs accept multiple
-    # baseModels via repeated query params, not commas. urlencode with
-    # doseq=True (in _civitai_request) emits a list as repeated params,
-    # which IS the documented multi-value format.
-    "image": [
-        "Qwen 2",            # Qwen-Image-Edit-2511 (active engine)
-        "Qwen",              # Qwen-Image-Edit-2509 (legacy)
-        "HiDream-O1",        # HiDream-O1-Image-Dev (active engine)
-        "Flux.1 D",          # FLUX.1 dev (mflux)
-        "Flux.1 S",          # FLUX.1 schnell (mflux)
-        "Flux.1 Kontext",    # FLUX.1 Kontext (mflux)
-        "Flux.2 Klein 9B",   # FLUX.2 Klein-Edit 9B
-        "Flux.2 Klein 4B",   # FLUX.2 Klein-Edit 4B
-        "Flux.2 Klein 9B-base",  # FLUX.2 Klein base
-    ],
+    # Image LoRAs — union of every family in _CIVITAI_IMAGE_FAMILIES.
+    # Sub-filtering happens via the `family` query param on /civitai/search.
+    "image": [bm for bms in _CIVITAI_IMAGE_FAMILIES.values() for bm in bms],
 }
 
 def _civitai_search(query: str = "", nsfw: bool = False,
                     cursor: str = "", limit: int = 20,
-                    context: str = "video") -> dict:
+                    context: str = "video", family: str = "") -> dict:
     """Search LoRAs. Returns the trimmed shape:
         { "items": [{
             "id", "name", "creator", "description", "tags", "downloads",
@@ -2741,6 +2731,13 @@ def _civitai_search(query: str = "", nsfw: bool = False,
     base_models_filter = _CIVITAI_BASE_MODELS_BY_CONTEXT.get(
         context, _CIVITAI_BASE_MODELS_BY_CONTEXT["video"]
     )
+    # Sub-family narrowing for the image context. The browser exposes pills
+    # for "Qwen-Image" and "HiDream" so users can scope the result set to
+    # the engine they're about to use. family="" (or missing, or "all")
+    # leaves the full image-context list active.
+    fam = (family or "").strip().lower()
+    if context == "image" and fam and fam in _CIVITAI_IMAGE_FAMILIES:
+        base_models_filter = _CIVITAI_IMAGE_FAMILIES[fam]
     # The CivitAI API accepts multi-value baseModels as repeated query
     # params (`baseModels=X&baseModels=Y`), not comma-separated. Passing
     # a list here triggers `urlencode(..., doseq=True)` in _civitai_request
@@ -8100,17 +8097,27 @@ class Handler(BaseHTTPRequestHandler):
             nsfw = (qs.get("nsfw", ["false"])[0] or "false").lower() == "true"
             cursor = qs.get("cursor", [""])[0]
             limit = max(1, min(50, int(qs.get("limit", ["20"])[0] or "20")))
-            # context="image" filters the API to Flux/Qwen/HiDream base
+            # context="image" filters the API to Qwen + HiDream base
             # models for the Images workflow; default "video" keeps the
-            # legacy LTX-2.3 result set for the Video workflow.
+            # LTX-2.3 result set for the Video workflow.
             context = (qs.get("context", ["video"])[0] or "video").lower()
             if context not in _CIVITAI_BASE_MODELS_BY_CONTEXT:
                 context = "video"
+            # Optional `family` narrows the image context to one engine
+            # family (e.g. "qwen" or "hidream"). Empty / "all" leaves the
+            # full image list active. Ignored when context != "image".
+            family = (qs.get("family", [""])[0] or "").lower()
             try:
                 results = _civitai_search(query=query, nsfw=nsfw,
                                          cursor=cursor, limit=limit,
-                                         context=context)
+                                         context=context, family=family)
                 results["context"] = context
+                results["family"] = family or "all"
+                # Echo the family list so the client can render pills
+                # without hardcoding the catalog. Only meaningful for
+                # context=image.
+                if context == "image":
+                    results["available_families"] = list(_CIVITAI_IMAGE_FAMILIES.keys())
                 self._json(results)
             except Exception as exc:
                 self._json({"error": f"civitai search failed: {exc}",
@@ -18822,6 +18829,12 @@ HTML = r"""<!doctype html>
          The actual key is POSTed to /settings (same endpoint the cog
          menu uses) so there's a single source of truth on disk. -->
     <div id="civitaiAuthBanner" class="civitai-auth" style="display:none"></div>
+    <!-- Family pill row (image context only). Click a pill to scope the
+         result set to a specific engine family (Qwen / HiDream / All).
+         Shown / hidden by civitaiRenderFamilyPills() on each open. -->
+    <div class="civitai-family-row" id="civitaiFamilyRow" style="display:none;
+         margin: 4px 0 8px; display:flex; gap:6px; flex-wrap:wrap;">
+    </div>
     <div class="civitai-search-bar">
       <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"
              oninput="if(this._t) clearTimeout(this._t); this._t = setTimeout(civitaiSearch, 350)"
@@ -26755,10 +26768,14 @@ function _wireCharacterQualityChips() {
 
 let _civitaiCursor = '';
 let _civitaiSearching = false;
-// Search context — 'video' (LTX-2.3) or 'image' (Flux/Qwen/HiDream). Picked
+// Search context — 'video' (LTX-2.3) or 'image' (Qwen + HiDream). Picked
 // at modal-open time from the active workflow tab so the user sees LoRAs
 // that match the engine they're about to use. 2026-05-18.
 let _civitaiContext = 'video';
+// Family pill state for context=image. Empty / 'all' shows every image
+// family; 'qwen' or 'hidream' narrows to just that engine. Re-derived
+// from the available_families echo in each /civitai/search response.
+let _civitaiFamily = '';
 
 // Returns the search context the CivitAI modal should use given which
 // workflow tab the user is in. Studio (Images) → image; everything else
@@ -26774,7 +26791,7 @@ function _civitaiContextMeta(ctx) {
   if (ctx === 'image') {
     return {
       title: 'Browse CivitAI for image LoRAs',
-      hint: 'Flux.1, Flux.2, Qwen-Image, Qwen-Image-Edit, HiDream-i1.',
+      hint: 'Qwen-Image-Edit, HiDream-O1.',
       empty: 'No image LoRAs match',
     };
   }
@@ -26800,8 +26817,56 @@ function openCivitaiModal(context) {
   }).catch(() => { renderCivitaiAuthBanner(false); });
   document.getElementById('civitaiQuery').value = '';
   _civitaiCursor = '';
+  // Reset family on every modal open so users always land on "All".
+  _civitaiFamily = '';
+  // Hide family row by default; render fills it + shows it for image context.
+  const famRow = document.getElementById('civitaiFamilyRow');
+  if (famRow) famRow.style.display = 'none';
   // Pull current Spicy mode state so the "Show NSFW" toggle hides when off.
   refreshCivitaiAccessUI();
+  civitaiSearch();
+}
+
+// Render the family-filter pill row when the response carries
+// available_families. Pills are simple buttons styled to match the
+// rest of the panel's pill UX. Click sets _civitaiFamily and re-runs
+// the search.
+function civitaiRenderFamilyPills(available, active) {
+  const row = document.getElementById('civitaiFamilyRow');
+  if (!row) return;
+  if (!available || !Array.isArray(available) || available.length === 0) {
+    row.style.display = 'none';
+    row.innerHTML = '';
+    return;
+  }
+  // Friendly labels per family id. Keep this map small and explicit.
+  const labels = {
+    qwen:    'Qwen-Image',
+    hidream: 'HiDream',
+  };
+  const all = ['all', ...available];
+  row.style.display = 'flex';
+  row.innerHTML = all.map(f => {
+    const label = f === 'all' ? 'All' : (labels[f] || f);
+    const isActive = (f === 'all' ? !active || active === 'all' : active === f);
+    return `<button type="button"
+              class="pill-btn${isActive ? ' active' : ''}"
+              data-family="${escapeHtml(f)}"
+              onclick="civitaiSetFamily('${escapeHtml(f)}')">${escapeHtml(label)}</button>`;
+  }).join('');
+}
+
+// Click handler for a family pill — set state + re-search.
+function civitaiSetFamily(family) {
+  _civitaiFamily = (family === 'all') ? '' : family;
+  // Optimistically toggle the active class so the click feels instant
+  // (the re-render after the fetch will reaffirm it).
+  const row = document.getElementById('civitaiFamilyRow');
+  if (row) {
+    row.querySelectorAll('.pill-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.family === family);
+    });
+  }
   civitaiSearch();
 }
 
@@ -26919,6 +26984,7 @@ async function civitaiSearch() {
     if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
     params.set('limit', '24');
     params.set('context', _civitaiContext);
+    if (_civitaiFamily) params.set('family', _civitaiFamily);
     const r = await fetch('/civitai/search?' + params.toString());
     const data = await r.json();
     if (data.error) {
@@ -26927,6 +26993,10 @@ async function civitaiSearch() {
       status.className = 'civitai-status-line err';
       return;
     }
+    // Render family pills from the server's echoed catalog (only set
+    // for context=image). Reaffirms the active selection after each
+    // search so the active class is always in sync with state.
+    civitaiRenderFamilyPills(data.available_families, data.family);
     renderCivitaiGrid(data.items, /* append */ false);
     _civitaiCursor = data.next_cursor || '';
     if (data.has_more) loadMore.style.display = '';
@@ -26956,6 +27026,7 @@ async function civitaiLoadMore() {
     params.set('limit', '24');
     params.set('cursor', _civitaiCursor);
     params.set('context', _civitaiContext);
+    if (_civitaiFamily) params.set('family', _civitaiFamily);
     const r = await fetch('/civitai/search?' + params.toString());
     const data = await r.json();
     if (data.error) {
