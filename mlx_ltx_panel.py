@@ -2674,12 +2674,38 @@ def _civitai_request(path: str, params: dict | None = None,
 
 _CIVITAI_BASE_MODELS_BY_CONTEXT = {
     # Video LoRAs — the default. LTX-2.3 is the only video base we support.
-    "video": "LTXV 2.3",
-    # Image LoRAs — covers the four engines exposed in the Images tab:
-    # mflux (Flux.1 family), FLUX.2 Klein-Edit, Qwen-Image / Qwen-Image-Edit,
-    # and the HiDream-i1 family. Comma-separated lets the CivitAI API
-    # filter on any of these. Order doesn't matter to the API.
-    "image": "Flux.1 D,Flux.1 S,Flux.1 Kontext,Flux.2,Qwen-Image,Qwen-Image-Edit,HiDream-i1",
+    # Verified 2026-05-20 by probing the CivitAI API: "LTXV 2.3" is the
+    # only spelling that returns hits; "LTX 2.3", "LTX-Video 2.3", and
+    # "LTXV2.3" all return zero.
+    "video": ["LTXV 2.3"],
+    # Image LoRAs — covers the families exposed in the Images tab.
+    # CivitAI's baseModel taxonomy uses different names than what's on
+    # their model-card UI — verified by direct API probing 2026-05-20:
+    #
+    #   our engine          CivitAI baseModel
+    #   ------------------  ----------------------------------
+    #   Qwen-Image-Edit     "Qwen 2"   (NOT "Qwen-Image-Edit")
+    #   Qwen-Image (2509)   "Qwen"     (NOT "Qwen-Image")
+    #   HiDream-O1          "HiDream-O1"  (NOT "HiDream-i1")
+    #   Flux.1 D/S/Kontext  "Flux.1 D" / "Flux.1 S" / "Flux.1 Kontext"
+    #   Flux.2 Klein        "Flux.2 Klein 9B" / "Flux.2 Klein 4B" / "Flux.2 Klein 9B-base"
+    #
+    # The previous comma-separated string ("Flux.1 D,Flux.1 S,...") was
+    # silently dropped by the CivitAI API — the docs accept multiple
+    # baseModels via repeated query params, not commas. urlencode with
+    # doseq=True (in _civitai_request) emits a list as repeated params,
+    # which IS the documented multi-value format.
+    "image": [
+        "Qwen 2",            # Qwen-Image-Edit-2511 (active engine)
+        "Qwen",              # Qwen-Image-Edit-2509 (legacy)
+        "HiDream-O1",        # HiDream-O1-Image-Dev (active engine)
+        "Flux.1 D",          # FLUX.1 dev (mflux)
+        "Flux.1 S",          # FLUX.1 schnell (mflux)
+        "Flux.1 Kontext",    # FLUX.1 Kontext (mflux)
+        "Flux.2 Klein 9B",   # FLUX.2 Klein-Edit 9B
+        "Flux.2 Klein 4B",   # FLUX.2 Klein-Edit 4B
+        "Flux.2 Klein 9B-base",  # FLUX.2 Klein base
+    ],
 }
 
 def _civitai_search(query: str = "", nsfw: bool = False,
@@ -2715,6 +2741,10 @@ def _civitai_search(query: str = "", nsfw: bool = False,
     base_models_filter = _CIVITAI_BASE_MODELS_BY_CONTEXT.get(
         context, _CIVITAI_BASE_MODELS_BY_CONTEXT["video"]
     )
+    # The CivitAI API accepts multi-value baseModels as repeated query
+    # params (`baseModels=X&baseModels=Y`), not comma-separated. Passing
+    # a list here triggers `urlencode(..., doseq=True)` in _civitai_request
+    # to emit the repeated form.
     params: dict[str, object] = {
         "types": "LORA",
         "baseModels": base_models_filter,

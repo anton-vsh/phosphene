@@ -117,37 +117,82 @@ The new default TC=1.8 (reverted from a wrongly-calibrated 1.0 on
 may want to dial it for specific scenes. Expose `teacache_thresh`
 as a slider on the advanced section of the Generate form.
 
-### `[ ]` HDR via IC-LoRA pipeline
+### `[~]` IC-LoRA pipeline support — HDR ships first, generic infra follows
 
-The HDR toggle shipped in v2 (commit 2d5e0ad) but never worked: it was
-wired through the regular `_pending_loras` fusion hook on the standard
-T2V/I2V/HQ pipelines. The Lightricks HDR LoRA is actually an **IC-LoRA**
-(in-context LoRA) — it needs the dedicated `ICLoraPipeline`
-(`ltx_pipelines_mlx.ic_lora`), a reference video for the conditioning
-input, AND a LogC3 pre/post transform to land 16-bit dynamic range in
-the normal number range. Without all three pieces, the LoRA fuses
-silently and produces no HDR effect. The UI toggle was removed in v3.0
-to stop misleading users.
+Research summary (`/tmp/phosphene-walk/ic_vs_id_lora_research.md`):
+IC-LoRA is just a regular LoRA delta + a training-data trick + an
+inference-time input contract. The DiT itself isn't modified — what
+changes is that reference frames are concatenated to noise tokens along
+the sequence axis at negative RoPE positions, and the LoRA learns to
+copy structure / identity / look from one half to the other via
+attention. The HDR LoRA additionally bakes a LogC3 inverse transform
+into the decode path to recover 16-bit linear HDR from the VAE's
+`[-1, 1]` output range. The upstream MLX port already has the pieces:
 
-Proper implementation lands when we wire:
-1. The `ICLoraPipeline` class into `mlx_warm_helper.py` (it exists
-   upstream — just needs to be hooked).
-2. A reference-video source. For pure T2V/I2V, run a low-res Stage 1
-   render first and use that as the IC reference (matches what the
-   Lightricks ComfyUI workflow does).
-3. LogC3 transform application in the post-process step.
-4. Re-expose the HDR pill in the UI (commented out HTML at
-   `mlx_ltx_panel.py:17310`).
+- `ltx_pipelines_mlx.ic_lora.ICLoraPipeline` — generic IC-LoRA pipeline
+- `ltx_pipelines_mlx.hdr_ic_lora.HDRICLoraPipeline` — HDR subclass that
+  auto-detects the LogC3 config from LoRA safetensors metadata and
+  saves both an SDR MP4 preview + a companion `.hdr.npz` float32 HDR
+  tensor (F, H, W, 3 linear scene-light)
+- `ltx_pipelines_mlx.iclora_utils.append_ic_lora_reference_video_conditionings`
+  — handles reference-video encoding + RoPE positioning. Tolerates an
+  empty `video_conditioning=[]` (text-driven mode: LoRA delta still
+  applies, no IC reference needed).
 
-The HDR LoRA repo also ships a companion `scene-emb.safetensors` file —
-need to investigate whether it's required or optional.
+Plan in phases, each shippable on its own:
 
-### `[ ]` Motion-Track and Union Control IC-LoRAs
+**Phase 1 — HDR text-driven mode (v3.x).** Re-expose the HDR pill in
+the UI. When checked, route the job to a new `generate_hdr` helper
+action that instantiates `HDRICLoraPipeline` with the Lightricks HDR
+LoRA and an empty `video_conditioning`. Output is the standard SDR
+MP4 (LoRA still influences the look via weight delta) plus a sidecar
+`.hdr.npz`. Force `quality=balanced` (distilled Q4) since IC-LoRAs
+require the distilled checkpoint per upstream docs. Block HDR +
+character LoRA stacking with a clear error message (validated as
+non-functional combo for v3.x).
 
-Both are listed in `CURATED_LORAS` and pass the same gated-repo
-machinery as HDR — they're also IC-LoRAs and won't work until the
-above IC-LoRA pipeline plumbing lands. Add toggles + a "reference
-video" picker to expose them properly once the infrastructure is in.
+**Phase 2 — Reference-video conversion mode (v3.x+).** Add a
+reference-video picker that appears when HDR is on, populated by:
+(a) recent video outputs from the gallery, or
+(b) a fresh file drop.
+The reference goes into `video_conditioning=[(path, 1.0)]`. This is
+the SDR → HDR re-grade path: take an existing video output, re-encode
+through HDR for 16-bit linear output.
+
+**Phase 3 — Motion-Track and Union-Control IC-LoRAs.** Two more
+Lightricks IC-LoRAs at `Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control`
+and `Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control`. Both need a
+reference video with specific conditioning content (motion-track
+needs sparse colored splines from a tracker like SpatialTrackerV2;
+union-control needs canny+depth+pose). For Phosphene users this
+means we need to either (a) ship spline/depth/pose extractors as a
+pre-processing pass, or (b) accept user-provided reference videos.
+Likely (b) for v3.x, (a) as a stretch.
+
+**Phase 4 — IC-LoRA training.** Extend `lora_lab` with a paired-dataset
+trainer. Each sample is `(reference_clip, target_clip)`. Training loop
+builds `concat(ref_tokens_at_negative_RoPE, target_tokens)` and
+computes loss only on the target half. LoRA weights file stays a
+normal `.safetensors`. Add `train_type='iclora'` to the trainer UI.
+
+**Phase 5 — Character + IC-LoRA stacking.** The prize: stack a
+character LoRA (face identity) with an IC-LoRA (e.g. Union-Control)
+on the same DiT. Both are weight deltas so it's mechanically possible,
+but untested upstream — deltas may fight, distilled-only constraint
+limits to balanced quality. Experimental; gate behind a flag until
+results are validated.
+
+**Naming note.** Don't conflate "ID-LoRA" with "character LoRA".
+The published ID-LoRA (arXiv 2603.10256) is actually an IC-LoRA that
+conditions on a reference image + ~5s audio for talking-head video.
+Phosphene's character LoRAs are plain weight-delta LoRAs trained on
+15-50 photos with a trigger word — Lightricks calls these "character
+LoRAs" formally, never "ID-LoRA". Keep "character LoRA" in code and
+UI to avoid the collision.
+
+Tracking: the HDR-specific Phase 1 work landed via re-exposing the
+hdr toggle (commit `<hdr-ship>`); the generic Phases 2–5 stay open
+in this entry.
 
 ## Mid term
 
