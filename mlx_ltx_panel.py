@@ -687,6 +687,61 @@ def _safe_loras_dir() -> Path:
 
 
 # ============================================================================
+# Image thumbnail cache
+# ============================================================================
+# The /image endpoint serves the raw PNG by default. For thumbnail use
+# cases (carousel cards, recent-uploads strip, civitai previews) the
+# caller appends `?w=<px>` and the server returns a resized JPEG instead.
+# Resized variants are cached on disk under panel_uploads/.thumbcache/,
+# keyed by (source path, mtime, requested width) so repeated requests
+# cost one mmap read.
+#
+# Why this matters: a HiDream Quality render is 2560x1440 PNG ≈ 3 MB on
+# disk, ≈ 14 MB decoded as RGBA in Chrome. With ~70 photos on screen the
+# tab held over 1 GB of decoded bitmaps — Mr Bizarro measured 2026-05-20.
+# Serving a 480px-wide thumbnail (~50 KB JPEG ≈ 0.5 MB decoded) cuts
+# the per-image footprint ~25-30x.
+_THUMBCACHE = UPLOADS / ".thumbcache"
+
+
+def _ensure_thumbnail(src: Path, width: int) -> Path:
+    """Return a path to a resized JPEG thumbnail of `src` at `width` pixels.
+
+    Cached on disk. Idempotent. Aspect ratio preserved (height derived
+    from the source's aspect). Width is clamped to [16, 2048] before
+    the lookup so a malformed query string can't force a giant resize.
+    """
+    width = max(16, min(2048, int(width)))
+    try:
+        st = src.stat()
+    except OSError:
+        raise FileNotFoundError(f"source not found: {src}")
+    # Cache key: hash of (resolved path, mtime, size, width). mtime
+    # and size together catch the common "user edited the file" case
+    # without needing a full content hash.
+    import hashlib
+    raw = f"{src.resolve()}|{st.st_mtime_ns}|{st.st_size}|{width}".encode()
+    key = hashlib.sha1(raw).hexdigest()
+    out = _THUMBCACHE / f"{key}.jpg"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    _THUMBCACHE.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        # PIL's thumbnail() preserves aspect ratio and only shrinks (never
+        # upscales — passing w=2048 on a 1024-wide source returns the
+        # original size).
+        im.thumbnail((width, width * 10), Image.Resampling.LANCZOS)
+        # JPEG q=85 hits the sweet spot for thumbnails — visually
+        # indistinguishable from the source at carousel size, ~5-10x
+        # smaller than the equivalent PNG.
+        im.save(out, format="JPEG", quality=85, optimize=True,
+                progressive=False)
+    return out
+
+
+# ============================================================================
 # Train Character — dataset + job-spec plumbing
 # ============================================================================
 #
@@ -8182,16 +8237,40 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(403); return
             if not path.exists() or not path.is_file():
                 self.send_error(404); return
-            ext = path.suffix.lower()
+            # Optional thumbnail resize. Mr Bizarro 2026-05-20 diag: the
+            # main pane carousel decoded 1+ GB of bitmaps because HiDream
+            # Quality renders are 2560x1440 PNGs (14 MB each, decoded as
+            # RGBA), painted at ~200 px thumbnails. Clients pass `w=480`
+            # for thumbnail use-cases; the player/lightbox still requests
+            # the full image (no w param). Resized variants are cached on
+            # disk keyed by (source path, mtime, requested width) so
+            # repeated requests cost one disk read.
+            try:
+                w_raw = qs.get("w", [""])[0] or ""
+                req_w = int(w_raw) if w_raw else 0
+            except (TypeError, ValueError):
+                req_w = 0
+            req_w = max(0, min(2048, req_w))
+            thumb_path: Path | None = None
+            if req_w > 0:
+                try:
+                    thumb_path = _ensure_thumbnail(path, req_w)
+                except Exception as exc:
+                    # Fall back to the original — better to serve a big
+                    # image than to break the gallery.
+                    push(f"thumbnail resize failed for {path.name} @ {req_w}: {exc}")
+                    thumb_path = None
+            served = thumb_path or path
+            served_ext = served.suffix.lower()
             ctype = {
                 ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                 ".webp": "image/webp", ".gif": "image/gif",
-            }.get(ext, "application/octet-stream")
+            }.get(served_ext, "application/octet-stream")
             self.send_response(200)
             self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(path.stat().st_size))
+            self.send_header("Content-Length", str(served.stat().st_size))
             self.end_headers()
-            with path.open("rb") as fh:
+            with served.open("rb") as fh:
                 self.wfile.write(fh.read())
             return
         if parsed.path == "/sidecar":
@@ -19797,7 +19876,7 @@ function imgStudioRenderSlot(idx) {
     slot.classList.add('has-image');
     slot.innerHTML = `
       <span class="ref-tag">${tag}</span>
-      <img src="/image?path=${encodeURIComponent(ref.path)}" alt="">
+      <img src="/image?path=${encodeURIComponent(ref.path)}&w=320" alt="">
       <button class="clear-x" type="button" onclick="imgStudioClearRef(${idx});event.stopPropagation()" title="Remove"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
     `;
   } else {
@@ -22680,7 +22759,7 @@ function pickerSetImage(key, path, opts = {}) {
   if (!els.hidden) return;
   els.hidden.value = path;
   if (path) {
-    els.preview.src = `/image?path=${encodeURIComponent(path)}`;
+    els.preview.src = `/image?path=${encodeURIComponent(path)}&w=480`;
     els.preview.style.display = 'block';
     els.empty.style.display = 'none';
     els.clear.style.display = 'flex';
@@ -22785,7 +22864,7 @@ async function refreshUploadsStrip() {
     const currentPath = els.hidden.value;
     els.recentStrip.innerHTML = _uploadsCache.map(u => `
       <img class="picker-recent-thumb${u.path === currentPath ? ' selected' : ''}"
-           src="${escapeHtml(u.url)}"
+           src="${escapeHtml(_thumbUrl(u.url, 128))}"
            data-path="${escapeHtml(u.path)}"
            title="${escapeHtml(u.name)} · ${u.size_kb} KB · ${escapeHtml(u.mtime)}"
            alt="">
@@ -22801,6 +22880,20 @@ function fmtMem(m) { return `${m.used_gb.toFixed(1)} / ${m.total_gb.toFixed(0)} 
 function fmtMin(s) { if (!s || s < 0) return '—'; const m = Math.floor(s/60); const sec = Math.round(s%60); return m > 0 ? `${m}m ${sec}s` : `${sec}s`; }
 function snippet(s, n = 70) { if (!s) return ''; s = s.replace(/\s+/g,' ').trim(); return s.length > n ? s.slice(0, n-1)+'…' : s; }
 function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// Append `w=<px>` to an /image URL so the server returns a resized
+// JPEG thumbnail instead of the full PNG. HiDream Quality renders are
+// 2560x1440 (14 MB decoded each) — painting them at 200px carousel
+// thumbs filled Chrome with >1 GB of decoded bitmaps. Thumbs cut that
+// ~25-30x. Pass-through for non-`/image?` URLs (videos served via
+// /file, civitai previews on a remote CDN, etc).
+function _thumbUrl(url, w) {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.startsWith('/image?')) return url;
+  // Preserve existing query string (path, mtime cache-bust v=N, etc).
+  const sep = url.includes('w=') ? '' : (url.includes('?') ? '&' : '?');
+  return sep ? `${url}&w=${w | 0}` : url;
+}
 
 async function api(path, method = 'GET', body = null) {
   const opts = { method };
@@ -23328,9 +23421,9 @@ async function poll() {
       // every photo row caused ~16 thumbnail re-fetches per tick
       // (~50-60 req/s steady-state idle) that defeated the cache.
       const matchedOutput = (currentOutputs || []).find(x => x.path === j.output_path);
-      const thumbSrc = matchedOutput
+      const thumbSrc = _thumbUrl(matchedOutput
         ? matchedOutput.url
-        : `/image?path=${encodeURIComponent(j.output_path)}`;
+        : `/image?path=${encodeURIComponent(j.output_path)}`, 200);
       const animateArgs = JSON.stringify({
         path: j.output_path, prompt: j.params.prompt || ''
       }).replace(/"/g, '&quot;');
@@ -23745,7 +23838,7 @@ function renderCarousel() {
     // dormant. <img> already has loading="lazy" so it's fine; we keep
     // the existing markup for photos.
     const thumbHtml = isPhoto
-      ? `<img class="car-thumb" src="${o.url}" alt="${escapeHtml(o.name)}" loading="lazy">`
+      ? `<img class="car-thumb" src="${_thumbUrl(o.url, 480)}" alt="${escapeHtml(o.name)}" loading="lazy">`
       // Hover-scrub: on enter, jump to 0 and play silently at 0.6×;
       // on leave, pause + snap back to the static 2.5s preview frame.
       // The play() promise can reject during a fast scrub (browser
