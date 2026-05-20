@@ -57,6 +57,25 @@ New workflow tab in 3.0. WAV or MP3 in, MP4 out — the audio drives motion in t
 
 Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and install LTX 2.3 LoRAs from CivitAI inside the panel (per-row rename, download, companion-aware delete). Character bundles live alongside style LoRAs and are filtered out of the regular picker so they don't show up twice.
 
+### HTTP API
+
+Everything the panel does is reachable over plain HTTP on `127.0.0.1:8199`. Queue video jobs, generate images, train characters, manage LoRAs, poll status, fetch outputs — all from `curl`, a Python script, or an external agent like Claude Code or Codex. The panel UI is just one client; nothing about the feature set is exclusive to it.
+
+```bash
+# Queue a text-to-video render with a character LoRA stacked on a style LoRA.
+curl -s -X POST http://127.0.0.1:8199/queue/add \
+  --data-urlencode "mode=t2v" \
+  --data-urlencode "prompt=Cinematic close-up of bizarrotrn man in a wood-paneled study, golden hour" \
+  --data-urlencode "width=1024" --data-urlencode "height=576" \
+  --data-urlencode "frames=169" --data-urlencode "quality=high" \
+  --data-urlencode 'loras=[{"path":"mlx_models/loras/bizarrotrn_v2.safetensors","strength":1.0}]'
+# → {"ok": true, "id": "j-..."}
+```
+
+Endpoints cover the full lifecycle: `POST /queue/add` and `/run` for video, `POST /image/generate` for stills, `POST /train/start` for LoRA training, `POST /upload` for reference images and audio, `POST /characters/<id>/generate` for one-shot character renders, `POST /loras/refresh` and the CivitAI download endpoints for LoRA management, `GET /status` for queue and system state, `GET /outputs` for the gallery, `POST /queue/retry` / `/queue/remove` / `/queue/pause` / `/stop` for queue control. JSON in, JSON out, form-encoded POST bodies for the heavy endpoints. No auth — bound to loopback only.
+
+Full reference with every field, every default, and copy-pasteable `curl` invocations: **[docs/API.md](docs/API.md)**. Notable uses: batch overnight render runs, IDE integrations, custom front-ends, and external agents that orchestrate Phosphene as a tool. The in-panel chat was retired in v3.0 — its replacement is your own agent talking to this API.
+
 ## Hardware
 
 Apple Silicon only. MLX is Apple-only by design.
