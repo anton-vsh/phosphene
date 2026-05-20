@@ -19320,6 +19320,12 @@ function setMainOutputsFilter(mode) {
   if (mode !== 'all' && mode !== 'videos' && mode !== 'photos') mode = 'all';
   mainOutputsFilter = mode;
   try { localStorage.setItem('phos_main_outputs_filter', mode); } catch (e) {}
+  // Filter change → reset the carousel render cap so the user lands at
+  // the top of the new filter without accumulated "Show more" clicks
+  // bleeding through. Poll-driven re-renders (same filter, new output
+  // arrived) keep their expanded cap because that path doesn't go
+  // through setMainOutputsFilter.
+  window._carouselRenderLimit = null;
   _updateMainFilterChips();
   // If the user filtered to a kind that's not in the polled top-60 (e.g.
   // photos when the recent 60 are all videos — a common state after a
@@ -23656,7 +23662,23 @@ function renderCarousel() {
     el.innerHTML = `<div class="empty-msg">${msg}</div>`;
     return;
   }
-  el.innerHTML = visible.map(o => {
+  // PERF: cap rendered DOM cards. The auto-fetch (d29de9c) started
+  // landing the full /outputs list (~600+ entries) into the carousel
+  // on first poll, which made Chrome hold the entire DOM tree resident
+  // — Mr Bizarro saw ~10 GB Chrome RSS + 62 GB swap during renders
+  // (2026-05-20). 108d41b deferred video metadata fetches via
+  // IntersectionObserver but didn't shrink the DOM itself.
+  //
+  // Cap at CAROUSEL_RENDER_CAP visible cards (240 — generous for normal
+  // scroll, ~94% smaller than the 658-card worst case). When more
+  // exist, append a "Show N more" button at the end. Click bumps the
+  // cap by another batch and re-renders. The cap is per-render — it
+  // resets to default when the filter changes or new outputs land.
+  const CAROUSEL_RENDER_CAP = 240;
+  const _renderLimit = window._carouselRenderLimit || CAROUSEL_RENDER_CAP;
+  const _visibleSlice = visible.slice(0, _renderLimit);
+  const _hiddenCount = visible.length - _visibleSlice.length;
+  el.innerHTML = _visibleSlice.map(o => {
     const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
     const isPhoto = isPhotoOutputMain(o);
     // Thumbnail markup branches on kind. Videos use <video> with a
@@ -23741,6 +23763,19 @@ function renderCarousel() {
       </div>
     </div>`;
   }).join('');
+  // Append the "Show more" trailer when the render was capped. Each
+  // click bumps the cap by another full batch (240 cards), so users
+  // with thousands of outputs still pay only ~240 cards' worth of DOM
+  // per page-load by default. The trailer's onclick is inline so we
+  // don't need a separate listener wiring step.
+  if (_hiddenCount > 0) {
+    el.insertAdjacentHTML('beforeend',
+      `<div class="carousel-more-trailer" style="grid-column:1/-1;display:flex;justify-content:center;padding:14px 8px 6px;">
+         <button type="button" class="ghost-btn" onclick="window._carouselRenderLimit=(window._carouselRenderLimit||${CAROUSEL_RENDER_CAP})+${CAROUSEL_RENDER_CAP};renderCarousel();">
+           Show ${Math.min(_hiddenCount, CAROUSEL_RENDER_CAP)} more · ${_hiddenCount} hidden
+         </button>
+       </div>`);
+  }
   // Lazy-load the just-rendered video thumbnails. <img> entries already
   // have native loading="lazy" but <video> has no equivalent, so we
   // observe each carousel card and promote `data-src` → `src` only when
