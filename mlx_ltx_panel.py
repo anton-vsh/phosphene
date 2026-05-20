@@ -11647,6 +11647,25 @@ HTML = r"""<!doctype html>
     }
     .pill-btn .ico { font-size: 16px; line-height: 1; }
     .pill-btn .sub { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    /* Tiny amber chip flagging a feature as not-yet-fully-validated.
+       Inline alongside the label, doesn't push the layout — same idiom
+       as a "NEW" or "BETA" tag. Used on the Style train-type pill in
+       v3.0 since the style training path is lightly tested. */
+    .experimental-tag {
+      display: inline-block;
+      padding: 1px 6px;
+      margin-left: 6px;
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #ffd07a;
+      background: rgba(255, 165, 79, 0.13);
+      border: 1px solid rgba(255, 165, 79, 0.35);
+      border-radius: 5px;
+      vertical-align: middle;
+      line-height: 1.3;
+    }
     /* Image Studio reference-image drop slots — same accent + dashed
        border idiom as the existing reference upload zones, but compact
        enough to fit three across in the modal. */
@@ -18026,7 +18045,7 @@ HTML = r"""<!doctype html>
           </button>
           <button type="button" class="pill-btn" data-train-type="style"
                   onclick="setTrainType('style')">
-            <span>Style</span>
+            <span>Style <span class="experimental-tag" title="Lightly tested in v3.0 — please report issues">experimental</span></span>
             <span class="sub">cinematic look · color · lighting</span>
           </button>
         </div>
