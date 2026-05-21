@@ -338,6 +338,30 @@ phosphene-dev.git/
 
 ## 7. Known bugs / fixed bugs
 
+### Fixed 2026-05-21 (autonomous modality-matrix session)
+
+Mr Bizarro asked for "continue testing and fixing issues as they arise · check all the other modalities · I will be back in a few hours work continuously". Full modality test pass + analytics scaffold + two real bug fixes + one issue-#12 UX gate. 5 commits to `dev`:
+
+- **A2V died at ~10 s every render with a reference image** (`combined_image_conditionings() missing 1 required keyword-only argument: 'frame_rate'`). Upstream `ltx-pipelines-mlx` v0.14.0 made `frame_rate=` mandatory on `utils._orchestration.combined_image_conditionings`, but `a2vid_two_stage.py` and `lipdub.py` still call it without forwarding the kwarg. Fixed via runtime monkey-patch in `mlx_warm_helper.py::_install_a2v_frame_rate_patch()` — wraps the function with `frame_rate=24.0` default, idempotent, parallel to the existing `_install_video_decoder_patch` pattern. Validated: A2V 1024×576 121f + ref now succeeds in 395 s, output valid h264+AAC. Commit `681f429`.
+- **Extend died at the downscale step** (`Unable to choose an output format for '<name>.mp4.partial'; use a standard extension or specify the format manually`). `_ensure_downscaled` writes to `<name>.mp4.partial` for atomic rename, but ffmpeg can't infer mp4 from `.partial`. Added `-f mp4`. Was silent for a while because Extend wasn't being exercised after the .partial pattern was introduced. Commit `736ca0d`.
+- **Image Studio let users submit Qwen-Image-Edit jobs when the add-on wasn't installed** (issue #12, sureshkpiitk). Job died deep in the helper with "pip install -U mflux>=0.17" buried in the log. Closes the UX hole Mr Bizarro publicly promised on the issue: `/image/engine_status` now returns `family_installed` per engine; the engine pill turns red with "install Qwen-Image-Edit" + Pinokio-sidebar-button tooltip when missing; Generate button refuses upfront. HiDream engines unaffected. Commit `2694f9f`.
+- **Panel boot was silent when helper venv was missing** (issue #5 footnote, claude3d hit this from terminal on M5). Now logs a single stderr warning naming both probed paths (`.venv/bin/python3.11` and `env/bin/python3.11` under `ltx-2-mlx/`) plus the `LTX_HELPER_PYTHON` override. No behavior change otherwise. Commit `fa17c61`.
+- **Anonymous opt-in telemetry shipped end-to-end** (commit `d94c72f`). `analytics.py` module + Settings UI toggle + `TELEMETRY.md` field-by-field doc + README mention. Default OFF. Schema covers panel_boot / render_start / render_done / render_failed / render_cancelled / helper_crash / settings_opt_in / settings_opt_out. Strictly sanitized — never sends prompts, paths, hostnames, LoRA filenames. 32-char hex install_id with rotate ("forget me") button. Endpoint via `PHOSPHENE_ANALYTICS_ENDPOINT` env var or default. 4 KB payload cap, 4 s socket timeout, 512-event queue with oldest-drop-on-full, daemon thread, fail-safe when endpoint dead. Privacy-validated end-to-end with a local catcher: zero traffic when toggle OFF (multiple /status hits + boot), expected JSON when ON.
+
+### Modality test results (2026-05-21)
+
+Per the "use real prompts that match the inputs" rule (memory `feedback_phosphene_test_prompts.md`). All tests used a bizarrotrn wood-paneled-room reference frame + matching prompts.
+
+| Modality | Result | Wall | Notes |
+|---|---|---|---|
+| T2V Character HQ | ✅ | 306 s | `TI2VidTwoStagesHQPipeline`, 1024×576 121f, no hang |
+| A2V (after fix) | ✅ | 395 s | 1024×576 121f + ref + voice clip; output h264+AAC 5.01 s |
+| FFLF | ✅ | 265 s | Cover-cropped to 768×448 (tier_max_dim); output h264+AAC 5.01 s |
+| Extend (after fix) | ⚠️ output OK | denoise 10:23 → decode 16 s → **hangs** | Same post-decode hang as I2V Balanced. Output IS written before hang; killed helper to recover. Documented in ROADMAP. |
+| Qwen Edit | ✅ | 1477 s (includes 16-file model download on first run) | 2× 1280×720 PNGs, valid |
+| HiDream Medium | ✅ | 239 s | 2× 2560×1440 PNGs, snapped to trained dim |
+| I2V Balanced | ❌ (deferred) | — | Known hang, see ROADMAP §post-decode hang |
+
 ### Fixed this week
 - **Y1.034 silent regression**: VAE temporal-streaming patch tiled even on short clips, adding ~30 s decode tax. Fixed in Y1.037 with auto-mode threshold.
 - **Y1.024 Extend regression**: my own download-filter pruned `transformer-dev.safetensors` from Q4 dir, breaking Extend mode for Q4-only installs. Fixed in Y1.036 by routing Extend to Q8.
