@@ -249,6 +249,45 @@ Tracking: the HDR-specific Phase 1 work landed via re-exposing the
 hdr toggle (commit `<hdr-ship>`); the generic Phases 2–5 stay open
 in this entry.
 
+### `[ ]` I2V Balanced perf — post-decode hang on Q4 distilled path
+
+After the May 9 upstream `ltx-2-mlx` refactor, I2V Balanced (and T2V
+Balanced) route through `DistilledPipeline.generate_two_stage(image=...)`.
+The actual render completes in ~3 min for a 5s I2V at 1024×576, but
+the helper then hangs 5-15 min before signaling done to the panel.
+
+Diagnostic findings (2026-05-21 session):
+- Output mp4 IS written to disk before the hang starts.
+- Stack samples show the helper deep in Metal command-buffer
+  deallocation (`IOGPUMetalCommandBufferStorageDealloc`,
+  `MTLResourceList releaseAllObjectsAndReset`, etc).
+- Diagnostic prints placed AFTER `_decode_and_save_video()` never
+  fire — the function-return path itself is the hang. Most likely
+  MLX/Metal completion-handler chains holding the GIL through
+  Python frame teardown.
+- LTX2_DIT_EVAL_EVERY tuning has no effect (tested 0/1/4/8).
+
+Path forward:
+1. **For Q8 (≥48 GB) tiers:** route Balanced I2V/T2V through
+   `TI2VidTwoStagesPipeline` instead of `DistilledPipeline`. That class:
+   - Runs full-resolution, not half-res with Stage-2 upscale.
+   - Supports CFG (`cfg_scale=3.0` validated).
+   - Supports TeaCache (`enable_teacache=True, teacache_thresh=N`).
+   - Already used by the working HQ path.
+   The helper's `get_pipe('i2v', ...)` currently aliases to
+   DistilledPipeline; needs an explicit branch for Balanced→
+   TI2VidTwoStagesPipeline on the dev model.
+2. **For Q4 (<48 GB) tiers:** stuck with DistilledPipeline until
+   upstream's MLX completion-handler issue is fixed. Workaround
+   ideas: spawn a fresh helper subprocess per render so the hang
+   happens after the user has their file (Pinokio Update + watchdog
+   would respawn for the next job).
+3. **Reddit / issue #5** users on small Macs are hitting both this
+   hang AND the geometric-grid artifact (which is the DistilledPipeline
+   structure producing weak I2V on the distilled checkpoint). Both
+   problems are the same root cause: forced fallback to a pipeline
+   that was never meant for I2V quality.
+
 ## Mid term
 
 ### `[ ]` In-panel "Report bug" button

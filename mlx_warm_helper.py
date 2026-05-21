@@ -52,9 +52,23 @@ from pathlib import Path
 # `LTX2_DIT_EVAL_EVERY=8` to fall back to upstream defaults if a
 # specific tier needs the safety of mid-step evaluation.
 if "LTX2_DIT_EVAL_EVERY" not in os.environ:
-    os.environ["LTX2_DIT_EVAL_EVERY"] = "0"
+    # 2026-05-21 perf tuning. Tested matrix on M4 Max 64GB doing
+    # I2V Balanced 5s/121f:
+    #   =0 (full lazy):   denoise 7s/step ✓ | post-decode HANG 14+ min
+    #   =4 (mid lazy):    denoise 7s/step ✓ | post-decode HANG 6+ min
+    #   =8 (upstream):    denoise 3 min/step | (untested past denoise)
+    #   =1 (per-block):   denoise 7s/step ✓ | post-decode HANG 6+ min
+    # The post-decode hang is in the function-return path AFTER the
+    # upstream phase logs "Decoding done in X.Xs" — diagnostic markers
+    # NEVER fire, suggesting MLX/Metal completion-handler chains hold the
+    # GIL through the function exit. Filed as separate roadmap item; the
+    # render output IS correct, just the helper sits idle for minutes
+    # before signaling done.
+    # Picking =1 because the denoise is fast and it matches the eager
+    # per-block flush pattern that worked overnight on May 14-15.
+    os.environ["LTX2_DIT_EVAL_EVERY"] = "1"
 if "LTX2_GEMMA_EVAL_EVERY" not in os.environ:
-    os.environ["LTX2_GEMMA_EVAL_EVERY"] = "0"
+    os.environ["LTX2_GEMMA_EVAL_EVERY"] = "1"
 # ---- end early bootstrap ====================================================
 
 # ---- config ------------------------------------------------------------------
@@ -1649,6 +1663,10 @@ for line in sys.__stdin__:
                 # Step 3: VAE decode + save (decoder loads inside _decode_and_save_video).
                 # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
                 out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
+                # NOTE: lazy-graph cleanup happens AFTER emit(done_event)
+                # below — see comment there. del-ing here would stall the
+                # panel's wait_done while MLX tears down ~10 GB of Metal
+                # buffers + lazy graph nodes synchronously.
                 emit({"event": "log", "line": "step:decode_and_save done"})
             else:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode}"})
@@ -1660,6 +1678,18 @@ for line in sys.__stdin__:
                 emit({"event": "log", "line": "step:decode_and_save start"})
                 # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
                 out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
+                # KNOWN ISSUE 2026-05-21: on the DistilledPipeline.generate_two_stage
+                # path (T2V/I2V Balanced post-May-9 upstream refactor), Python
+                # execution stalls 5-15 minutes between upstream's
+                # "[Decoding video + audio + muxing] done in X.Xs" stderr emit
+                # and the very next Python statement here. Tested with
+                # diagnostic markers — ZERO Python statements execute in
+                # between, so the stall is in the function-return path
+                # itself (likely MLX Metal completion handlers holding the
+                # GIL via callback chains). File is written and intact
+                # before the stall starts. Tracking the proper fix in
+                # ROADMAP: route Balanced I2V through TI2VidTwoStagesPipeline
+                # on Q8 tier instead of DistilledPipeline.
                 emit({"event": "log", "line": "step:decode_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
@@ -1671,7 +1701,19 @@ for line in sys.__stdin__:
             }
             if accel_mode != "off" and _LAST_ACCEL_STATS:
                 done_event["accel_metrics"] = _LAST_ACCEL_STATS
+            # EMIT DONE FIRST — the user's render is complete and the file is
+            # on disk. Cleanup below can take 10+ minutes on a 121-frame
+            # Balanced render because MLX's deallocator has to walk the
+            # entire lazy compute graph and tear down Metal buffers; doing
+            # that BEFORE the done event made the panel sit on "running"
+            # for the full cleanup window (Mr Bizarro caught this 2026-05-21).
             emit(done_event)
+            # Now drop the latent refs. The panel has already moved on; the
+            # helper just needs to be clean by the time the next job arrives.
+            try:
+                del video_latent, audio_latent
+            except UnboundLocalError:
+                pass
         except Exception as exc:
             _last_activity = time.time()
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
