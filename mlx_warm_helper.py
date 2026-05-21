@@ -2182,6 +2182,28 @@ for line in sys.__stdin__:
         # that knows how to do `enhance_t2v` / `enhance_i2v`). First call
         # eats a ~10-15s Gemma load; cached afterwards. release_pipelines
         # frees Gemma when a real render comes in, so memory doesn't pile up.
+        #
+        # 2026-05-20 — augmented system prompt + trigger-word preservation.
+        # The upstream Lightricks system prompt is good but two problems
+        # showed up in practice (Mr Bizarro report):
+        #
+        #   1. Trigger words like `bizarrotrn` survived but got CAPITALIZED
+        #      ("Bizarrotrn"). The LoRA was trained against the exact
+        #      lowercase token — re-casing breaks tokenization and the
+        #      LoRA may not fire as cleanly.
+        #
+        #   2. The official prompt says "if input is vague, invent concrete
+        #      details" → Gemma invented "futuristic motorcycle" / "neon-
+        #      lit avenue" / "polished chrome" when the user just said
+        #      "cool bike". That over-decorates renders away from the
+        #      character LoRA's training distribution.
+        #
+        # Fix: pass a system_prompt= override that extends the official
+        # one with PRESERVE-EXACTLY rules for the panel-supplied
+        # preserve_tokens list, plus a "restrained invention" addendum.
+        # Then do a post-hoc safety pass: if any preserve token isn't
+        # in the output case-exact, splice it back in by replacing the
+        # case-shifted variant.
         job_id = msg.get("id", "?")
         p = msg.get("params", {}) or {}
         user_prompt = (p.get("prompt") or "").strip()
@@ -2189,6 +2211,10 @@ for line in sys.__stdin__:
         if mode not in ("t2v", "i2v"):
             mode = "t2v"
         seed = int(p.get("seed", 10))
+        preserve_tokens = p.get("preserve_tokens") or []
+        if not isinstance(preserve_tokens, list):
+            preserve_tokens = []
+        preserve_tokens = [str(t).strip() for t in preserve_tokens if str(t).strip()]
         if not user_prompt:
             emit({"event": "error", "id": job_id, "error": "empty prompt"})
             continue
@@ -2196,10 +2222,65 @@ for line in sys.__stdin__:
         try:
             t0 = time.time()
             lm = get_gemma_lm()
+            # Build augmented system prompt: official + Phosphene addendum.
+            base_sys = (lm.default_gemma_t2v_system_prompt if mode == "t2v"
+                        else lm.default_gemma_i2v_system_prompt)
+            addendum_lines = [
+                "",
+                "#### Phosphene addendum (overrides any conflict above):",
+                "- Preserve every camera-move and shot description the user",
+                "  wrote verbatim. Do not add invented camera motion.",
+                "- If the user said 'cool bike' / 'a guy' / vague nouns,",
+                "  keep them generic. DO NOT invent specific brands, model",
+                "  numbers, or location styles (no 'futuristic', 'neon-lit',",
+                "  'polished chrome' unless the user said so).",
+                "- Color and lighting: prefer one or two concrete words",
+                "  ('warm afternoon sun', 'overcast sky') over flowery",
+                "  cascades ('shimmering golden hour bathed in...').",
+                "- Audio sentence stays as one trailing line that begins",
+                "  with 'Audio:'.",
+            ]
+            if preserve_tokens:
+                addendum_lines += [
+                    "",
+                    "#### LoRA trigger tokens — PRESERVE CASE-EXACT:",
+                    ("The user's prompt contains LoRA trigger tokens that "
+                     "MUST appear in the output exactly as written, "
+                     "lowercase, no spelling changes, no capitalization "
+                     "changes, no substitutions:"),
+                    "  " + ", ".join(preserve_tokens),
+                    ("These tokens identify trained character / style LoRAs. "
+                     "Re-casing or rewording them breaks tokenization and "
+                     "the LoRA will not fire. If you would normally rephrase "
+                     "(e.g. 'Bizarrotrn the man' → 'a man named Bizarro'), "
+                     "DO NOT — emit the token verbatim, in lowercase."),
+                ]
+            augmented_sys = base_sys + "\n" + "\n".join(addendum_lines)
             if mode == "t2v":
-                enhanced = lm.enhance_t2v(user_prompt, seed=seed)
+                enhanced = lm.enhance_t2v(user_prompt, seed=seed,
+                                           system_prompt=augmented_sys)
             else:
-                enhanced = lm.enhance_i2v(user_prompt, seed=seed)
+                enhanced = lm.enhance_i2v(user_prompt, seed=seed,
+                                           system_prompt=augmented_sys)
+            # Post-hoc safety: case-exact restore for any preserve token
+            # that Gemma still managed to mutate. Catches "Bizarrotrn" →
+            # restore "bizarrotrn".
+            restored: list[str] = []
+            for tok in preserve_tokens:
+                if not tok:
+                    continue
+                if tok in enhanced:
+                    continue  # already case-exact, no work
+                # Case-insensitive locate + replace with case-exact token.
+                import re
+                pat = re.compile(re.escape(tok), re.IGNORECASE)
+                new_enhanced, n = pat.subn(tok, enhanced)
+                if n > 0:
+                    enhanced = new_enhanced
+                    restored.append(tok)
+            if restored:
+                emit({"event": "log",
+                      "line": f"  [enhance] restored case-exact trigger(s): {', '.join(restored)}"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             emit({
@@ -2208,6 +2289,8 @@ for line in sys.__stdin__:
                 "original": user_prompt,
                 "mode": mode,
                 "elapsed_sec": elapsed,
+                "preserve_tokens": preserve_tokens,
+                "restored_tokens": restored,
             })
         except Exception as exc:
             _last_activity = time.time()

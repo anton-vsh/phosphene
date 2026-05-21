@@ -10828,12 +10828,49 @@ class Handler(BaseHTTPRequestHandler):
                 mode = "t2v"
             if not user_prompt:
                 self._json({"error": "no prompt provided"}, 400); return
-            push(f"[enhance] {mode}: {user_prompt[:80]}…")
+            # 2026-05-20 — collect trigger tokens that Gemma MUST preserve
+            # case-exact. Three sources, unioned:
+            #   1. The panel-supplied `preserve_tokens` form field (the
+            #      Enhance button sends active-LoRA triggers + character
+            #      trigger).
+            #   2. Known character names from list_characters() — covers
+            #      the case where the user typed a character name without
+            #      having loaded the LoRA yet (e.g. typing "bizarrotrn" in
+            #      a fresh session before the avatar picker fired).
+            #   3. Tokens in the user's prompt that look like trigger words
+            #      (lowercase, no spaces, ends in `trn` or matches a known
+            #      character id) — defense in depth against (1) being
+            #      empty.
+            preserve_raw = (form.get("preserve_tokens", [""])[0] or "").strip()
+            preserve_set: set[str] = set()
+            if preserve_raw:
+                try:
+                    preserve_set.update(
+                        str(t).strip() for t in json.loads(preserve_raw)
+                        if str(t).strip()
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    # Allow plain comma-separated fallback for API users
+                    preserve_set.update(
+                        t.strip() for t in preserve_raw.split(",")
+                        if t.strip()
+                    )
+            try:
+                for char in list_characters():
+                    trig = (char.get("trigger") or "").strip()
+                    if trig and trig in user_prompt:
+                        preserve_set.add(trig)
+            except Exception:
+                pass
+            preserve_tokens = sorted(preserve_set)
+            push(f"[enhance] {mode}: {user_prompt[:80]}…"
+                 + (f"  preserve={preserve_tokens}" if preserve_tokens else ""))
             try:
                 result = HELPER.run({
                     "action": "enhance_prompt",
                     "id": f"enh-{int(time.time()*1000)}",
-                    "params": {"prompt": user_prompt, "mode": mode, "seed": 10},
+                    "params": {"prompt": user_prompt, "mode": mode, "seed": 10,
+                               "preserve_tokens": preserve_tokens},
                 })
             except Exception as exc:
                 push(f"[enhance] failed: {exc}")
@@ -22558,7 +22595,24 @@ async function enhancePrompt() {
   btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-sparkle-fill"/></svg>Loading Gemma… (~15s on cold start)';
   let res;
   try {
+    // Collect trigger tokens to preserve case-exact through enhance.
+    // Source: every active LoRA's trigger_words + the active character
+    // trigger (if Character mode). Server unions these with any
+    // matching character ids found in the raw prompt as a defense in
+    // depth — see /prompt/enhance handler for the merge.
+    const preserveTokens = [];
+    if (typeof _activeLoras !== 'undefined' && Array.isArray(_activeLoras)) {
+      for (const l of _activeLoras) {
+        for (const t of (l.trigger_words || [])) {
+          const s = String(t || '').trim();
+          if (s) preserveTokens.push(s);
+        }
+      }
+    }
+    const charIdEl = document.getElementById('character_id');
+    if (charIdEl && charIdEl.value) preserveTokens.push(charIdEl.value);
     const fd = new URLSearchParams({ prompt: original, mode });
+    if (preserveTokens.length) fd.set('preserve_tokens', JSON.stringify(preserveTokens));
     const r = await fetch('/prompt/enhance', { method: 'POST', body: fd });
     res = await r.json();
   } catch (e) {
