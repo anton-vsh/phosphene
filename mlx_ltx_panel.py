@@ -3651,10 +3651,16 @@ def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
     # cancelled-mid-encode run can't leave a broken mp4 at `cached` that
     # the next call would treat as a valid cache hit.
     partial = cached.with_suffix(cached.suffix + ".partial")
+    # `-f mp4` is mandatory: the `.mp4.partial` extension confuses ffmpeg's
+    # format autodetect ("Unable to choose an output format … use a standard
+    # extension or specify the format manually") and the whole Extend mode
+    # dies at downscale time. Was silent for a while because Extend wasn't
+    # exercised after the .partial rename was added.
     cmd = [str(FFMPEG), "-y", "-i", str(src),
            "-vf", f"scale={new_w}:{new_h}",
            "-c:v", "libx264", "-pix_fmt", "yuv444p", "-crf", "0", "-preset", "veryfast",
            "-c:a", "copy",   # don't re-encode audio — extend doesn't need it transformed
+           "-f", "mp4",
            str(partial)]
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=120)

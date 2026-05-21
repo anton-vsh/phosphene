@@ -249,12 +249,21 @@ Tracking: the HDR-specific Phase 1 work landed via re-exposing the
 hdr toggle (commit `<hdr-ship>`); the generic Phases 2–5 stay open
 in this entry.
 
-### `[ ]` I2V Balanced perf — post-decode hang on Q4 distilled path
+### `[ ]` I2V Balanced + Extend perf — post-decode hang on Q4 distilled path
 
 After the May 9 upstream `ltx-2-mlx` refactor, I2V Balanced (and T2V
 Balanced) route through `DistilledPipeline.generate_two_stage(image=...)`.
 The actual render completes in ~3 min for a 5s I2V at 1024×576, but
 the helper then hangs 5-15 min before signaling done to the panel.
+
+**Update 2026-05-21 (later session):** Extend exhibits the EXACT SAME
+hang. 768×416 +6f Extend at 12 steps cfg=1.0: denoise completes in
+10:23, decode completes in 16s (output mp4 valid on disk), then the
+helper sits frozen for the next 13+ minutes until killed. So this is
+not specific to DistilledPipeline — it's any pipe that fuses the
+distilled stage 2 LoRA on the dev transformer and then returns from
+`_decode_and_save_video()`. Both DistilledPipeline and the Extend
+pipeline take that path.
 
 Diagnostic findings (2026-05-21 session):
 - Output mp4 IS written to disk before the hang starts.
@@ -266,6 +275,9 @@ Diagnostic findings (2026-05-21 session):
   MLX/Metal completion-handler chains holding the GIL through
   Python frame teardown.
 - LTX2_DIT_EVAL_EVERY tuning has no effect (tested 0/1/4/8).
+- A2V (A2VidPipelineTwoStage), FFLF, T2V Character HQ
+  (TI2VidTwoStagesHQPipeline) all return cleanly — confirming the
+  hang is specific to the distilled-fused-then-decode pattern.
 
 Path forward:
 1. **For Q8 (≥48 GB) tiers:** route Balanced I2V/T2V through
