@@ -19673,6 +19673,12 @@ function setMode(mode) {
     mode = 't2v';
   }
   currentMode = mode;
+  // HDR vs Character mutual exclusion — reflect mode change in pill state.
+  // Runs in a microtask so the rest of setMode finishes setting UI bits
+  // first (character chip strip visibility, etc.).
+  if (typeof _applyHdrPillAvailability === 'function') {
+    Promise.resolve().then(_applyHdrPillAvailability);
+  }
   // The Studio pill swaps the form-pane in place: hide the video form
   // (genForm) and show the inline #studioSection. Right rail (queue,
   // current, history) stays visible regardless of mode. The mode dropdown
@@ -23094,6 +23100,14 @@ function _setOfflineBanner(visible, msg) {
 }
 
 async function poll() {
+  // Reflect HDR-vs-character mutual exclusion every poll cycle. character_id
+  // gets set from multiple code paths (manual chip click, load-params,
+  // localStorage rehydrate, charactersGenerate sub-form, retry); keeping
+  // the HDR pill in sync via a single per-poll re-eval is cheaper than
+  // tracking down every assignment site.
+  if (typeof _applyHdrPillAvailability === 'function') {
+    try { _applyHdrPillAvailability(); } catch (_) {}
+  }
   let s;
   const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
   try {
@@ -25809,6 +25823,59 @@ async function applySettings() {
   pill.addEventListener('click', () => setTimeout(sync, 0));
   sync();
 })();
+
+// HDR vs Character mutual exclusion (Phase 1 constraint, 2026-05-21).
+// HDR-IC runs on the distilled Q4 checkpoint; character LoRAs are
+// trained against the Q8 dev transformer. Mixing them produces wrong
+// output (the server-side guard at run_job_inner rejects the combo).
+// Surface the constraint in the UI BEFORE the user clicks Generate so
+// they don't waste a submit.
+//
+// Rules:
+//   - In Character mode (or with character_id selected): HDR pill is
+//     visibly disabled, unchecking is forced, tooltip explains.
+//   - In T2V/I2V mode WITH HDR on: clicking a character chip clears
+//     HDR with a toast notification.
+function _applyHdrPillAvailability() {
+  const pill = document.getElementById('hdrPill');
+  const cb = document.getElementById('hdr');
+  if (!pill || !cb) return;
+  const charInp = document.getElementById('characterIdInput');
+  const charId = charInp ? (charInp.value || '').trim() : '';
+  // "Locked" when EITHER we're in Character mode OR a character_id is
+  // present (covers retry/load-params paths that set character_id
+  // without flipping currentMode).
+  const locked = (typeof currentMode !== 'undefined' && currentMode === 'character') || !!charId;
+  if (locked) {
+    if (cb.checked) {
+      cb.checked = false;
+      pill.classList.remove('on');
+    }
+    pill.classList.add('disabled');
+    pill.style.opacity = '0.4';
+    pill.style.pointerEvents = 'none';
+    pill.title = 'HDR is unavailable with a character LoRA selected. HDR runs through '
+               + 'the IC-LoRA pipeline on the distilled checkpoint, which is incompatible '
+               + 'with characters (trained against the Q8 dev transformer). Switch out of '
+               + 'Character mode to enable HDR.';
+  } else {
+    pill.classList.remove('disabled');
+    pill.style.opacity = '';
+    pill.style.pointerEvents = '';
+    pill.title = 'HDR via the official Lightricks LTX-2.3-22b IC-LoRA-HDR. '
+               + 'Auto-routes to the distilled Q4 path (required by the IC-LoRA pipeline). '
+               + 'First HDR job downloads the LoRA weights from Hugging Face (~330 MB, '
+               + 'gated — needs an HF token in Settings). Output is standard MP4 plus '
+               + 'a companion .hdr.npz tensor (float32 scene-linear) for any pro tool '
+               + 'that wants the raw HDR.';
+  }
+}
+// Expose globally so setMode + character chip selection can call it.
+window._applyHdrPillAvailability = _applyHdrPillAvailability;
+// Run once at boot so the initial state (character_id might be set
+// from localStorage / load-params) gets reflected immediately.
+document.addEventListener('DOMContentLoaded', _applyHdrPillAvailability);
+_applyHdrPillAvailability();
 
 // ====== CivitAI NSFW toggle pill (mirrors HDR toggle UX) ======
 (function () {
