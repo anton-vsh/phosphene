@@ -2026,6 +2026,7 @@ _VERSION_STATE: dict = {
     "local_short": None,           # 7-char display form
     "local_version": None,         # human label from /VERSION file (e.g. "Y1.001")
     "local_branch": None,          # branch name (e.g. "main") or "(detached)"
+    "local_commit_date": None,     # ISO-day of HEAD commit (e.g. "2026-05-21") — for dev pill
     "local_dirty": False,          # uncommitted changes in the working tree
     "remote_sha": None,            # latest sha on origin/main per GitHub API
     "remote_short": None,
@@ -2099,11 +2100,21 @@ def _detect_local_install_state() -> None:
     porcelain = _git_capture(["status", "--porcelain"])
     dirty = bool(porcelain and porcelain.strip())
     local_version = _read_local_version()
+    # 2026-05-21 — capture HEAD commit date so the dev pill can show
+    # users which dated build they're running. Reddit context: dev
+    # users were reporting "I'm on 2.0.5" with character training,
+    # confused because the panel showed an old VERSION value but they
+    # had pulled fresh code. Showing the commit date alongside the
+    # short SHA lets us tell them concretely "you're on the May 18
+    # build — please pull again, latest is May 21."
+    local_commit_date = _git_capture(["log", "-1", "--format=%cd",
+                                       "--date=format:%Y-%m-%d"])
     with _VERSION_LOCK:
         _VERSION_STATE["local_sha"] = sha
         _VERSION_STATE["local_short"] = sha[:7] if sha else None
         _VERSION_STATE["local_version"] = local_version
         _VERSION_STATE["local_branch"] = branch
+        _VERSION_STATE["local_commit_date"] = local_commit_date
         _VERSION_STATE["local_dirty"] = dirty
         # Suppress remote checks when the user is clearly running their own
         # variant — we'd be wrong to nag them about being "behind."
@@ -27692,10 +27703,23 @@ function renderVersionPill() {
     return;
   }
   // Suppressed (dev branch / dirty tree / no git).
+  // 2026-05-21 — Mr Bizarro report: Reddit users on dev were confused
+  // because the pill showed an old VERSION string (e.g. "2.0.5") while
+  // they had pulled fresh code. Now we append the short SHA + commit
+  // date so every dev build is uniquely identifiable. Lets us tell a
+  // user "you're on 3.0.0 · dev · c5dc04c (2026-05-21) — please pull
+  // again, latest is 1ea5f1d (2026-05-21)" instead of just shrugging.
   if (s.suppress_reason) {
     pill.classList.add('pill-dev');
-    pill.textContent = `${local} · dev`;
-    pill.title = `Update check paused: ${s.suppress_reason}.`;
+    const sha = s.local_short || '';
+    const date = s.local_commit_date || '';
+    const trail = sha ? ` · ${sha}${date ? ` (${date})` : ''}` : '';
+    const branchLabel = (s.local_branch && s.local_branch !== 'main')
+      ? s.local_branch : 'dev';
+    pill.textContent = `${local} · ${branchLabel}${trail}`;
+    pill.title = `Update check paused: ${s.suppress_reason}.`
+      + (sha ? `\nFull SHA: ${s.local_sha || sha}` : '')
+      + `\nClick to copy a paste-ready debug string.`;
     return;
   }
   // Behind origin/main — eye-catching action prompt.
@@ -27738,9 +27762,28 @@ async function versionPillClick() {
   }
   const s = _versionState || {};
   if (s.suppress_reason) {
-    alert(`Update check is paused: ${s.suppress_reason}.\n\n` +
-          `Phosphene only checks GitHub when you're on a clean main branch. ` +
-          `Commit your local changes (or switch back to main) to re-enable updates.`);
+    // 2026-05-21 — dev-pill click now copies a paste-ready debug string
+    // to clipboard. Mr Bizarro report: Reddit dev users couldn't say
+    // exactly which commit they were on, leading to "I'm on 2.0.5"
+    // confusion when they had pulled fresh code. One click gives them
+    // a string they can paste into a bug report.
+    const debug = `Phosphene ${s.local_version || '?'} `
+      + `· ${s.local_branch || 'branch?'} `
+      + `· ${s.local_short || 'sha?'}`
+      + (s.local_commit_date ? ` (${s.local_commit_date})` : '')
+      + (s.local_dirty ? ' · dirty tree' : '');
+    try {
+      await navigator.clipboard.writeText(debug);
+      alert(`Update check is paused: ${s.suppress_reason}.\n\n`
+        + `Copied this debug string to your clipboard so you can paste `
+        + `it into a bug report:\n\n${debug}`);
+    } catch (e) {
+      alert(`Update check is paused: ${s.suppress_reason}.\n\n`
+        + `Your build:\n${debug}\n\n`
+        + `Phosphene only checks GitHub when you're on a clean main `
+        + `branch. Commit your local changes (or switch back to main) `
+        + `to re-enable updates.`);
+    }
     return;
   }
   // Behind: pull the update.
