@@ -141,23 +141,78 @@ into the decode path to recover 16-bit linear HDR from the VAE's
 
 Plan in phases, each shippable on its own:
 
-**Phase 1 — HDR text-driven mode (v3.x).** Re-expose the HDR pill in
-the UI. When checked, route the job to a new `generate_hdr` helper
-action that instantiates `HDRICLoraPipeline` with the Lightricks HDR
-LoRA and an empty `video_conditioning`. Output is the standard SDR
-MP4 (LoRA still influences the look via weight delta) plus a sidecar
-`.hdr.npz`. Force `quality=balanced` (distilled Q4) since IC-LoRAs
-require the distilled checkpoint per upstream docs. Block HDR +
-character LoRA stacking with a clear error message (validated as
-non-functional combo for v3.x).
+**Phase 1 — HDR text-driven mode (PLUMBING SHIPPED, BUTTON PULLED).**
+The full plumbing landed in v3.0 dev: `generate_hdr` helper action,
+`HDRICLoraPipeline` wiring, panel routing, all working end-to-end.
+But the UI button was pulled 2026-05-21 (commit `<hdr-pull>`) because
+the killer use case is HDR + character — and that combo is
+architecturally unsound on the single-pass distilled path. Pure-text
+HDR isn't useful enough on its own to justify the button. Re-exposing
+the pill is a one-line un-comment at `mlx_ltx_panel.py:17441` once
+Phase 2 ships and the two-pass character flow works. The helper
+action stays callable via the HTTP API (`/run` with `hdr=on`) for any
+script that wants pure-text HDR today.
 
-**Phase 2 — Reference-video conversion mode (v3.x+).** Add a
-reference-video picker that appears when HDR is on, populated by:
-(a) recent video outputs from the gallery, or
-(b) a fresh file drop.
-The reference goes into `video_conditioning=[(path, 1.0)]`. This is
-the SDR → HDR re-grade path: take an existing video output, re-encode
-through HDR for 16-bit linear output.
+**Correction discovered 2026-05-21:** The premise I worked from in
+the original phasing (character LoRAs trained against Q8 dev, HDR
+trained against distilled, deltas misaligned) was wrong. Verified by
+inspection:
+
+- Phosphene's lora_lab points the trainer at `mlx_models/ltx-2.3-mlx-q4/`
+  via `resolve_default_model_dir()`.
+- That directory contains ONLY `transformer-distilled.safetensors`
+  (no dev variant; the Q4 download filter excludes it).
+- The upstream `ltx_trainer_mlx.model_loader` picks transformer files
+  in order: `transformer.safetensors`, `transformer-distilled.safetensors`,
+  `transformer-dev.safetensors`.
+- → Character LoRAs are trained against the **distilled** checkpoint,
+  same base as HDR-IC. The combo on the distilled path stacks
+  CLEANLY — no fine-tune misalignment.
+
+The Phosphene-side comment calling the base "dev transformer" (still
+present at `lora_lab/train_character.py:742`) is historical confusion
+and should be updated.
+
+What this means for HDR + character:
+- The single-pass distilled-path combo (which Phase 1 plumbing
+  supports today) should produce a faithful character + HDR output.
+  The only quality cap is "distilled = 8 steps, HQ dev = ~30 steps"
+  — that's a generic speed/quality tradeoff on the distilled lane,
+  not an HDR-specific fidelity killer.
+- The "experimental" framing I baked into the UI pill tooltip was
+  overly cautious. When the pill comes back, drop that warning.
+- Phase 2 (two-pass re-grade) is still architecturally clean and
+  remains the path for HQ-quality character + HDR. But Phase 1
+  alone should now be acceptable for character work.
+
+The HDR button was still pulled for v3.0 (Mr Bizarro request — wants
+to ship the release and validate HDR separately), but it's a
+one-line un-comment to bring back once you want to test the
+single-pass distilled-path character + HDR combo.
+
+**Phase 2 — Two-pass character + HDR via SDR→HDR re-grade (HQ path).**
+This is what Mr Bizarro initially asked for. Workflow:
+  1. User renders normally at Q8 dev with character LoRA → full
+     character fidelity SDR MP4.
+  2. User clicks "Re-grade to HDR" on the output card (next to
+     Animate / Quality buttons).
+  3. Panel queues a `generate_hdr` job with
+     `video_conditioning=[(source.mp4, 1.0)]` and `loras=[HDR-IC]`
+     (NO character LoRA — character is baked into the SDR reference
+     latents).
+  4. HDRICLoraPipeline reads the SDR video, encodes it as the IC
+     reference, generates a HDR-graded version conditioned on the
+     reference latents. LogC3 inverse on decode → float32 scene-linear
+     `.hdr.npz` companion + a re-graded SDR preview MP4.
+Both stages use their natural base (Q8 dev for character, distilled
+for HDR-IC). Character fidelity survives because the SDR reference
+carries the identity through to the HDR stage as conditioning, not
+as a fused LoRA delta. This is also the Lightricks-recommended
+workflow per the HDR LoRA's own README ("video conversion from 8 bit
+SDR to 16 bit HDR").
+
+Once Phase 2 ships, re-expose the HDR pill (which becomes "Re-grade
+to HDR" on output cards rather than a pre-submit form toggle).
 
 **Phase 3 — Motion-Track and Union-Control IC-LoRAs.** Two more
 Lightricks IC-LoRAs at `Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control`

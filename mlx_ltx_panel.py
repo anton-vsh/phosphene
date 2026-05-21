@@ -17539,20 +17539,32 @@ HTML = r"""<!doctype html>
             <span id="avoidToggleLabel">Avoid +</span>
           </button>
           <span class="ct-spacer"></span>
-          <!-- HDR toggle re-exposed 2026-05-20 (Phase 1 of IC-LoRA
-               support). Routes through HDRICLoraPipeline upstream
-               (ltx_pipelines_mlx.hdr_ic_lora) which does the real
-               LogC3 inverse + IC-LoRA fusion. Phase 1 ships text-driven
-               mode (no reference video required — LoRA delta still
-               applies). Phase 2 adds the reference-video picker for
-               SDR→HDR re-grading. See ROADMAP.md for the full arc. -->
+          <!-- HDR toggle hidden again 2026-05-21 (Mr Bizarro request):
+               "remove the HDR LoRA from this release, you can leave the
+               plumb in there, but remove the button and put it on the
+               roadmap."
+               Why: the single-pass HDR + character combo (which I
+               unblocked at 495c04c) is architecturally unsound — the
+               character LoRA's deltas were trained against Q8 dev and
+               don't align cleanly against the distilled base HDR-IC
+               forces. Pure-text HDR works but isn't the killer feature.
+               The architecturally clean path is Phase 2: render normally
+               with character → re-grade output through HDR-IC as
+               SDR→HDR conversion (two-pass workflow). Until Phase 2
+               ships, the button would mislead users.
+               The HTML markup, helper action, panel routing, and helper
+               imports all stay in place. Re-exposing is a one-line
+               un-comment when Phase 2 lands. -->
+          <input type="hidden" id="hdr" name="hdr" value="off">
+          <!--
           <label class="toggle-pill" id="hdrPill"
-                 title="HDR via the official Lightricks LTX-2.3-22b IC-LoRA-HDR. Auto-routes to the distilled Q4 path (required by the IC-LoRA pipeline). First HDR job downloads the LoRA weights from Hugging Face (~330 MB, gated — needs an HF token in Settings). Output is standard MP4 plus a companion .hdr.npz tensor (float32 scene-linear) for any pro tool that wants the raw HDR.">
+                 title="HDR via the official Lightricks LTX-2.3-22b IC-LoRA-HDR.">
             <input type="checkbox" id="hdr" name="hdr">
             <span class="toggle-dot"></span>
             <span>HDR</span>
             <span class="experimental-tag" style="margin-left:4px;font-size:9px;padding:1px 5px;border-radius:6px;background:rgba(255,180,80,0.18);color:#ffb450;letter-spacing:0.4px;text-transform:uppercase;">new</span>
           </label>
+          -->
           <label class="toggle-pill" id="noMusicPill"
                  title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
             <input type="checkbox" id="noMusic" name="no_music">
@@ -25826,6 +25838,24 @@ async function applySettings() {
 (function () {
   const pill = document.getElementById('hdrPill');
   const cb = document.getElementById('hdr');
+  if (!pill || !cb) return;
+  const sync = () => pill.classList.toggle('on', cb.checked);
+  cb.addEventListener('change', sync);
+  pill.addEventListener('click', () => setTimeout(sync, 0));
+  sync();
+})();
+
+// ====== No-voice toggle pill (mirrors HDR / No-music sync pattern) ======
+// 2026-05-21 — Mr Bizarro: "No voice button is not clickable for some
+// reason." Root cause: the pill never had a sync IIFE like hdrPill /
+// noMusicPill / civitaiNsfwPill. Clicking the <label> toggled the inner
+// checkbox (standard HTML label-input pairing), but nothing flipped the
+// .on class so the pill never lit up. From the user's perspective it
+// read as "click doesn't do anything." This IIFE makes it visually
+// reactive — same shape as the HDR pill wiring above.
+(function () {
+  const pill = document.getElementById('noVoicePill');
+  const cb = document.getElementById('noVoice');
   if (!pill || !cb) return;
   const sync = () => pill.classList.toggle('on', cb.checked);
   cb.addEventListener('change', sync);
