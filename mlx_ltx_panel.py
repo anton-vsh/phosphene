@@ -6447,6 +6447,76 @@ def run_job_inner(job: dict) -> None:
         final_out = raw_out
     job["raw_path"] = str(raw_out)
 
+    # ===== HDR via IC-LoRA (Phase 1) ====================================
+    # When the user ticks the HDR pill the panel routes to the dedicated
+    # `generate_hdr` helper action backed by HDRICLoraPipeline (upstream
+    # ltx_pipelines_mlx.hdr_ic_lora). Constraints:
+    #   - IC-LoRA only works on the distilled checkpoint, so force the
+    #     Q4 distilled folder regardless of the user's quality pick.
+    #   - Stacking a character LoRA on top of HDR is documented as a
+    #     non-functional combo (different LoRA delta target + different
+    #     load path); refuse it explicitly so the user gets a clear
+    #     error instead of garbled output.
+    #   - T2V and I2V only for now; FFLF / Extend / A2V have their own
+    #     dispatch branches and would need separate HDRIC wiring later.
+    if p.get("hdr") and mode in ("t2v", "i2v"):
+        user_loras_pre_hdr = list(p.get("loras") or [])
+        if any((Path(str(l.get("path", ""))).name.lower().endswith("_v2.safetensors")
+                or (l.get("kind") == "train_character")) for l in user_loras_pre_hdr):
+            raise RuntimeError(
+                "HDR + character LoRA isn't supported yet. The HDR IC-LoRA "
+                "runs on the distilled checkpoint; character LoRAs are "
+                "trained against the Q8 dev transformer. Pick one or the "
+                "other for now (HDR alone, or character without HDR)."
+            )
+        hdr_loras = [{
+            "path": CURATED_LORAS["hdr"]["repo_id"],
+            "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
+        }]
+        job_spec = {
+            "action": "generate_hdr",
+            "id": job["id"],
+            "params": {
+                # Force distilled folder. The Q4 dir holds
+                # transformer-distilled.safetensors which is what the
+                # IC-LoRA was trained against.
+                "model_dir": str(MODELS_DIR / "ltx-2.3-mlx-q4")
+                              if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
+                              else str(MODELS_DIR),
+                "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
+                "output_path": str(raw_out),
+                "height": height,
+                "width": width,
+                "frames": frames,
+                "frame_rate": model_fps,
+                "seed": p["seed"],
+                # Empty video_conditioning = text-driven Phase 1 mode.
+                # Phase 2 adds a UI picker for an SDR reference video.
+                "video_conditioning": [],
+                "loras": hdr_loras,
+                # Stage counts: the same distilled defaults the standard
+                # 'generate' action uses. ICLoraPipeline runs Stage 1
+                # with the LoRA fused, Stage 2 reloads a clean
+                # transformer (matches the Lightricks reference).
+                "stage1_steps": int(p.get("stage1_steps", 10)),
+                "stage2_steps": int(p.get("stage2_steps", 3)),
+            },
+        }
+        if helper:
+            push(f"Run HDR via helper: id={job['id']} {width}x{height} {frames}f")
+            helper.send(job_spec)
+            sidecar = helper.wait_done(job["id"])
+            push(f"HDR done in {sidecar['elapsed_sec']}s → {Path(raw_out).name}")
+        else:
+            raise RuntimeError("HDR requires the warm helper subprocess")
+        # Post-process: same encode pass T2V/I2V get (mux audio, upscale,
+        # write sidecar). Re-uses the standard tail of run_job_inner by
+        # falling through to it — set up the bookkeeping fields the same
+        # way the other branches do, then return cleanly.
+        job["output_path"] = str(raw_out)
+        return
+
     if quality == "high":
         if not SYSTEM_CAPS["allows_q8"]:
             raise RuntimeError(
@@ -17423,29 +17493,20 @@ HTML = r"""<!doctype html>
             <span id="avoidToggleLabel">Avoid +</span>
           </button>
           <span class="ct-spacer"></span>
-          <!-- HDR toggle hidden 2026-05-20 (Mr Bizarro: "HDR is not working
-               and never worked, actually never"). The Lightricks HDR LoRA
-               is an IC-LoRA: it needs the dedicated ICLoraPipeline
-               (upstream ltx_pipelines_mlx.ic_lora), a reference video for
-               the in-context conditioning input, AND LogC3 pre/post
-               transforms to actually produce HDR output. The toggle was
-               wired through the regular _pending_loras hook on the
-               standard pipelines — which loads the weights but never
-               fires the conditioning path, so the LoRA silently does
-               nothing. Hidden in the UI + path stays in the backend for
-               when proper IC-LoRA support is implemented (tracked in
-               ROADMAP.md). The hidden input still exists below so any
-               saved-form state / API callers that include `hdr=on`
-               degrade gracefully (server ignores it on the standard
-               pipelines as before).
-            <label class="toggle-pill" id="hdrPill"
-                   title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer.">
-              <input type="checkbox" id="hdr" name="hdr">
-              <span class="toggle-dot"></span>
-              <span>HDR</span>
-            </label>
-          -->
-          <input type="hidden" id="hdr" name="hdr" value="off">
+          <!-- HDR toggle re-exposed 2026-05-20 (Phase 1 of IC-LoRA
+               support). Routes through HDRICLoraPipeline upstream
+               (ltx_pipelines_mlx.hdr_ic_lora) which does the real
+               LogC3 inverse + IC-LoRA fusion. Phase 1 ships text-driven
+               mode (no reference video required — LoRA delta still
+               applies). Phase 2 adds the reference-video picker for
+               SDR→HDR re-grading. See ROADMAP.md for the full arc. -->
+          <label class="toggle-pill" id="hdrPill"
+                 title="HDR via the official Lightricks LTX-2.3-22b IC-LoRA-HDR. Auto-routes to the distilled Q4 path (required by the IC-LoRA pipeline). First HDR job downloads the LoRA weights from Hugging Face (~330 MB, gated — needs an HF token in Settings). Output is standard MP4 plus a companion .hdr.npz tensor (float32 scene-linear) for any pro tool that wants the raw HDR.">
+            <input type="checkbox" id="hdr" name="hdr">
+            <span class="toggle-dot"></span>
+            <span>HDR</span>
+            <span class="experimental-tag" style="margin-left:4px;font-size:9px;padding:1px 5px;border-radius:6px;background:rgba(255,180,80,0.18);color:#ffb450;letter-spacing:0.4px;text-transform:uppercase;">new</span>
+          </label>
           <label class="toggle-pill" id="noMusicPill"
                  title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
             <input type="checkbox" id="noMusic" name="no_music">

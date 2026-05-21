@@ -2081,6 +2081,101 @@ for line in sys.__stdin__:
             _is_busy = False
         continue
 
+    if action == "generate_hdr":
+        # HDR via IC-LoRA. Phase 1 of IC-LoRA support in Phosphene.
+        # Uses HDRICLoraPipeline from ltx_pipelines_mlx.hdr_ic_lora —
+        # the upstream class that handles LoRA fusion at generate time,
+        # the LogC3 inverse transform during decode, and writes the
+        # standard SDR MP4 plus a companion .hdr.npz float32 tensor.
+        # Phase 1 ships text-driven mode: video_conditioning defaults
+        # to [] so no reference video is needed (the LoRA delta still
+        # applies; the LogC3 inverse still runs). Phase 2 will add the
+        # reference-video picker for SDR→HDR re-grading.
+        #
+        # Routing constraint: IC-LoRA requires the distilled checkpoint.
+        # The panel forces quality=balanced when HDR is on, which means
+        # model_dir lands on the Q4 distilled folder. Don't try to run
+        # this against the Q8 dev model — the LoRA was trained against
+        # the distilled checkpoint and the weights won't align.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            configure_acceleration("off")
+            from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
+            loras = p.get("loras") or []
+            if not loras:
+                raise RuntimeError(
+                    "HDR job requires the HDR LoRA in `loras`. The panel "
+                    "should have injected Lightricks/LTX-2.3-22b-IC-LoRA-HDR."
+                )
+            # Resolve each LoRA path (HF repo id → local safetensors via
+            # snapshot_download + largest-file pick; absolute path → pass-through).
+            resolved = [
+                (_resolve_lora_path(str(l["path"])), float(l.get("strength", 1.0)))
+                for l in loras
+            ]
+            num_frames = int(p["frames"])
+            _apply_vae_streaming_decision(num_frames)
+            # Tear down any existing cached pipeline before instantiating
+            # HDRICLoraPipeline — it loads its own DiT + VAE encoder +
+            # upsampler at init, so holding the t2v / i2v caches just
+            # doubles the memory footprint.
+            release_pipelines("hdr render incoming")
+            pipe = HDRICLoraPipeline(
+                model_dir=Path(model_dir),
+                lora_paths=resolved,
+                low_memory=HELPER_LOW_MEMORY,
+            )
+            emit({"event": "log",
+                  "line": f"step:generate_hdr {p['width']}x{p['height']} "
+                          f"{num_frames}f @{float(p.get('frame_rate', 24.0)):.1f}fps "
+                          f"stage1={int(p.get('stage1_steps', 10))} "
+                          f"stage2={int(p.get('stage2_steps', 3))} "
+                          f"loras={len(resolved)} "
+                          f"ref_videos={len(p.get('video_conditioning') or [])}"})
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                video_conditioning=p.get("video_conditioning") or [],
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=num_frames,
+                frame_rate=float(p.get("frame_rate", 24.0)),
+                seed=seed,
+                stage1_steps=int(p.get("stage1_steps", 10)),
+                stage2_steps=int(p.get("stage2_steps", 3)),
+            )
+            kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
+            out_path = pipe.generate_and_save(**kwargs)
+            # Drop the HDRICLoraPipeline aggressively — we don't cache
+            # it the way we do t2v/i2v because HDR jobs are rare and
+            # the pipeline's DiT+upsampler+decoders cost is substantial.
+            try:
+                pipe = None
+                from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+                _ac()
+            except Exception:
+                pass
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
     if action == "enhance_prompt":
         # Gemma-driven prompt rewriting. Same model file as the pipeline's
         # text encoder, but loaded as a `GemmaLanguageModel` (the wrapper
