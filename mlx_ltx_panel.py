@@ -6450,26 +6450,35 @@ def run_job_inner(job: dict) -> None:
     # ===== HDR via IC-LoRA (Phase 1) ====================================
     # When the user ticks the HDR pill the panel routes to the dedicated
     # `generate_hdr` helper action backed by HDRICLoraPipeline (upstream
-    # ltx_pipelines_mlx.hdr_ic_lora). Constraints:
-    #   - IC-LoRA only works on the distilled checkpoint, so force the
-    #     Q4 distilled folder regardless of the user's quality pick.
-    #   - Stacking a character LoRA on top of HDR is documented as a
-    #     non-functional combo (different LoRA delta target + different
-    #     load path); refuse it explicitly so the user gets a clear
-    #     error instead of garbled output.
+    # ltx_pipelines_mlx.hdr_ic_lora). Notes:
+    #   - HDRICLoraPipeline runs against the distilled checkpoint, so
+    #     we force the Q4 distilled folder regardless of the user's
+    #     quality pick.
+    #   - Stacking a character LoRA on top of HDR is experimental.
+    #     The character was trained against the Q8 dev transformer
+    #     while HDR-IC fuses against the distilled base, so the deltas
+    #     don't align perfectly. Initial block (ccfeb2f, 2026-05-20)
+    #     refused the combo on docs grounds; lifted 2026-05-21 per Mr
+    #     Bizarro — let the user judge whether character fidelity on
+    #     the distilled base is acceptable for an HDR shot. Mechanically
+    #     the pipeline stacks both adapters without complaint.
     #   - T2V and I2V only for now; FFLF / Extend / A2V have their own
     #     dispatch branches and would need separate HDRIC wiring later.
     if p.get("hdr") and mode in ("t2v", "i2v"):
         user_loras_pre_hdr = list(p.get("loras") or [])
-        if any((Path(str(l.get("path", ""))).name.lower().endswith("_v2.safetensors")
-                or (l.get("kind") == "train_character")) for l in user_loras_pre_hdr):
-            raise RuntimeError(
-                "HDR + character LoRA isn't supported yet. The HDR IC-LoRA "
-                "runs on the distilled checkpoint; character LoRAs are "
-                "trained against the Q8 dev transformer. Pick one or the "
-                "other for now (HDR alone, or character without HDR)."
-            )
-        hdr_loras = [{
+        has_char = any(
+            (Path(str(l.get("path", ""))).name.lower().endswith("_v2.safetensors")
+             or (l.get("kind") == "train_character"))
+            for l in user_loras_pre_hdr
+        )
+        if has_char:
+            push("HDR + character: experimental combo — character was trained "
+                 "against Q8 dev, HDR runs on distilled Q4. Character fidelity "
+                 "may be weaker than a non-HDR render.")
+        # Build the HDR LoRA stack: start with the user's existing LoRAs
+        # (face/audio/style — they all get fused via the same _fuse_loras
+        # path in HDRICLoraPipeline), then append the HDR IC-LoRA.
+        hdr_loras = list(user_loras_pre_hdr) + [{
             "path": CURATED_LORAS["hdr"]["repo_id"],
             "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
         }]
@@ -25824,44 +25833,31 @@ async function applySettings() {
   sync();
 })();
 
-// HDR vs Character mutual exclusion (Phase 1 constraint, 2026-05-21).
-// HDR-IC runs on the distilled Q4 checkpoint; character LoRAs are
-// trained against the Q8 dev transformer. Mixing them produces wrong
-// output (the server-side guard at run_job_inner rejects the combo).
-// Surface the constraint in the UI BEFORE the user clicks Generate so
-// they don't waste a submit.
-//
-// Rules:
-//   - In Character mode (or with character_id selected): HDR pill is
-//     visibly disabled, unchecking is forced, tooltip explains.
-//   - In T2V/I2V mode WITH HDR on: clicking a character chip clears
-//     HDR with a toast notification.
+// HDR pill tooltip annotator (2026-05-21).
+// Earlier version (1ea5f1d) hard-disabled this pill in Character mode
+// because the docs say HDR-IC requires the distilled checkpoint. Mr
+// Bizarro pushed back — he should be allowed to try the combo and
+// judge the quality himself. Lifted the hard block; this helper now
+// just annotates the tooltip so the user knows when they're entering
+// experimental territory.
 function _applyHdrPillAvailability() {
   const pill = document.getElementById('hdrPill');
   const cb = document.getElementById('hdr');
   if (!pill || !cb) return;
   const charInp = document.getElementById('characterIdInput');
   const charId = charInp ? (charInp.value || '').trim() : '';
-  // "Locked" when EITHER we're in Character mode OR a character_id is
-  // present (covers retry/load-params paths that set character_id
-  // without flipping currentMode).
-  const locked = (typeof currentMode !== 'undefined' && currentMode === 'character') || !!charId;
-  if (locked) {
-    if (cb.checked) {
-      cb.checked = false;
-      pill.classList.remove('on');
-    }
-    pill.classList.add('disabled');
-    pill.style.opacity = '0.4';
-    pill.style.pointerEvents = 'none';
-    pill.title = 'HDR is unavailable with a character LoRA selected. HDR runs through '
-               + 'the IC-LoRA pipeline on the distilled checkpoint, which is incompatible '
-               + 'with characters (trained against the Q8 dev transformer). Switch out of '
-               + 'Character mode to enable HDR.';
+  const inChar = (typeof currentMode !== 'undefined' && currentMode === 'character') || !!charId;
+  // Always clickable now.
+  pill.classList.remove('disabled');
+  pill.style.opacity = '';
+  pill.style.pointerEvents = '';
+  if (inChar) {
+    pill.title = 'HDR + character is experimental. The HDR IC-LoRA runs on '
+               + 'the distilled Q4 base; your character LoRA was trained against '
+               + 'Q8 dev. Mechanically both stack on the pipeline, but character '
+               + 'fidelity may be weaker than a non-HDR render. Try it and judge '
+               + 'the output — that\'s the only way to know.';
   } else {
-    pill.classList.remove('disabled');
-    pill.style.opacity = '';
-    pill.style.pointerEvents = '';
     pill.title = 'HDR via the official Lightricks LTX-2.3-22b IC-LoRA-HDR. '
                + 'Auto-routes to the distilled Q4 path (required by the IC-LoRA pipeline). '
                + 'First HDR job downloads the LoRA weights from Hugging Face (~330 MB, '
