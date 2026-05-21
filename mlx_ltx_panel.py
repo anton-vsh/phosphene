@@ -3769,7 +3769,25 @@ def list_outputs(
     # post-build limit is what governs how much we send to the browser.
     # The scan cost is dominated by stat() calls — 1000 mp4s on APFS is
     # <50 ms in practice, well inside the 1.5 s poll cadence.
-    video_files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # Filter out Extend's pre-downscale cache files (`<base>_dnWIDTHxHEIGHT.mp4`).
+    # These are intermediate inputs the extend pipeline produces from a
+    # source clip — never something a user generated. They leaked into the
+    # gallery with a misleading "21:19"-style label because _outputDurationLabel
+    # falls back to mtime when no sidecar elapsed_sec exists. Hide them at
+    # the source instead of patching the label downstream — they're cache,
+    # not outputs. Pattern: `_dn\d+x\d+(_ext\d+_...)?` covers both bare
+    # downscales and chained extends. Mr Bizarro 2026-05-21.
+    _DN_CACHE_RX = re.compile(r"_dn\d+x\d+$")
+    def _is_dn_cache(p: Path) -> bool:
+        # Stem ends exactly with `_dnWIDTHxHEIGHT` AND has no sidecar.
+        # A real Extend OUTPUT has the timestamp suffix `_ext\d+_…` after
+        # the dn segment, so it won't match this stem-end regex; a cache
+        # file matches because nothing follows the dn segment. The sidecar
+        # absence is belt-and-suspenders against any future render whose
+        # filename happens to terminate this way.
+        return bool(_DN_CACHE_RX.search(p.stem)) and not (p.parent / (p.stem + ".mp4.json")).is_file()
+    video_files = [p for p in sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+                   if not _is_dn_cache(p)]
     image_root = UPLOADS / "library" / "manual"
     image_exts = {".png", ".jpg", ".jpeg", ".webp"}
     image_candidates: list[tuple[Path, float]] = []
@@ -4044,7 +4062,19 @@ class WarmHelper:
                 raise RuntimeError(f"helper failed to start: {ready}")
             push(f"helper ready · model={ready.get('model')} · low_memory={ready.get('low_memory')}")
 
-    def _read_until(self, target_events: list[str], timeout: float | None = None) -> dict | None:
+    def _read_until(self, target_events: list[str], timeout: float | None = None,
+                    log_hook: callable | None = None,
+                    panic_check: callable | None = None) -> dict | None:
+        """Read helper events until one of `target_events` arrives.
+
+        ``log_hook(line)`` is invoked for every log line the helper emits
+        — used by the post-decode panic to spot the decode-done log.
+
+        ``panic_check()`` runs on every idle select tick. If it returns a
+        dict, that dict is returned IMMEDIATELY as if the helper had sent
+        it — used to synthesize a done event when the helper has hung in
+        post-decode but the file is on disk.
+        """
         if not self.proc or not self.proc.stdout:
             return None
         deadline = time.time() + timeout if timeout else None
@@ -4057,6 +4087,13 @@ class WarmHelper:
         while True:
             if deadline and time.time() > deadline:
                 return None
+            # Panic check runs every tick — even when the helper is silent —
+            # so the post-decode hang (helper not emitting anything, file
+            # already on disk) gets rescued promptly.
+            if panic_check is not None:
+                synth = panic_check()
+                if synth is not None:
+                    return synth
             rlist, _, _ = select.select([stdout], [], [], poll_interval)
             if not rlist:
                 continue  # idle slice — re-check deadline
@@ -4075,14 +4112,117 @@ class WarmHelper:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 push(line)
+                if log_hook is not None:
+                    try: log_hook(line)
+                    except Exception: pass
                 continue
             ev_type = ev.get("event")
             if ev_type == "log":
-                push(ev.get("line", ""))
+                log_line = ev.get("line", "")
+                push(log_line)
+                if log_hook is not None:
+                    try: log_hook(log_line)
+                    except Exception: pass
             elif ev_type in target_events:
                 return ev
             else:
                 push(f"helper {ev_type}: {json.dumps(ev)[:200]}")
+
+    # Marker the helper's decode wrapper logs once the upstream decoder
+    # has finished writing the mp4 + muxing the audio. Spotted by the
+    # post-decode-hang panic to start the grace clock.
+    _DECODE_DONE_RX = re.compile(r"\[Decoding (?:video \+ audio \+ muxing|done)\] done in", re.IGNORECASE)
+
+    def _build_post_decode_panic(self, job_spec: dict):
+        """Return (log_hook, panic_check) for `_read_until` that rescues
+        the panel from the MLX/Metal post-decode hang.
+
+        Background
+        ----------
+        On `DistilledPipeline.generate_two_stage` (T2V/I2V Balanced) and
+        `ExtendPipeline.extend_from_video`, the helper writes the output
+        mp4, emits upstream's "[Decoding ... done in X.Xs]" log line,
+        and then Python execution stalls 5-15 minutes in the function-
+        return path. The stall is in Metal command-buffer completion
+        handlers; they block every Python thread's GIL access, so an
+        in-process daemon-thread watchdog can't fire (it's starved by
+        the very thing it's meant to escape — tried + observed
+        2026-05-21).
+
+        Rescue
+        ------
+        SIGKILL the helper from the PANEL (a separate process — no GIL
+        contention possible) once we see:
+          1. The decode-done log line (proves the decoder finished and
+             wrote the file), AND
+          2. A grace period has passed without the helper sending
+             "done"/"error"/"exit", AND
+          3. The output file is on disk with reasonable size.
+
+        Synthesize a "done" event from the known output_path so the
+        panel marks the job succeeded. Helper respawns on next job
+        (~30s spawn cost). Vastly better trade than the 15-min hang.
+
+        Only mp4-producing actions get the panic (image gen + train
+        don't hit this path).
+        """
+        params = job_spec.get("params", {}) or {}
+        action = job_spec.get("action") or params.get("command") or ""
+        output_path = params.get("output_path", "") or ""
+        job_id = job_spec.get("id", "?")
+        # Only arm for actions known to hit the MLX/Metal post-decode hang.
+        # generate covers T2V/I2V Balanced (DistilledPipeline.generate_two_stage);
+        # extend covers ExtendPipeline. A2V, FFLF, image, train have all
+        # been observed returning cleanly, so leave them alone.
+        ARMABLE_ACTIONS = {"generate", "extend"}
+        if action not in ARMABLE_ACTIONS or not output_path:
+            return None, None
+
+        state = {"decode_done_at": None, "panicked": False}
+        GRACE_SEC = 45
+        MIN_FILE_BYTES = 8 * 1024  # generous floor — partial mp4s are MUCH smaller
+
+        def log_hook(line: str):
+            if state["decode_done_at"] is None and self._DECODE_DONE_RX.search(line or ""):
+                state["decode_done_at"] = time.time()
+                push(f"[panel-watchdog] {action} {job_id}: decode-done signal seen, "
+                     f"grace clock armed ({GRACE_SEC}s).")
+
+        def panic_check():
+            if state["panicked"] or state["decode_done_at"] is None:
+                return None
+            elapsed = time.time() - state["decode_done_at"]
+            if elapsed < GRACE_SEC:
+                return None
+            try:
+                if not os.path.exists(output_path):
+                    return None
+                if os.path.getsize(output_path) < MIN_FILE_BYTES:
+                    return None
+            except OSError:
+                return None
+            # All conditions met — helper is stuck in MLX deallocator.
+            state["panicked"] = True
+            push(
+                f"[panel-watchdog] {action} {job_id}: post-decode hang "
+                f"detected — file on disk ({os.path.getsize(output_path)} "
+                f"bytes) but helper silent for {elapsed:.0f}s after "
+                f"decode-done. SIGKILLing helper; render counted as done."
+            )
+            # SIGKILL from a background thread to avoid blocking the panic
+            # tick. The kill is fully external so the helper's GIL
+            # situation doesn't matter.
+            threading.Thread(target=self.kill, daemon=True,
+                             name="phos-panic-kill").start()
+            return {
+                "event": "done",
+                "id": job_id,
+                "output": output_path,
+                "elapsed_sec": None,  # unknown timing — file timing only
+                "watchdog_forced_exit": True,
+            }
+
+        return log_hook, panic_check
 
     def run(self, job_spec: dict) -> dict:
         # Whole-run serialization so concurrent callers don't both park in
@@ -4097,7 +4237,12 @@ class WarmHelper:
                     self.proc.stdin.flush()
                 except (BrokenPipeError, OSError) as exc:
                     raise RuntimeError(f"helper stdin closed: {exc}")
-            ev = self._read_until(["done", "error", "exit"])
+            log_hook, panic_check = self._build_post_decode_panic(job_spec)
+            ev = self._read_until(
+                ["done", "error", "exit"],
+                log_hook=log_hook,
+                panic_check=panic_check,
+            )
             return self._dispatch_run_event(ev)
 
     def _dispatch_run_event(self, ev: dict | None) -> dict:
@@ -4827,7 +4972,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "video_path": f("video_path", ""),
             "extend_frames": max(1, int(f("extend_frames", "5") or 5)),
             "extend_direction": f("extend_direction", "after"),
-            "extend_steps": max(1, int(f("extend_steps", "12") or 12)),
+            "extend_steps": max(1, int(f("extend_steps", "8") or 8)),
             "extend_cfg": float(f("extend_cfg", "1.0") or 1.0),
             # keyframe (FFLF) mode params.
             # Two-keyframe path (start_image + end_image) is the legacy panel
@@ -6067,10 +6212,16 @@ def run_job_inner(job: dict) -> None:
         # native resolution. At 1280×704 + CFG 3.0 we OOM into swap on 64 GB
         # Macs (peak ~47 GB resident + 12 GB swap → 240s/step). Default to
         # cfg_scale=1.0 (no CFG, ~half the activation memory, fits cleanly)
-        # and 12 steps. Form exposes a "Quality" toggle that flips to
+        # and 8 steps. Form exposes a "Quality" toggle that flips to
         # cfg=3.0 + steps=30 for users with the headroom.
+        #
+        # Speed default cut from 12 → 8 (Mr Bizarro 2026-05-21: "is that
+        # not too slow?"). At cfg=1.0 (single-branch) on the dev
+        # transformer, steps 8-12 add marginal quality but cost ~30-60s
+        # each. 8 steps lands ~6 min at 768×416 instead of ~11 min for
+        # the same +6 frame extension.
         cfg_scale = float(p.get("extend_cfg") or 1.0)
-        steps = int(p["extend_steps"]) if p.get("extend_steps") else 12
+        steps = int(p["extend_steps"]) if p.get("extend_steps") else 8
         job_spec = {
             "action": "extend",
             "id": job["id"],
@@ -24237,8 +24388,13 @@ function animateFromPhoto(payload) {
 function _outputDurationLabel(o) {
   const s = (o && typeof o.elapsed_sec === 'number') ? o.elapsed_sec : null;
   if (s == null) {
-    // Fallback: show time-of-day from mtime so empty cards aren't worse.
-    return o.mtime ? o.mtime.slice(11, 16) : '—';
+    // No render-elapsed in sidecar — show a relative timestamp instead
+    // of HH:MM, which looked like a render duration and was confusing
+    // (Mr Bizarro 2026-05-21: pointed at a "21:19" label that looked
+    // like a 21-minute render but was actually the file's wall-clock
+    // mtime). Empty card is better than misleading.
+    return (o && o.mtime && typeof _relTimeFromMtime === 'function')
+      ? _relTimeFromMtime(o.mtime) : '—';
   }
   if (s < 60)    return `${Math.round(s)} s`;
   if (s < 3600)  return `${Math.floor(s / 60)} m ${Math.round(s % 60)} s`;

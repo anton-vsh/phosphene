@@ -491,138 +491,15 @@ _VIDEO_DECODER_PATCH_INSTALLED = False
 _A2V_FRAME_RATE_PATCH_INSTALLED = False
 
 
-class _PostDecodeWatchdog:
-    """Bulletproof escape hatch for the post-decode MLX/Metal deallocator hang.
+# NOTE — an earlier `_PostDecodeWatchdog` daemon-thread class lived
+# here. It cannot fire under the MLX/Metal post-decode hang: the
+# completion-handler chain blocks every Python thread's GIL access,
+# so the daemon thread is starved by the very thing it was meant to
+# escape. The rescue lives in the panel (mlx_ltx_panel.py,
+# `WarmHelper._build_post_decode_panic`) where SIGKILL across the
+# subprocess boundary works regardless of what the helper is holding
+# internally. See ROADMAP for the full diagnosis.
 
-    The Symptom
-    -----------
-    On the ``DistilledPipeline.generate_two_stage`` path (T2V/I2V Balanced
-    post-May-9 upstream refactor) and on ``ExtendPipeline``, the helper
-    writes the output mp4 to disk successfully and emits upstream's
-    "[Decoding video + audio + muxing] done in X.Xs" log line — then
-    Python execution stalls for 5-15 minutes before reaching the next
-    statement. The stall is in the function-return path itself, likely
-    Metal command-buffer completion handlers holding the GIL while the
-    local refs go out of scope. Diagnostic prints placed AFTER the
-    decode call never fire during the stall. The panel sits on "running"
-    the entire time, and from the user's perspective the render
-    "froze." Killing the helper is the only way out.
-
-    The Fix
-    -------
-    Run a daemon thread that watches the output file. Once the file
-    exists with reasonable size (proves decode completed), give the
-    main thread a short grace period to finish naturally. If the
-    main thread DOESN'T emit "done" within that window, the watchdog:
-
-      1. Emits the "done" event itself (file IS on disk, so this is
-         not lying to the panel — the render succeeded).
-      2. Calls ``os._exit(0)`` to bypass MLX's deallocator chains
-         entirely. ``os._exit`` doesn't run atexit handlers, doesn't
-         flush threads, and crucially doesn't need the GIL — it tells
-         the kernel to terminate the process immediately.
-
-    The panel respawns the helper on the next job (~30s spawn cost).
-    That's a vastly better trade than 15-minute hangs.
-
-    Usage
-    -----
-        wd = _PostDecodeWatchdog(
-            output_path=p["output_path"],
-            t0=t0,
-            job_id=job_id,
-            seed_used=seed,
-            action_label="extend",
-        )
-        wd.arm(grace_sec=30)
-        try:
-            pipe._decode_and_save_video(...)
-            ...
-            emit({"event": "done", ...})
-            wd.disarm()  # main thread succeeded, watchdog stands down
-        except Exception:
-            wd.disarm()
-            raise
-    """
-
-    def __init__(self, *, output_path: str, t0: float, job_id: str,
-                 seed_used: int, action_label: str) -> None:
-        self.output_path = output_path
-        self.t0 = t0
-        self.job_id = job_id
-        self.seed_used = seed_used
-        self.action_label = action_label
-        self._disarmed = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def arm(self, *, grace_sec: int = 30, absolute_cap_sec: int = 900) -> None:
-        """Start the watchdog. Idempotent."""
-        if self._thread and self._thread.is_alive():
-            return
-        self._disarmed.clear()
-        self._thread = threading.Thread(
-            target=self._run, args=(grace_sec, absolute_cap_sec),
-            name=f"phos-watchdog-{self.action_label}", daemon=True,
-        )
-        self._thread.start()
-
-    def disarm(self) -> None:
-        """Tell the watchdog the main thread finished cleanly. Idempotent."""
-        self._disarmed.set()
-
-    def _run(self, grace_sec: int, absolute_cap_sec: int) -> None:
-        start = time.time()
-        # Phase 1: wait for the output file to materialize. Decode could
-        # take ~10-60 seconds depending on res/frames; we don't want to
-        # arm the grace clock until we KNOW decode succeeded.
-        while not self._disarmed.is_set():
-            if time.time() - start > absolute_cap_sec:
-                return  # absolute timeout — give up silently
-            try:
-                if (os.path.exists(self.output_path) and
-                        os.path.getsize(self.output_path) > 1024):
-                    break  # file is on disk → enter phase 2
-            except OSError:
-                pass
-            time.sleep(1.0)
-        if self._disarmed.is_set():
-            return
-        # Phase 2: file exists. Give main thread the grace period to
-        # finish its emit("done") naturally. If it does, we exit
-        # quietly. If not, we assume the post-decode hang has happened.
-        if self._disarmed.wait(grace_sec):
-            return  # main thread emitted done within grace
-        # Force the exit. The output IS on disk — the render succeeded.
-        elapsed = round(time.time() - self.t0, 2)
-        try:
-            sys.stderr.write(
-                f"[watchdog] {self.action_label}: main thread hung in "
-                f"post-decode MLX deallocator for >{grace_sec}s after "
-                f"file landed. Emitting done + force-exiting helper. "
-                f"Panel will respawn on next job.\n"
-            )
-            sys.stderr.flush()
-        except Exception:
-            pass
-        try:
-            emit({
-                "event": "done",
-                "id": self.job_id,
-                "output": self.output_path,
-                "elapsed_sec": elapsed,
-                "seed_used": self.seed_used,
-                "watchdog_forced_exit": True,
-            })
-        except Exception:
-            pass
-        try:
-            _real_stdout.flush()
-        except Exception:
-            pass
-        # os._exit terminates immediately — no atexit, no threading
-        # cleanup, no GIL needed. This is the whole point: bypass
-        # whatever Metal handler chain has the main thread stuck.
-        os._exit(0)
 
 
 def _install_video_decoder_patch() -> None:
@@ -1866,23 +1743,17 @@ for line in sys.__stdin__:
                 _free_pipe_for_decode(pipe)
                 emit({"event": "log", "line": "step:free_generation_modules done"})
                 emit({"event": "log", "line": "step:decode_and_save start"})
-                # Post-decode watchdog: on the DistilledPipeline two-stage
-                # path (T2V/I2V Balanced after the May-9 upstream refactor),
-                # Python stalls 5-15 minutes between the decoder's final
-                # write and the very next statement here — the function-
-                # return path itself hangs in MLX/Metal deallocator chains.
-                # Arming the watchdog BEFORE the call means that if main
-                # thread freezes, the daemon thread emits "done" and
-                # os._exit(0)s the helper. The file IS on disk by then
-                # (decoder logs "Decoding ... done" before returning), so
-                # the panel gets a truthful success event and the next
-                # job spawns a fresh helper. Mr Bizarro 2026-05-21:
-                # "fix it. What do you mean 'deferred to roadmap'?".
-                _wd = _PostDecodeWatchdog(
-                    output_path=kwargs["output_path"], t0=t0, job_id=job_id,
-                    seed_used=seed, action_label=f"generate:{mode}",
-                )
-                _wd.arm(grace_sec=30)
+                # Post-decode hang: on DistilledPipeline.generate_two_stage
+                # (T2V/I2V Balanced) the function-return path stalls 5-15 min
+                # in MLX/Metal deallocator chains that hold every Python
+                # thread's GIL access. An in-process daemon-thread watchdog
+                # CAN'T fire (Metal holds something the watchdog needs to
+                # advance). Rescue is done in the PANEL — `WarmHelper.run`
+                # detects the decode-done log line, waits a grace period,
+                # and SIGKILLs the helper if no done event arrives. The
+                # output file is intact on disk by then so the panel
+                # synthesizes a done event from the known output_path.
+                # See `WarmHelper._build_post_decode_panic` in mlx_ltx_panel.py.
                 # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
                 out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
@@ -1903,13 +1774,6 @@ for line in sys.__stdin__:
             # that BEFORE the done event made the panel sit on "running"
             # for the full cleanup window (Mr Bizarro caught this 2026-05-21).
             emit(done_event)
-            # Tell the post-decode watchdog the main thread emitted done
-            # cleanly. If the watchdog isn't armed (use_model_upscale
-            # branch), this is a no-op via UnboundLocalError catch below.
-            try:
-                _wd.disarm()
-            except (NameError, UnboundLocalError):
-                pass
             # Now drop the latent refs. The panel has already moved on; the
             # helper just needs to be clean by the time the next job arrives.
             try:
@@ -1918,10 +1782,6 @@ for line in sys.__stdin__:
                 pass
         except Exception as exc:
             _last_activity = time.time()
-            try:
-                _wd.disarm()
-            except (NameError, UnboundLocalError):
-                pass
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
         finally:
             try:
@@ -1962,13 +1822,16 @@ for line in sys.__stdin__:
             # extends into swap (240s/step instead of ~25s/step). The panel
             # exposes a "Fast" / "Quality" toggle that flips this to 3.0.
             cfg_scale = float(p.get("cfg_scale", 1.0))
-            num_steps = int(p.get("steps", 12))
+            num_steps = int(p.get("steps", 8))
 
             # TeaCache for Extend (2026-05-18). Active only if the boot-time
             # patch landed AND the job spec doesn't explicitly opt out. The
             # monkey-patched guided_denoise_loop reads _EXTEND_TC_CONFIG to
-            # decide whether to construct a controller. Threshold defaults
-            # match the Stage-1 calibration's `LTX2_TEACACHE_THRESH=0.5`.
+            # decide whether to construct a controller. Threshold bumped
+            # from 0.5 → 0.7 on 2026-05-21 — at the lower step count (8
+            # default) more aggressive block-skip pays off more, and at
+            # cfg=1.0 single-branch denoising the quality cost is minimal.
+            # Job spec can still override via `teacache_thresh`.
             enable_tc = bool(p.get("enable_teacache", True)) and _EXTEND_TC_PATCH_OK
             tc_thresh = p.get("teacache_thresh")
             if tc_thresh is not None:
@@ -1976,6 +1839,8 @@ for line in sys.__stdin__:
                     tc_thresh = float(tc_thresh)
                 except (TypeError, ValueError):
                     tc_thresh = None
+            if tc_thresh is None:
+                tc_thresh = 0.7  # was upstream default 0.5
             _EXTEND_TC_CONFIG = {
                 "enable": enable_tc,
                 "thresh": tc_thresh,
@@ -1983,7 +1848,7 @@ for line in sys.__stdin__:
             }
             if enable_tc:
                 emit({"event": "log",
-                      "line": f"TeaCache active on extend (thresh={tc_thresh if tc_thresh is not None else 'default 0.5'})."})
+                      "line": f"TeaCache active on extend (thresh={tc_thresh})."})
             with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
                 if neg_active:
                     emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
@@ -2005,18 +1870,12 @@ for line in sys.__stdin__:
                 pipe._loaded = False
                 aggressive_cleanup()
             pipe._load_decoders()
-            # Post-decode watchdog: Extend hits the SAME MLX/Metal
-            # deallocator hang as I2V Balanced. The output file lands
-            # before the hang; the watchdog forces a clean done +
-            # process exit so the panel doesn't sit on "running" for
-            # 10+ minutes. Helper respawns on next job (~30s spawn
-            # cost). See _PostDecodeWatchdog docstring for the full
-            # rationale.
-            _wd = _PostDecodeWatchdog(
-                output_path=p["output_path"], t0=t0, job_id=job_id,
-                seed_used=seed, action_label="extend",
-            )
-            _wd.arm(grace_sec=30)
+            # Post-decode hang: Extend hits the same MLX/Metal deallocator
+            # freeze as I2V Balanced. Rescue is panel-side in
+            # `WarmHelper._build_post_decode_panic` — an in-process daemon
+            # thread can't fire because Metal holds GIL access during the
+            # deallocator chain. See the same comment in the `generate`
+            # action above.
             # FIX 2026-05-14: upstream made frame_rate= keyword-only required.
             pipe._decode_and_save_video(video_lat, audio_lat, p["output_path"], frame_rate=float(p.get("frame_rate", 24.0)))
             elapsed = round(time.time() - t0, 2)
@@ -2026,13 +1885,8 @@ for line in sys.__stdin__:
                 "output": p["output_path"], "elapsed_sec": elapsed,
                 "seed_used": seed,
             })
-            _wd.disarm()
         except Exception as exc:
             _last_activity = time.time()
-            try:
-                _wd.disarm()
-            except (NameError, UnboundLocalError):
-                pass
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
         finally:
             # Always clear the per-call TeaCache config so a future
