@@ -90,6 +90,21 @@ def _resolve_helper_python() -> Path:
 
 HELPER_PYTHON = _resolve_helper_python()
 HELPER_SCRIPT = Path(os.environ.get("LTX_HELPER_SCRIPT", str(ROOT / "mlx_warm_helper.py")))
+# Surface a missing helper venv at boot — otherwise the first render
+# fails with a confusing "[Errno 2] No such file or directory" pointing
+# at a path the user never set. Real-world reporter (issue #5,
+# claude3d, M5) saw exactly this when running from terminal; the panel
+# claimed `.venv/bin/python3.11` didn't exist when the actual env was
+# at `env/bin/python3.11`. The warning + remediation line saves a
+# round-trip on every install variation that lands in a non-standard
+# layout.
+if not HELPER_PYTHON.is_file():
+    sys.stderr.write(
+        f"WARN: helper Python not found at {HELPER_PYTHON}\n"
+        f"      Looked for .venv/bin/python3.11 and env/bin/python3.11 under {MLX}.\n"
+        f"      Renders will fail until either path exists, or LTX_HELPER_PYTHON\n"
+        f"      is exported pointing at a working python3.11 with mlx + ltx-pipelines.\n"
+    )
 # ffmpeg: env var → PATH → Pinokio bundled → Homebrew → /usr/local. First match wins.
 def _resolve_ffmpeg() -> Path:
     candidates = [
