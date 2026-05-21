@@ -7814,8 +7814,17 @@ class Handler(BaseHTTPRequestHandler):
                     ("hidream_quality_inline",     None,                         0.0, 120.0,  45.0),
                     ("mock_inline",                None,                         0.0,   0.5,   0.0),
                 ]
+                # Map engine_override → mflux family (for install-gate
+                # check). HiDream lives outside mflux; we surface its
+                # install status via the lab-model existence check below.
+                ENGINE_FAMILY = {
+                    "qwen_edit_lightning_inline": "qwen_edit",
+                    "qwen_edit_inline":           "qwen_edit",
+                    "qwen_edit_high_inline":      "qwen_edit",
+                }
                 out = []
                 for engine, repo, dl_gb, sec, cold in ENGINES:
+                    family_installed = True
                     if engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                         # HiDream lives outside the HF cache (lab venv path).
                         # All three modes share the same Dev-BF16 model dir.
@@ -7825,6 +7834,21 @@ class Handler(BaseHTTPRequestHandler):
                         cached = True
                     else:
                         cached = _repo_hf_cache_dir(repo) is not None
+                        # mflux engines additionally need their per-family
+                        # binary on disk (e.g. mflux-generate-qwen-edit).
+                        # Issue #12 (sureshkpiitk): the Image Studio let
+                        # users submit jobs that couldn't possibly run
+                        # because the Qwen-Image-Edit add-on hadn't been
+                        # installed via Pinokio. Surfacing the gate here so
+                        # the pill + Generate button can refuse upfront.
+                        fam = ENGINE_FAMILY.get(engine)
+                        if fam:
+                            probe = agent_image_engine.ImageEngineConfig(
+                                kind="mflux", mflux_family=fam,
+                            )
+                            family_installed = bool(
+                                agent_image_engine._resolve_mflux_bin(probe)
+                            )
                     # Adaptive override: if we've observed actual gens on
                     # this engine, replace the static baseline with the
                     # mean of recent (elapsed - cold) / n. After ≥2 samples
@@ -7844,6 +7868,7 @@ class Handler(BaseHTTPRequestHandler):
                         "engine": engine,
                         "repo_id": repo or "",
                         "cached": cached,
+                        "family_installed": family_installed,
                         "download_gb": dl_gb,
                         "sec_per_image": round(sec, 1),
                         "cold_start_sec": cold,
@@ -12224,6 +12249,20 @@ HTML = r"""<!doctype html>
     .engine-status-pill[data-state="missing"]:hover {
       background: rgba(210, 153, 34, 0.18);
       border-color: rgba(210, 153, 34, 0.6);
+    }
+    /* missing-engine = the family binary isn't installed at all (not
+       just weights missing). Distinct red/danger color so it stands
+       out from the recoverable "missing weights" yellow. The pill
+       carries a tooltip pointing at the Pinokio install step. */
+    .engine-status-pill[data-state="missing-engine"] {
+      color: var(--danger, #d73a49);
+      border-color: rgba(215, 58, 73, 0.45);
+      background: rgba(215, 58, 73, 0.10);
+      cursor: help;
+    }
+    .engine-status-pill[data-state="missing-engine"]:hover {
+      background: rgba(215, 58, 73, 0.18);
+      border-color: rgba(215, 58, 73, 0.6);
     }
     .engine-status-pill[data-state="unknown"] { opacity: 0.6; }
     /* Reference image grid + slots. Same dashed-border / accent-on-hover
@@ -20119,7 +20158,14 @@ function imgStudioUpdateValidity() {
   const refsCount = IMG_STUDIO.refs.filter(r => r && r.path).length;
   const needsRefs = imgStudioRequiresRefs(eng.value);
   let invalidReason = '';
-  if (needsRefs && refsCount === 0) {
+  // Family-install gate (issue #12): refuse upfront when the chosen
+  // engine's family binary is missing. Falling through to submit lets
+  // the job die deep in the helper with a buried error.
+  const engInfo = (typeof _IMG_ENGINE_STATUS === 'object' && _IMG_ENGINE_STATUS)
+    ? _IMG_ENGINE_STATUS[eng.value] : null;
+  if (engInfo && engInfo.family_installed === false) {
+    invalidReason = 'The Qwen-Image-Edit add-on isn\'t installed. In Pinokio\'s Phosphene sidebar, click "Install Qwen-Image-Edit (multi-ref keyframes, optional)" — ~30 s, ~150 MB. Then come back and Generate.';
+  } else if (needsRefs && refsCount === 0) {
     invalidReason = 'Pick at least 1 reference image (drop a file into one of the 3 slots above) — Qwen-Image-Edit composes against an image, it cannot run text-only. Use the Lightning preset only after picking a ref.';
   }
   // Don't override the busy state — imgStudioGenerate manages disabled
@@ -20319,6 +20365,10 @@ async function imgStudioRefreshEngineStatus() {
   }
   imgStudioRenderEnginePill();
   imgStudioUpdateEstimate();
+  // The family-install gate lives in imgStudioUpdateValidity; refresh
+  // it as soon as engine status comes back so the Generate button can
+  // refuse upfront on a missing add-on (issue #12).
+  if (typeof imgStudioUpdateValidity === 'function') imgStudioUpdateValidity();
 }
 
 function imgStudioRenderEnginePill() {
@@ -20339,6 +20389,19 @@ function imgStudioRenderEnginePill() {
     pill.dataset.state = 'unknown';
     pill.textContent = '…';
     pill.title = 'Checking weights…';
+    return;
+  }
+  // Family-install gate (issue #12): the mflux family binary itself
+  // needs to be installed BEFORE the user can submit. Distinct from
+  // the weights-cached check below, which is about HF model downloads.
+  // When family_installed is false, the engine literally can't run —
+  // every other state is moot.
+  if (info.family_installed === false) {
+    pill.dataset.state = 'missing-engine';
+    pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-bold"/></svg>install Qwen-Image-Edit';
+    pill.title = 'The Qwen-Image-Edit add-on isn\'t installed.\n' +
+                 'In Pinokio\'s Phosphene sidebar, click ' +
+                 '"Install Qwen-Image-Edit (multi-ref keyframes, optional)" — ~30 s, ~150 MB.';
     return;
   }
   if (info.cached) {
