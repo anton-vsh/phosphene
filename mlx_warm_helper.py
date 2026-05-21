@@ -488,6 +488,7 @@ def _filter_unsupported_kwargs(fn, kwargs: dict) -> dict:
 
 _LORA_PATCH_INSTALLED = False
 _VIDEO_DECODER_PATCH_INSTALLED = False
+_A2V_FRAME_RATE_PATCH_INSTALLED = False
 
 
 def _install_video_decoder_patch() -> None:
@@ -524,6 +525,58 @@ def _install_video_decoder_patch() -> None:
 
     _blocks.VideoDecoder.decode_and_stream = _wrapped
     _VIDEO_DECODER_PATCH_INSTALLED = True
+
+
+def _install_a2v_frame_rate_patch() -> None:
+    """Make ``combined_image_conditionings`` tolerate the missing ``frame_rate``
+    kwarg that ``a2vid_two_stage.py`` neglects to pass.
+
+    Upstream LTX-2 MLX v0.14.0 made ``frame_rate`` a keyword-only required
+    arg on ``utils._orchestration.combined_image_conditionings``, but
+    ``a2vid_two_stage.A2VidPipelineTwoStage.generate`` still calls it
+    without forwarding ``frame_rate``. Result: every A2V render with a
+    reference image dies with::
+
+        TypeError: combined_image_conditionings() missing 1 required
+        keyword-only argument: 'frame_rate'
+
+    Fix: wrap ``combined_image_conditionings`` so that when ``frame_rate``
+    isn't supplied we default to ``24.0`` (the project's render FPS, and
+    the only value any caller uses today). Other call sites that DO pass
+    ``frame_rate`` (TI2VidTwoStages*, IC-LoRA, lipdub) are unaffected
+    because their explicit kwarg overrides the default.
+
+    Why a wrapper instead of editing the vendored file: the ltx-2-mlx
+    checkout is pinned to v0.14.0 and any direct edit gets clobbered on
+    re-clone. The patch is idempotent so repeated helper boots are safe.
+    """
+    global _A2V_FRAME_RATE_PATCH_INSTALLED
+    if _A2V_FRAME_RATE_PATCH_INSTALLED:
+        return
+    try:
+        import ltx_pipelines_mlx.utils._orchestration as _orch
+    except Exception as exc:  # noqa: BLE001 — log + give up cleanly
+        print(f"[warm-helper] A2V frame_rate patch skipped (no _orchestration): {exc}",
+              flush=True)
+        return
+    _orig = _orch.combined_image_conditionings
+
+    def _wrapped(*args, frame_rate: float = 24.0, **kwargs):
+        return _orig(*args, frame_rate=frame_rate, **kwargs)
+
+    _orch.combined_image_conditionings = _wrapped
+    # The A2V module already imported the original at module-load time
+    # (line 194 in a2vid_two_stage.py: `from ltx_pipelines_mlx.utils.
+    # _orchestration import combined_image_conditionings`). Patch THAT
+    # binding too so the existing import picks up the wrapper.
+    try:
+        import ltx_pipelines_mlx.a2vid_two_stage as _a2v_mod
+        if hasattr(_a2v_mod, "combined_image_conditionings"):
+            _a2v_mod.combined_image_conditionings = _wrapped
+    except Exception:  # noqa: BLE001 — module not imported yet → patch
+        # will take effect on its later import (uses _orchestration name)
+        pass
+    _A2V_FRAME_RATE_PATCH_INSTALLED = True
 
 
 def _install_lora_fusion_patches() -> None:
@@ -759,6 +812,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     # Repair the subclass-override-skips-fusion bug before any pipe is built.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
+    _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
 
     fp = _lora_fingerprint(loras)
 
@@ -856,6 +910,7 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None):
     # TI2VidTwoStagesHQPipeline.load() would still bypass _pending_loras.
     _install_lora_fusion_patches()
     _install_video_decoder_patch()  # fps/frame_rate kwarg shim
+    _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
 
     fp = _lora_fingerprint(loras)
 
@@ -938,6 +993,7 @@ def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None):
 
     _install_lora_fusion_patches()
     _install_video_decoder_patch()
+    _install_a2v_frame_rate_patch()  # A2V missing frame_rate= on combined_image_conditionings
     fp = _lora_fingerprint(loras)
 
     try:
