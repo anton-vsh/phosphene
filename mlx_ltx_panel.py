@@ -319,6 +319,21 @@ def _settings_defaults() -> dict:
         # Memory/speed policy. Defaults to Auto so 5 s clips keep the fast
         # full-decode path while long/high-pressure renders stay protected.
         "memory_policy": DEFAULT_MEMORY_POLICY,
+        # Anonymous telemetry — OPT-IN. Default OFF. When enabled, the
+        # panel sends a tiny event payload (no prompts, no image bytes,
+        # no paths, no hostnames) for every render start/done/failed, the
+        # panel boot itself, and helper crashes. Used to understand
+        # version regressions, hardware-tier feature usage, and bug
+        # frequency over time — github clone-counts only retain 14 days.
+        # Full event schema lives in TELEMETRY.md alongside this file.
+        # Endpoint configurable via PHOSPHENE_ANALYTICS_ENDPOINT env var.
+        "analytics_enabled": False,
+        # Anonymous install UUID — generated once on first opt-in and
+        # written here. Lets us count unique installs without correlating
+        # with any user identity. Rotating this field resets the install
+        # identity (useful if a user wants to "forget me" before
+        # re-enabling).
+        "analytics_install_id": "",
     }
 
 
@@ -532,6 +547,31 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
             return {}, f"unknown memory_policy: {policy}"
         out["memory_policy"] = policy
 
+    if "analytics_enabled" in patch:
+        # urlencoded-bool coercion. When flipping ON, generate a fresh
+        # anonymous install_id if one isn't already saved — that's the
+        # only stable identifier we ever attach to events. Rotating it
+        # via the panel "Forget me" button (which clears
+        # analytics_install_id) is how the user resets identity.
+        v = patch["analytics_enabled"]
+        if isinstance(v, bool):
+            new_val = v
+        else:
+            new_val = str(v).strip().lower() in ("1", "true", "yes", "on")
+        out["analytics_enabled"] = new_val
+
+    if "analytics_install_id" in patch:
+        v = str(patch["analytics_install_id"]).strip()
+        # Allow only an empty string (forget-me) OR a 32-char hex UUID.
+        # Anything else is rejected to avoid the field becoming a free-
+        # form data sink the user could put PII in.
+        if v == "":
+            out["analytics_install_id"] = ""
+        elif len(v) == 32 and all(c in "0123456789abcdefABCDEF" for c in v):
+            out["analytics_install_id"] = v.lower()
+        else:
+            return {}, "analytics_install_id must be empty or 32-char hex"
+
     return out, None
 
 
@@ -575,6 +615,11 @@ def get_settings_public() -> dict:
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
         "spicy_mode": bool(s.get("spicy_mode", False)),
         "memory_policy": s.get("memory_policy", DEFAULT_MEMORY_POLICY),
+        # Anonymous opt-in telemetry. The install_id itself is fine to
+        # expose — it's not a secret, the user can rotate it from the
+        # UI ("forget me"). The flag drives the Settings UI toggle.
+        "analytics_enabled": bool(s.get("analytics_enabled", False)),
+        "analytics_install_id": str(s.get("analytics_install_id", "")),
     }
 
 
@@ -6868,6 +6913,28 @@ def worker_loop() -> None:
             STATE["log"] = []
             caffeinate_on()
         persist_queue()
+        # ANALYTICS — render_start. Sanitized: no prompt, no paths, no
+        # filenames. Just shape (mode/quality/dims/frames). Safe-call:
+        # any failure inside emit() is swallowed silently.
+        try:
+            import analytics as _ph_analytics  # type: ignore
+            _p = job.get("params", {}) or {}
+            _ph_analytics.emit("render_start", {
+                "mode": _p.get("mode"),
+                "quality": _p.get("quality"),
+                "width": _p.get("width"),
+                "height": _p.get("height"),
+                "frames": _p.get("frames"),
+                "has_character": bool(_p.get("character_id")),
+                "lora_count": len(_p.get("loras") or []),
+                "hdr": bool(_p.get("hdr")),
+                "enhance": bool(_p.get("enhance")),
+                "upscale": _p.get("upscale"),
+                "accel": _p.get("accel"),
+                "engine": _p.get("engine_override") if _p.get("mode") == "image" else None,
+            })
+        except Exception:  # noqa: BLE001
+            pass
 
         try:
             run_job_inner(job)
@@ -6892,6 +6959,53 @@ def worker_loop() -> None:
                 STATE["pid"] = None
                 STATE["pgid"] = None
             persist_queue()
+            # ANALYTICS — render_done / render_failed / render_cancelled.
+            # The error_category bucketing is coarse on purpose: keep the
+            # cardinality low so the same kind of bug across users
+            # aggregates cleanly. Full error STRINGS would leak filesystem
+            # paths and prompt fragments.
+            try:
+                import analytics as _ph_analytics  # type: ignore
+                _p = job.get("params", {}) or {}
+                _status = job.get("status", "?")
+                _ev = {
+                    "done": "render_done",
+                    "failed": "render_failed",
+                    "cancelled": "render_cancelled",
+                }.get(_status, "render_unknown")
+                _evt: dict = {
+                    "mode": _p.get("mode"),
+                    "quality": _p.get("quality"),
+                    "elapsed_sec": job.get("elapsed_sec"),
+                    "frames": _p.get("frames"),
+                }
+                if _status == "failed":
+                    # Categorize the error so the wire stays small + private.
+                    _err = (job.get("error") or "")
+                    _cat = "other"
+                    for needle, name in (
+                        ("out of memory", "oom"),
+                        ("OOM", "oom"),
+                        ("jetsam", "oom"),
+                        ("HF", "hf_auth"),
+                        ("gated", "hf_gated"),
+                        ("401", "hf_auth"),
+                        ("CUDA", "wrong_backend"),
+                        ("model_dir", "missing_model"),
+                        ("Q8", "q8_missing"),
+                        ("not installed", "missing_deps"),
+                        ("character", "character_error"),
+                        ("FileNotFoundError", "file_missing"),
+                        ("BrokenPipeError", "helper_pipe"),
+                        ("RuntimeError", "runtime"),
+                    ):
+                        if needle.lower() in _err.lower():
+                            _cat = name
+                            break
+                    _evt["error_category"] = _cat
+                _ph_analytics.emit(_ev, _evt)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---- Image Studio + characters integration ----------------------------------
@@ -10750,6 +10864,56 @@ class Handler(BaseHTTPRequestHandler):
                 prev.get("memory_policy", DEFAULT_MEMORY_POLICY) !=
                 current.get("memory_policy", DEFAULT_MEMORY_POLICY)
             )
+            # Analytics opt-in lifecycle. When flipping ON, generate a
+            # fresh anonymous install_id if one isn't already saved, and
+            # fire a single settings_opt_in event so we count adoption.
+            # When flipping OFF, fire settings_opt_out as the LAST event
+            # before silence (gives us the offboarding signal without
+            # tracking the user afterward).
+            analytics_was = bool(prev.get("analytics_enabled", False))
+            analytics_now = bool(current.get("analytics_enabled", False))
+            if analytics_now and not analytics_was:
+                if not current.get("analytics_install_id"):
+                    try:
+                        import analytics as _ph_a  # type: ignore
+                        new_id = _ph_a.new_install_id()
+                        update_settings({"analytics_install_id": new_id})
+                        current = get_settings()
+                        push("settings: analytics ON (anonymous install id generated)")
+                    except Exception as _e:  # noqa: BLE001
+                        push(f"settings: analytics ON but install_id gen failed: {_e}")
+                try:
+                    import analytics as _ph_a  # type: ignore
+                    _ph_a.emit("settings_opt_in", {
+                        "version": _read_local_version() or "unknown",
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+            elif analytics_was and not analytics_now:
+                # Last gasp before silence.
+                try:
+                    import analytics as _ph_a  # type: ignore
+                    _ph_a.emit("settings_opt_out", {
+                        "version": _read_local_version() or "unknown",
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+            elif analytics_now and analytics_was:
+                # Forget-me path — user blanked install_id while still
+                # opted in. Regenerate immediately so the next event
+                # uses a fresh anonymous identity (anyone correlating
+                # events on the ingest side sees this as a new user).
+                prev_id = (prev.get("analytics_install_id") or "").strip()
+                cur_id = (current.get("analytics_install_id") or "").strip()
+                if prev_id and not cur_id:
+                    try:
+                        import analytics as _ph_a  # type: ignore
+                        new_id = _ph_a.new_install_id()
+                        update_settings({"analytics_install_id": new_id})
+                        current = get_settings()
+                        push("settings: analytics identity rotated")
+                    except Exception as _e:  # noqa: BLE001
+                        push(f"settings: analytics rotate failed: {_e}")
             if codec_changed:
                 push(
                     f"settings: output codec → {current['output_pix_fmt']} "
@@ -19187,6 +19351,36 @@ HTML = r"""<!doctype html>
       <div class="hint" id="spicyHint" style="margin-top:8px; display:none"></div>
     </div>
 
+    <!-- Anonymous opt-in telemetry. Strictly OFF by default. When ON,
+         a tiny event payload (no prompts, no image bytes, no paths) is
+         sent per render so we can spot bugs + understand how Phosphene
+         is actually used. The "What's collected?" link opens the
+         TELEMETRY.md doc shipping in the repo so the user can audit
+         every field before opting in. -->
+    <div class="settings-section">
+      <h3>Anonymous analytics <span class="hint" style="font-weight:400">(help improve Phosphene)</span></h3>
+      <div class="hint" style="margin-bottom:10px">
+        OFF by default. When ON, Phosphene sends a tiny anonymous event
+        per render — render type, duration, model tier, error category.
+        Never sends prompts, image data, file paths, or your hostname.
+        <a href="https://github.com/mrbizarro/phosphene/blob/main/TELEMETRY.md"
+           target="_blank" rel="noopener">What's collected?</a>
+      </div>
+      <div class="spicy-row">
+        <span class="spicy-state" id="analyticsStateBadge">OFF</span>
+        <button type="button" class="ghost-btn" id="analyticsToggleBtn"
+                onclick="toggleAnalytics()" style="margin-left:auto">
+          Enable anonymous analytics
+        </button>
+      </div>
+      <div class="hint" id="analyticsHint" style="margin-top:8px; display:none"></div>
+      <div class="hint" id="analyticsForgetRow" style="margin-top:8px; display:none">
+        Anonymous install id: <code id="analyticsInstallId" style="font-size:11px"></code>
+        <button type="button" class="ghost-btn" onclick="rotateAnalyticsId()"
+                style="margin-left:8px; padding:2px 8px; font-size:11px">forget me</button>
+      </div>
+    </div>
+
     <div class="settings-section" id="settingsCustomSection" style="display:none">
       <h3>Custom (advanced)</h3>
       <div class="settings-row" style="margin-bottom:10px">
@@ -25547,6 +25741,9 @@ async function openSettingsModal() {
   // on the JS side; only ON/OFF gets persisted.
   _spicyArmed = false;
   renderSpicyState(!!cur.spicy_mode);
+
+  // Anonymous analytics toggle — single click, no two-step confirm.
+  renderAnalyticsState(!!cur.analytics_enabled, cur.analytics_install_id || '');
 }
 
 function renderMemoryPolicyHint() {
@@ -25643,6 +25840,103 @@ async function _persistSpicyMode(target) {
   } catch (e) {
     if (status) {
       status.textContent = 'Could not change Spicy mode: ' + (e.message || e);
+      status.className = 'settings-status err';
+    }
+  }
+}
+
+// Anonymous analytics — single-click toggle (no two-click confirm; this
+// is opt-IN, not destructive). The install_id is generated server-side
+// the first time the flag flips ON; the UI just shows the bare boolean.
+function renderAnalyticsState(isOn, installId) {
+  const badge = document.getElementById('analyticsStateBadge');
+  const btn = document.getElementById('analyticsToggleBtn');
+  const hint = document.getElementById('analyticsHint');
+  const forgetRow = document.getElementById('analyticsForgetRow');
+  const idEl = document.getElementById('analyticsInstallId');
+  if (!badge || !btn) return;
+  badge.classList.remove('on', 'armed');
+  if (isOn) {
+    badge.textContent = 'ON';
+    badge.classList.add('on');
+    btn.textContent = 'Disable';
+    btn.classList.remove('primary-btn');
+    btn.classList.add('ghost-btn');
+    if (hint) {
+      hint.style.display = '';
+      hint.textContent = 'Thanks — anonymous render events are flowing. Toggle OFF to stop instantly.';
+    }
+    if (forgetRow && installId) {
+      forgetRow.style.display = '';
+      if (idEl) idEl.textContent = installId.slice(0, 8) + '…';
+    } else if (forgetRow) {
+      forgetRow.style.display = 'none';
+    }
+  } else {
+    badge.textContent = 'OFF';
+    btn.textContent = 'Enable anonymous analytics';
+    btn.classList.remove('primary-btn');
+    btn.classList.add('ghost-btn');
+    if (hint) { hint.style.display = 'none'; hint.textContent = ''; }
+    if (forgetRow) forgetRow.style.display = 'none';
+  }
+}
+
+async function toggleAnalytics() {
+  const cur = (_settingsCache && _settingsCache.settings) || {};
+  const target = !cur.analytics_enabled;
+  const status = document.getElementById('settingsStatus');
+  try {
+    const fd = new URLSearchParams();
+    fd.set('analytics_enabled', target ? 'true' : 'false');
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    if (_settingsCache && _settingsCache.settings) {
+      _settingsCache.settings.analytics_enabled = !!target;
+      if (j.settings && j.settings.analytics_install_id) {
+        _settingsCache.settings.analytics_install_id = j.settings.analytics_install_id;
+      }
+    }
+    const id = (_settingsCache?.settings?.analytics_install_id) || '';
+    renderAnalyticsState(!!target, id);
+    if (status) {
+      status.textContent = target ? 'Anonymous analytics ON · thanks for helping' : 'Anonymous analytics OFF';
+      status.className = 'settings-status ok';
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Could not change analytics: ' + (e.message || e);
+      status.className = 'settings-status err';
+    }
+  }
+}
+
+async function rotateAnalyticsId() {
+  // Clear the saved id; server regenerates a fresh one on next opt-in
+  // (or on the next emit if still enabled). Sends one settings_opt_out
+  // + one settings_opt_in with the new id, which is the right wire
+  // shape — anyone correlating events sees a new identity from now on.
+  const status = document.getElementById('settingsStatus');
+  try {
+    const fd = new URLSearchParams();
+    fd.set('analytics_install_id', '');
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    if (_settingsCache && _settingsCache.settings) {
+      _settingsCache.settings.analytics_install_id =
+        (j.settings && j.settings.analytics_install_id) || '';
+    }
+    const id = _settingsCache?.settings?.analytics_install_id || '';
+    renderAnalyticsState(!!(_settingsCache?.settings?.analytics_enabled), id);
+    if (status) {
+      status.textContent = 'Analytics identity reset — future events use a fresh anonymous id';
+      status.className = 'settings-status ok';
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Could not reset analytics id: ' + (e.message || e);
       status.className = 'settings-status err';
     }
   }
@@ -28147,6 +28441,31 @@ if __name__ == "__main__":
         threading.Thread(target=version_check_loop, daemon=True).start()
     else:
         _detect_local_install_state()
+    # ---- Anonymous telemetry — strictly opt-in (default OFF) ------------
+    # Wire the analytics module to read settings live so the user can
+    # flip the toggle without restarting. The install_id is generated
+    # lazily the first time the user opts in (see /settings handler).
+    try:
+        import analytics as _ph_analytics  # type: ignore
+        _ph_analytics.install(
+            is_enabled=lambda: bool(get_settings().get("analytics_enabled", False)),
+            get_install_id=lambda: str(get_settings().get("analytics_install_id", "")),
+            get_endpoint=lambda: (os.environ.get("PHOSPHENE_ANALYTICS_ENDPOINT", "").strip()
+                                  or _ph_analytics.DEFAULT_ENDPOINT),
+            log=push,
+        )
+        # Boot event. Carries anonymized fingerprint so we can correlate
+        # bugs to hardware tier + OS without per-user identifiers.
+        _ph_analytics.emit("panel_boot", {
+            "version": _read_local_version() or "unknown",
+            "sha": (_VERSION_STATE.get("local_short") or ""),
+            "branch": (_VERSION_STATE.get("local_branch") or "?"),
+            "tier": SYSTEM_CAPS.get("label", "?"),
+            "allows_q8": bool(SYSTEM_CAPS.get("allows_q8", False)),
+            **_ph_analytics.system_fingerprint(),
+        })
+    except Exception as _exc:  # noqa: BLE001 — telemetry must never crash the panel
+        sys.stderr.write(f"WARN: analytics setup failed silently: {_exc}\n")
     # Pre-flight: bind in a try/except so a busy port surfaces an actionable
     # one-liner instead of a 6-frame Python traceback. The bare OSError
     # ("[Errno 48] Address already in use") was confusing users who'd closed
@@ -28169,3 +28488,11 @@ if __name__ == "__main__":
     finally:
         HELPER.kill()
         caffeinate_off()
+        # Telemetry is best-effort; daemon thread will die with the
+        # process anyway, but a clean stop lets queued events flush
+        # if the user closes the panel gracefully.
+        try:
+            import analytics as _ph_a  # type: ignore
+            _ph_a.shutdown()
+        except Exception:
+            pass
