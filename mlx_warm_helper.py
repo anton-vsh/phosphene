@@ -29,6 +29,34 @@ import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
+# ---- MLX lazy-eval defaults — MUST RUN BEFORE LTX IMPORTS ===================
+# Upstream ltx_core_mlx reads `LTX2_DIT_EVAL_EVERY` (default 8) and
+# `LTX2_GEMMA_EVAL_EVERY` (default 1) at MODULE IMPORT TIME. The defaults
+# insert `mx.eval()` calls inside the DiT and Gemma loops every N blocks,
+# which forces eager Metal command-buffer flushes. On M-series chips with
+# enough unified memory, full lazy-graph mode (=0) is ~30-50× faster
+# because the MLX runtime batches the entire step into one graph and the
+# Metal driver doesn't pay command-buffer creation/destruction overhead
+# per block.
+#
+# 2026-05-21 — Mr Bizarro reported a 10s T2V Balanced render taking
+# ~3 min/step (vs ~10-15 s/step expected). Stack sampling showed the
+# helper stuck in `IOGPUMetalCommandBufferStorageDealloc` /
+# `MTLResourceList releaseAllObjectsAndReset` — the classic eager-eval
+# command-buffer-churn signature. The aa235aa commit message claimed
+# it set these defaults but the actual diff was incomplete (no
+# `_default_lazy_eval_for_m4_max` function ever landed in the code).
+# This block restores the intended behavior.
+#
+# Override path: explicit env var wins. A user / packager can pin
+# `LTX2_DIT_EVAL_EVERY=8` to fall back to upstream defaults if a
+# specific tier needs the safety of mid-step evaluation.
+if "LTX2_DIT_EVAL_EVERY" not in os.environ:
+    os.environ["LTX2_DIT_EVAL_EVERY"] = "0"
+if "LTX2_GEMMA_EVAL_EVERY" not in os.environ:
+    os.environ["LTX2_GEMMA_EVAL_EVERY"] = "0"
+# ---- end early bootstrap ====================================================
+
 # ---- config ------------------------------------------------------------------
 # All paths come from env vars set by the panel. If LTX_GEMMA isn't set, the
 # pipeline falls back to downloading the HF model id, which works first-run.
