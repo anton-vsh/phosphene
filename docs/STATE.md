@@ -338,6 +338,79 @@ phosphene-dev.git/
 
 ## 7. Known bugs / fixed bugs
 
+### Fixed 2026-05-21 EVENING (overnight push — read this first)
+
+Late-evening continuation after Mr Bizarro called out the still-broken
+hang ("fix it. What do you mean 'deferred to roadmap'?") and the
+gallery glitch ("the '21:19' label that looks like a render duration").
+Five additional commits to `dev`:
+
+- **The post-decode hang is FIXED** (commit `94bd696`, the second
+  attempt — the first one in `adc1cd2` did not work, see below).
+
+  First attempt: an in-helper daemon-thread watchdog that would emit
+  done + os._exit(0) past a 30s grace. It was correct in concept but
+  doesn't fire in practice — **Metal's command-buffer completion
+  handlers block every Python thread's GIL access during the
+  deallocator chain**, so the watchdog thread is starved by the very
+  thing it was meant to escape. Observed live: helper hung 5+ min
+  after the watchdog should have rescued at 30s; ps showed all 16
+  helper threads at 0% CPU.
+
+  Working fix: rescue from THE PANEL (a separate process — GIL inside
+  the helper is irrelevant from out here). `WarmHelper.
+  _build_post_decode_panic` returns a `(log_hook, panic_check)` pair
+  that `_read_until` honors. `log_hook` spots upstream's
+  "[Decoding ... done in X.Xs]" line and arms a 45s grace clock.
+  `panic_check` runs every 500ms in the select loop; if grace
+  expired + output file is on disk > 8KB, it SIGKILLs the helper
+  (from a daemon thread to not block the tick) and returns a
+  synthetic done event pointing at the known output_path. Helper
+  respawns on the next job (~30s spawn cost).
+
+  Validated end-to-end on the same 768×416 +6f Extend that hung
+  5+ min the first time and 13+ min the time before. Log shows the
+  exact rescue sequence Mr Bizarro can audit:
+
+      [22:01:07] [Decoding video + audio + muxing] done in 16.9s
+      [22:01:07] [panel-watchdog] extend …: decode-done signal
+                 seen, grace clock armed (45s).
+      [22:01:52] [panel-watchdog] extend …: post-decode hang
+                 detected — file on disk (802615 bytes) but helper
+                 silent for 45s after decode-done. SIGKILLing
+                 helper; render counted as done.
+      [22:01:52] Extend done in 533.98s → …mp4
+
+  Armed for `generate` (T2V/I2V Balanced) + `extend` only. A2V,
+  FFLF, T2V Character HQ, image, train all return cleanly and
+  don't need it.
+
+- **Extend speed defaults cut** ("is that not too slow?"). Bundled
+  in `94bd696`. Default steps 12 → 8 (cfg=1.0 doesn't need 12) and
+  Extend TeaCache threshold 0.5 → 0.7 (more aggressive block-skip).
+  Measured ~6 min wall on the same +6f case that was 11 min the
+  same morning. Quality holds at cfg=1.0 single-branch.
+
+- **Gallery dn-cache leak** (commit `94bd696`). The "21:19" label
+  Mr Bizarro pointed at was Extend's pre-downscale cache file
+  (`<base>_dnWxH.mp4`) appearing in the carousel without a sidecar
+  — the duration formatter fell back to mtime HH:MM. Two fixes:
+  `list_outputs` filters stems ending in `_dn\d+x\d+` when no
+  sidecar exists; `_outputDurationLabel` no longer falls back to
+  HH:MM (uses `_relTimeFromMtime` instead).
+
+- **Elon v3 retrain kicked off** (~22:02, ETA ~4h28m, finishes
+  around 02:30). Per the validated v2 recipe Mr Bizarro asked for:
+  rank 32 · 100 epochs (7900 steps for 79 imgs) · lr 1e-4 ·
+  **512×512 square** · center crop · `user_provided` captions
+  (the existing [VISUAL]:-format captions already in the dataset).
+  Identity-only (train_audio=false) so the existing
+  elontrn.audio.safetensors stays in place. Prior `elontrn_v2`
+  bundle backed up to `mlx_models/loras/_backups/20260521_v2_pre_v3/`
+  before kicking off. Output overwrites `elontrn_v2.safetensors`.
+  Test render queued for after training completes — sample lands
+  in `mlx_outputs/` for Mr Bizarro's wake-up review.
+
 ### Fixed 2026-05-21 (autonomous modality-matrix session)
 
 Mr Bizarro asked for "continue testing and fixing issues as they arise · check all the other modalities · I will be back in a few hours work continuously". Full modality test pass + analytics scaffold + two real bug fixes + one issue-#12 UX gate. 5 commits to `dev`:

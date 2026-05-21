@@ -249,21 +249,37 @@ Tracking: the HDR-specific Phase 1 work landed via re-exposing the
 hdr toggle (commit `<hdr-ship>`); the generic Phases 2–5 stay open
 in this entry.
 
-### `[ ]` I2V Balanced + Extend perf — post-decode hang on Q4 distilled path
+### `[x]` I2V Balanced + Extend perf — post-decode hang (FIXED 2026-05-21)
+
+**Fix shipped: panel-side watchdog SIGKILLs hung helper from outside
+the GIL-blocked process.** See commit `94bd696`. Detail below kept
+for posterity + so the next person to hit something MLX-deallocator-
+shaped knows where to look.
 
 After the May 9 upstream `ltx-2-mlx` refactor, I2V Balanced (and T2V
 Balanced) route through `DistilledPipeline.generate_two_stage(image=...)`.
-The actual render completes in ~3 min for a 5s I2V at 1024×576, but
-the helper then hangs 5-15 min before signaling done to the panel.
+The actual render completed in ~3 min for a 5s I2V at 1024×576, but
+the helper then hung 5-15 min before signaling done to the panel.
+Extend exhibited the EXACT SAME hang on `ExtendPipeline`.
 
-**Update 2026-05-21 (later session):** Extend exhibits the EXACT SAME
-hang. 768×416 +6f Extend at 12 steps cfg=1.0: denoise completes in
-10:23, decode completes in 16s (output mp4 valid on disk), then the
-helper sits frozen for the next 13+ minutes until killed. So this is
-not specific to DistilledPipeline — it's any pipe that fuses the
-distilled stage 2 LoRA on the dev transformer and then returns from
-`_decode_and_save_video()`. Both DistilledPipeline and the Extend
-pipeline take that path.
+The first fix attempt (commit `adc1cd2`, reverted) shipped an
+in-helper daemon-thread watchdog. **It does not work**: Metal's
+command-buffer completion handlers block every Python thread's GIL
+access during the deallocator chain, so the watchdog thread is
+starved by the very thing it was meant to escape. Observed live:
+ps showed all 16 helper threads at 0% CPU during the hang.
+
+Working fix (commit `94bd696`): rescue from THE PANEL (separate
+process, no GIL contention with the helper). `WarmHelper.
+_build_post_decode_panic` returns a (log_hook, panic_check) pair
+honored by `_read_until`. The log_hook spots the decode-done log
+line and arms a 45s grace clock; if the helper is still silent
+after grace AND the output file is on disk, panic_check SIGKILLs
+the helper and returns a synthetic done event from the known
+output_path. Helper respawns on next job (~30s spawn cost).
+
+Validated end-to-end same evening on the previously-hung Extend
+case: 533s total wall, watchdog rescue logged exactly as designed.
 
 Diagnostic findings (2026-05-21 session):
 - Output mp4 IS written to disk before the hang starts.
@@ -279,7 +295,9 @@ Diagnostic findings (2026-05-21 session):
   (TI2VidTwoStagesHQPipeline) all return cleanly — confirming the
   hang is specific to the distilled-fused-then-decode pattern.
 
-Path forward:
+**Symptom-level fix shipped 2026-05-21** (commit `94bd696` — panel-
+side watchdog SIGKILLs hung helper). Quality-level work still open:
+
 1. **For Q8 (≥48 GB) tiers:** route Balanced I2V/T2V through
    `TI2VidTwoStagesPipeline` instead of `DistilledPipeline`. That class:
    - Runs full-resolution, not half-res with Stage-2 upscale.
@@ -288,17 +306,19 @@ Path forward:
    - Already used by the working HQ path.
    The helper's `get_pipe('i2v', ...)` currently aliases to
    DistilledPipeline; needs an explicit branch for Balanced→
-   TI2VidTwoStagesPipeline on the dev model.
-2. **For Q4 (<48 GB) tiers:** stuck with DistilledPipeline until
-   upstream's MLX completion-handler issue is fixed. Workaround
-   ideas: spawn a fresh helper subprocess per render so the hang
-   happens after the user has their file (Pinokio Update + watchdog
-   would respawn for the next job).
+   TI2VidTwoStagesPipeline on the dev model. Eliminates the hang
+   entirely (TI2VidTwoStages doesn't trigger it) AND gives better
+   I2V quality on the distilled-grid artifact #5 users see.
+2. **For Q4 (<48 GB) tiers:** the panel watchdog now hides the
+   hang from users (file lands, panel reports done, helper
+   respawns). Quality fix still needs the same TI2VidTwoStages
+   route on Q4 weights — but until then, watchdog rescue makes
+   the symptom invisible.
 3. **Reddit / issue #5** users on small Macs are hitting both this
    hang AND the geometric-grid artifact (which is the DistilledPipeline
-   structure producing weak I2V on the distilled checkpoint). Both
-   problems are the same root cause: forced fallback to a pipeline
-   that was never meant for I2V quality.
+   structure producing weak I2V on the distilled checkpoint). The
+   hang is now invisible; the artifact still requires the Q8/Q4
+   TI2VidTwoStages route above.
 
 ## Mid term
 
