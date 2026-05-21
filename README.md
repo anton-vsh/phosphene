@@ -39,14 +39,13 @@ Two MLX-native engines share the same tab and the same GPU memory pool. Qwen-Ima
 
 ### Train Character
 
-<img width="871" height="640" alt="image" src="https://github.com/user-attachments/assets/a25bfc78-671e-4972-bf51-231ae5f5cc04" />
+<img width="877" height="864" alt="image" src="https://github.com/user-attachments/assets/6e0564d9-6912-4d99-a9b0-1f2a2b01453e" />
+
 
 
 End-to-end LoRA training inside the panel. The dataset uploader accepts 15 to 500 images per character. Captions are written by a local Gemma 3 12B (MLX, 4-bit) in roughly 90 seconds for a 37-image dataset, in the `[VISUAL]: <trigger>, <description>` format the LTX trainer expects. The default recipe is rank 32, alpha 32, 100 epochs, lr 1e-4, 512 px resolution, letterbox crop; total step count auto-scales with the dataset (e.g. 50 images → 5000 steps, 100 images → 10000 steps) so adding photos doesn't shift the trained-epochs target. Power users can override any of those in an advanced section. Optional voice LoRA from the same training run.
 
-<img width="877" height="864" alt="image" src="https://github.com/user-attachments/assets/6e0564d9-6912-4d99-a9b0-1f2a2b01453e" />
-
-
+<img width="871" height="640" alt="image" src="https://github.com/user-attachments/assets/a25bfc78-671e-4972-bf51-231ae5f5cc04" />
 The Train tab also exposes **Style** training (experimental in v3.0) — same end-to-end pipeline, different intent: a curated set of movie frames teaches the model an aesthetic (color grading, lighting, composition) rather than an identity. The trained style LoRA stacks with character LoRAs at render time. Lightly validated as of v3.0; please report rough edges via [GitHub Issues](https://github.com/mrbizarro/phosphene/issues).
 
 ### Audio-to-Video
