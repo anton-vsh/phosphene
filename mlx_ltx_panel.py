@@ -8950,6 +8950,21 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(self.path).query)
         ctype = self.headers.get("Content-Type", "")
 
+        # Manual refresh trigger for the stats dashboard. The fetcher
+        # also runs daily in stats_fetch_loop; this is the "I want to
+        # see today's number RIGHT NOW" button. Returns 202 + spawns
+        # the fetch in a background thread so the HTTP response doesn't
+        # block on a possibly-slow API roundtrip.
+        if path == "/stats/refresh":
+            threading.Thread(
+                target=_run_stats_fetch_once, daemon=True,
+                name="phos-stats-manual-refresh",
+            ).start()
+            self._json({"ok": True, "queued": True,
+                        "hint": "fetch running in background; reload "
+                                "/stats in ~15 s for fresh numbers"}, 202)
+            return
+
         # Multipart upload
         if path == "/upload" and ctype.startswith("multipart/form-data"):
             # Hard cap on body size so a misbehaving / malicious caller can't

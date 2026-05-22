@@ -1,10 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <title>Phosphene · stats</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
+  <link rel="icon" type="image/svg+xml" href="/assets/phosphene_favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/phosphene_favicon_64.png">
   <!--
     Phosphene repo-stats dashboard.
 
@@ -18,447 +20,839 @@
     Pure vanilla — single file, no build, no framework. Chart.js from
     CDN is the only outside dep.
 
-    Feature-detects optional fields the fetcher may add over time:
-      - clones_window: [{date,count,uniques}] — 15d rolling window
-      - views_window:  [{date,count,uniques}] — 15d rolling window
-      - stars_timeline: [{date,count}] — cumulative per-day
+    Feature-detects every optional field the fetcher may add over time:
+      - clones_window, views_window     — 15d rolling per-day arrays
+      - stars_timeline                  — cumulative {date,count} per day
+      - forks_timeline                  — cumulative {date,count} per day
+      - issues_opened / issues_closed   — daily {date,count}
+      - prs_opened    / prs_closed      — daily {date,count}
+      - commits_timeline                — daily {date,count}
+      - release_timeline                — [{tag, published_at, total_downloads}]
     Anything else unknown is ignored gracefully.
+
+    Visual identity: matches the Phosphene panel. Dark only (no light
+    theme — Phosphene has none). Trademark pink→purple→cyan gradient is
+    used sparingly: the wordmark in the header and the headline
+    "growth" number on the right-now strip. Everything else uses the
+    blue accent so the gradient stays special.
   -->
   <style>
-    /* Dark theme (default) */
-    :root, [data-theme="dark"] {
-      --bg:        #0d1117;
-      --bg-card:   #161b22;
-      --bg-card-2: #1f2630;
-      --bg-chip:   #21262d;
-      --bg-chip-active: #1f6feb;
-      --border:    #30363d;
-      --border-focus: #58a6ff;
-      --text:      #c9d1d9;
-      --text-dim:  #8b949e;
-      --text-faint:#6e7681;
-      --accent:    #58a6ff;
-      --good:      #3fb950;
-      --warn:      #d29922;
-      --bad:       #f85149;
-      --grid:      #21262d;
-      --skel-1:    #1f2630;
-      --skel-2:    #2a323d;
-      --shadow:    rgba(0,0,0,0.3);
+    /* ============================================================
+       Phosphene design tokens — kept 1:1 with mlx_ltx_panel.py so
+       the dashboard reads as the same product, not a sibling site.
+       ============================================================ */
+    :root {
+      --bg:            #00061a;
+      --bg-2:          #0a1130;
+      --panel:         #131b3f;
+      --panel-2:       #1d2752;
+      --panel-3:       rgba(12, 19, 48, 0.35);
+      --border:        #2c3563;
+      --border-soft:   rgba(140, 160, 220, 0.08);
+      --border-strong: #3d477a;
+      --text:          #f0f4fb;
+      --muted:         #b6bfd1;
+      --faint:         #5b6478;
+      --accent:        #2f81f7;
+      --accent-bright: #58a6ff;
+      --accent-dim:    rgba(47, 129, 247, 0.18);
+      --success:       #3fb950;
+      --warning:       #d29922;
+      --danger:        #f85149;
+      /* Signature gradient — pink → purple → cyan. Used only on
+         the wordmark + one hero KPI to keep it special. */
+      --ph-grad-pink:   #FF2E9F;
+      --ph-grad-purple: #B14AFF;
+      --ph-grad-cyan:   #5EEAFF;
+      --ph-grad: linear-gradient(90deg,
+                  var(--ph-grad-pink)   0%,
+                  var(--ph-grad-purple) 50%,
+                  var(--ph-grad-cyan)   100%);
+      --ph-grad-soft: linear-gradient(135deg,
+                  rgba(255, 46, 159, 0.18),
+                  rgba(177, 74, 255, 0.18),
+                  rgba(94, 234, 255, 0.18));
+      --ph-font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+      --shadow-1: 0 1px 2px rgba(0,0,0,0.30), 0 1px 0 rgba(255,255,255,0.02) inset;
+      --shadow-2: 0 8px 24px rgba(0,0,0,0.40);
+      --r-xs: 6px;
+      --r-sm: 8px;
+      --r-md: 10px;
+      --r-lg: 14px;
+      --r-pill: 999px;
+      --t-fast: 120ms cubic-bezier(.2,.8,.2,1);
+      --t-base: 180ms cubic-bezier(.2,.8,.2,1);
     }
-    [data-theme="light"] {
-      --bg:        #ffffff;
-      --bg-card:   #f6f8fa;
-      --bg-card-2: #ffffff;
-      --bg-chip:   #eaeef2;
-      --bg-chip-active: #0969da;
-      --border:    #d0d7de;
-      --border-focus: #0969da;
-      --text:      #1f2328;
-      --text-dim:  #59636e;
-      --text-faint:#818b98;
-      --accent:    #0969da;
-      --good:      #1a7f37;
-      --warn:      #9a6700;
-      --bad:       #cf222e;
-      --grid:      #eaeef2;
-      --skel-1:    #eaeef2;
-      --skel-2:    #d0d7de;
-      --shadow:    rgba(140,149,159,0.15);
-    }
+
     * { box-sizing: border-box; }
-    html, body {
-      margin: 0; padding: 0;
-      background: var(--bg); color: var(--text);
-      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+      background: var(--bg);
+      background-image:
+        radial-gradient(ellipse 1200px 600px at 50% -10%,
+                        rgba(47, 129, 247, 0.08), transparent 60%),
+        radial-gradient(ellipse 900px 500px at 85% 10%,
+                        rgba(177, 74, 255, 0.04), transparent 65%);
+      background-attachment: fixed;
+      color: var(--text);
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text",
             "Segoe UI", system-ui, sans-serif;
       min-height: 100vh;
-      transition: background 0.15s ease, color 0.15s ease;
+      -webkit-font-smoothing: antialiased;
     }
-    a { color: var(--accent); text-decoration: none; }
+    a { color: var(--accent-bright); text-decoration: none; }
     a:hover { text-decoration: underline; }
-    /* Visible focus ring everywhere */
     :focus { outline: none; }
     :focus-visible {
-      outline: 2px solid var(--border-focus);
+      outline: 2px solid var(--accent-bright);
       outline-offset: 2px;
-      border-radius: 4px;
+      border-radius: var(--r-xs);
     }
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 24px 80px; }
-    header {
-      display: flex; align-items: baseline; justify-content: space-between;
-      flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
     }
-    h1 {
-      font-size: 22px; font-weight: 600; margin: 0;
+
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 28px 24px 80px; }
+
+    /* ============================================================
+       HEADER — wordmark in the trademark gradient, meta strip below.
+       ============================================================ */
+    header.hero {
+      margin-bottom: 22px;
     }
-    h1 .subtitle {
-      color: var(--text-dim); font-weight: 400; font-size: 14px;
-      margin-left: 10px;
+    .hero-top {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap;
     }
-    .meta-row {
-      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    .wordmark {
+      display: inline-flex; align-items: baseline; gap: 10px;
+      text-decoration: none;
     }
-    .meta {
-      color: var(--text-dim); font-size: 13px;
+    .wordmark .mark {
+      font-size: 30px; font-weight: 700;
+      letter-spacing: -0.02em; line-height: 1;
+      background: var(--ph-grad);
+      -webkit-background-clip: text;
+              background-clip: text;
+      -webkit-text-fill-color: transparent;
+              color: transparent;
+      filter: drop-shadow(0 0 18px rgba(177, 74, 255, 0.25));
     }
-    .meta strong { color: var(--text); font-weight: 500; }
-    .header-actions {
-      display: flex; gap: 8px; align-items: center;
+    .wordmark .sep {
+      color: var(--faint); font-size: 22px; font-weight: 300; line-height: 1;
+    }
+    .wordmark .what {
+      color: var(--muted); font-size: 14px; font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+    .hero-actions {
+      display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;
     }
     .icon-btn {
-      background: var(--bg-card);
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--panel);
       border: 1px solid var(--border);
-      color: var(--text-dim);
-      font-size: 12px;
-      padding: 6px 10px;
-      border-radius: 6px;
+      color: var(--muted);
+      font: inherit; font-size: 12px;
+      padding: 7px 12px; border-radius: var(--r-sm);
       cursor: pointer;
-      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-      font-family: inherit;
-      line-height: 1;
+      transition: background var(--t-base), color var(--t-base), border-color var(--t-base);
+      text-decoration: none;
     }
     .icon-btn:hover {
-      background: var(--bg-card-2);
+      background: var(--panel-2);
       color: var(--text);
-      border-color: var(--text-dim);
+      border-color: var(--border-strong);
+      text-decoration: none;
     }
-    section {
-      background: var(--bg-card);
+    .icon-btn.is-busy { opacity: 0.6; pointer-events: none; }
+    .icon-btn .ico { font-family: var(--ph-font-mono); font-size: 13px; line-height: 1; }
+    .sub-meta {
+      margin-top: 12px;
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      color: var(--muted); font-size: 12px;
+    }
+    .sub-meta .lock {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 9px; border-radius: var(--r-pill);
+      background: rgba(63, 185, 80, 0.08);
+      border: 1px solid rgba(63, 185, 80, 0.30);
+      color: var(--success);
+      font-size: 11px; font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+    .sub-meta .lock .ico { font-size: 10px; }
+    .sub-meta .dot-sep { color: var(--faint); }
+    .sub-meta strong { color: var(--text); font-weight: 600; }
+    .hero-underline {
+      margin-top: 14px;
+      height: 1px;
+      background: linear-gradient(90deg,
+        rgba(255, 46, 159, 0.0),
+        rgba(255, 46, 159, 0.45) 12%,
+        rgba(177, 74, 255, 0.55) 50%,
+        rgba(94, 234, 255, 0.45) 88%,
+        rgba(94, 234, 255, 0.0));
+    }
+
+    /* ============================================================
+       Generic section styling.
+       ============================================================ */
+    section.card {
+      background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 20px;
+      border-radius: var(--r-lg);
+      padding: 20px 22px;
       margin-bottom: 18px;
-    }
-    h2 {
-      font-size: 13px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.05em; color: var(--text-dim); margin: 0 0 14px;
+      box-shadow: var(--shadow-1);
     }
     .section-head {
       display: flex; align-items: center; justify-content: space-between;
-      gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+      gap: 12px; flex-wrap: wrap;
+      margin-bottom: 16px;
     }
-    .section-head h2 { margin: 0; }
-    /* Period chips */
+    h2 {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.10em; color: var(--muted);
+      margin: 0;
+    }
+    h2 .h2-sub {
+      margin-left: 8px;
+      color: var(--faint);
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0.02em;
+    }
+    h3 {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted);
+      margin: 0 0 10px;
+    }
+
+    /* ============================================================
+       Period chips (and any other chip groups).
+       ============================================================ */
     .chips {
-      display: inline-flex; gap: 4px;
-      background: var(--bg-card-2);
+      display: inline-flex; gap: 2px;
+      background: var(--bg-2);
       border: 1px solid var(--border);
-      border-radius: 6px; padding: 3px;
+      border-radius: var(--r-pill);
+      padding: 3px;
     }
     .chip {
       background: transparent; border: 0;
-      color: var(--text-dim);
-      font: inherit; font-size: 12px; font-weight: 500;
-      padding: 4px 10px; border-radius: 4px;
+      color: var(--muted);
+      font: inherit; font-size: 11px; font-weight: 500;
+      padding: 4px 12px; border-radius: var(--r-pill);
       cursor: pointer;
-      transition: background 0.15s ease, color 0.15s ease;
+      transition: background var(--t-fast), color var(--t-fast);
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.04em;
     }
     .chip:hover { color: var(--text); }
     .chip[aria-pressed="true"] {
-      background: var(--bg-chip-active);
-      color: white;
+      background: var(--accent-dim);
+      color: var(--accent-bright);
     }
-    /* Cards row */
-    .cards {
+
+    /* ============================================================
+       "Right now" KPI strip.
+       ============================================================ */
+    .kpi-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
       gap: 12px;
     }
-    .card {
-      background: var(--bg-card-2);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 14px 16px;
+    .kpi {
       position: relative;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 14px 16px;
+      overflow: hidden;
+      transition: border-color var(--t-base), transform var(--t-base);
+    }
+    .kpi:hover { border-color: var(--border-strong); }
+    .kpi .label {
+      color: var(--muted);
+      font-size: 10.5px; text-transform: uppercase;
+      letter-spacing: 0.08em; font-weight: 600;
+    }
+    .kpi .value {
+      margin-top: 6px;
+      font-size: 26px; font-weight: 700; line-height: 1.05;
+      font-family: var(--ph-font-mono);
+      letter-spacing: -0.02em;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+    .kpi.is-hero .value {
+      font-size: 32px;
+      background: var(--ph-grad);
+      -webkit-background-clip: text;
+              background-clip: text;
+      -webkit-text-fill-color: transparent;
+              color: transparent;
+    }
+    .kpi .deltas {
+      display: flex; gap: 10px; flex-wrap: wrap;
+      margin-top: 8px;
+      font-size: 11px;
+      font-family: var(--ph-font-mono);
+    }
+    .kpi .delta { color: var(--faint); display: inline-flex; gap: 4px; align-items: baseline; }
+    .kpi .delta .lbl {
+      color: var(--faint); text-transform: uppercase;
+      font-size: 9.5px; letter-spacing: 0.06em;
+    }
+    .kpi .delta.up   { color: var(--success); }
+    .kpi .delta.down { color: var(--danger); }
+    .kpi .spark {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 38px; width: 100%;
+      pointer-events: none;
+      opacity: 0.95;
+    }
+    .kpi.has-spark { padding-bottom: 40px; }
+
+    /* Health pulse — small colored dot + pulse ring. */
+    .kpi-pulse {
+      grid-column: span 1;
+    }
+    .pulse {
+      display: inline-flex; align-items: center; gap: 8px;
+      margin-top: 8px;
+    }
+    .pulse-dot {
+      position: relative;
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted);
+      box-shadow: 0 0 0 0 currentColor;
+    }
+    .pulse-dot.good { background: var(--success); color: rgba(63,185,80,0.6); animation: pulseRing 2.4s ease-out infinite; }
+    .pulse-dot.warn { background: var(--warning); color: rgba(210,153,34,0.6); }
+    .pulse-dot.bad  { background: var(--danger);  color: rgba(248,81,73,0.6);  animation: pulseRing 2.4s ease-out infinite; }
+    @keyframes pulseRing {
+      0%   { box-shadow: 0 0 0 0   currentColor; }
+      70%  { box-shadow: 0 0 0 8px transparent;  }
+      100% { box-shadow: 0 0 0 0   transparent;  }
+    }
+    .pulse-label {
+      font-size: 13px; font-weight: 600; color: var(--text);
+    }
+    .pulse-detail {
+      margin-top: 6px;
+      font-size: 11px; color: var(--muted);
+      font-family: var(--ph-font-mono);
+    }
+
+    /* ============================================================
+       Funnel — Views → Clones → Stars → Forks.
+       ============================================================ */
+    .funnel {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      align-items: stretch;
+    }
+    .funnel-step {
+      position: relative;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 14px 16px 14px 18px;
+      min-height: 84px;
+      display: flex; flex-direction: column; justify-content: space-between;
       overflow: hidden;
     }
-    .card .label {
-      color: var(--text-dim);
-      font-size: 11px; text-transform: uppercase;
-      letter-spacing: 0.05em;
+    .funnel-step::before {
+      /* Fill bar — width set inline based on conversion. */
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: var(--fill, 100%);
+      background: linear-gradient(90deg,
+        rgba(47, 129, 247, 0.14),
+        rgba(47, 129, 247, 0.02) 90%);
+      z-index: 0;
     }
-    .card .value {
-      font-size: 28px; font-weight: 600; line-height: 1.1;
+    .funnel-step.is-hero::before {
+      background: linear-gradient(90deg,
+        rgba(177, 74, 255, 0.16),
+        rgba(94, 234, 255, 0.04) 90%);
+    }
+    .funnel-step > * { position: relative; z-index: 1; }
+    .funnel-stage {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--muted); font-weight: 600;
+    }
+    .funnel-stage .scope {
+      color: var(--faint); font-weight: 500; margin-left: 4px;
+    }
+    .funnel-value {
+      margin-top: 4px;
+      font-size: 24px; font-weight: 700; color: var(--text);
+      font-family: var(--ph-font-mono); font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+    }
+    .funnel-arrow {
+      position: absolute;
+      right: -10px; top: 50%; transform: translateY(-50%);
+      z-index: 2;
+      width: 20px; height: 20px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--muted);
+      font-family: var(--ph-font-mono); font-size: 11px;
+    }
+    .funnel-conv {
       margin-top: 6px;
-      font-variant-numeric: tabular-nums;
+      font-size: 10.5px; color: var(--muted);
+      font-family: var(--ph-font-mono);
     }
-    .card .deltas {
-      display: flex; gap: 8px; flex-wrap: wrap;
-      margin-top: 6px; font-size: 11px;
+    .funnel-conv .pct { color: var(--text); font-weight: 600; }
+    @media (max-width: 760px) {
+      .funnel { grid-template-columns: repeat(2, 1fr); }
+      .funnel-step:nth-child(2) .funnel-arrow { display: none; }
     }
-    .card .delta { color: var(--text-faint); }
-    .card .delta.up   { color: var(--good); }
-    .card .delta.down { color: var(--bad); }
-    .card .delta .lbl { color: var(--text-faint); margin-right: 2px; }
-    .card .spark {
-      height: 28px; margin-top: 8px;
-      width: 100%;
+    @media (max-width: 420px) {
+      .funnel { grid-template-columns: 1fr; }
+      .funnel-arrow { display: none; }
     }
-    /* Chart blocks */
+
+    /* ============================================================
+       Charts.
+       ============================================================ */
     .chart-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 14px;
     }
-    @media (max-width: 600px) {
-      .chart-row { grid-template-columns: 1fr; }
-    }
+    .chart-row + .chart-row { margin-top: 14px; }
+    @media (max-width: 760px) { .chart-row { grid-template-columns: 1fr; } }
     .chart-card {
-      background: var(--bg-card-2);
+      background: var(--bg-2);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-md);
       padding: 14px 16px;
     }
     .chart-card h3 {
-      font-size: 12px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.05em; color: var(--text-dim);
-      margin: 0 0 8px;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px;
     }
-    .chart-card .chart-wrap {
+    .chart-card .legend {
+      display: inline-flex; gap: 10px; flex-wrap: wrap;
+      font-size: 10px; font-weight: 500; color: var(--muted);
+      text-transform: none; letter-spacing: 0.01em;
+      font-family: var(--ph-font-mono);
+    }
+    .chart-card .legend .swatch {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 2px; margin-right: 5px;
+      vertical-align: middle;
+    }
+    .chart-wrap {
       position: relative; height: 180px;
     }
-    /* Tables */
-    table {
-      width: 100%; border-collapse: collapse; font-size: 13px;
+    .chart-wrap.tall { height: 220px; }
+    .chart-empty {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 12px; text-align: center;
+      color: var(--faint);
+      font-size: 12px; font-style: italic;
+      pointer-events: none;
     }
-    th, td {
-      text-align: left; padding: 7px 8px;
-      border-bottom: 1px solid var(--border);
-    }
-    th {
-      font-weight: 500; color: var(--text-dim);
-      text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;
-      position: sticky; top: 0;
-      background: var(--bg-card);
-    }
-    td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    .table-wrap {
-      max-height: 360px; overflow-y: auto;
-      border: 1px solid var(--border); border-radius: 6px;
-    }
-    .table-wrap table th, .table-wrap table td { padding: 8px 10px; }
-    .table-wrap table th:first-child, .table-wrap table td:first-child { padding-left: 12px; }
-    .table-wrap table th:last-child, .table-wrap table td:last-child { padding-right: 12px; }
-    .table-wrap table tbody tr:last-child td { border-bottom: 0; }
+
+    /* ============================================================
+       Tables (referrers, paths, releases).
+       ============================================================ */
     .two-col {
       display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
     }
-    @media (max-width: 600px) {
-      .two-col { grid-template-columns: 1fr; }
+    @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+    .table-wrap {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      overflow: hidden;
     }
+    table {
+      width: 100%; border-collapse: collapse; font-size: 12.5px;
+    }
+    thead th {
+      text-align: left; padding: 9px 12px;
+      color: var(--muted);
+      text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    tbody td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      color: var(--text);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: rgba(140, 160, 220, 0.03); }
+    td.num, th.num {
+      text-align: right;
+      font-family: var(--ph-font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+    /* Inline bar visualization inside a cell. */
+    .row-bar {
+      position: relative;
+      display: inline-block;
+      width: 110px; height: 6px;
+      background: rgba(140, 160, 220, 0.08);
+      border-radius: var(--r-pill);
+      vertical-align: middle;
+      margin-left: 8px;
+    }
+    .row-bar > i {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      width: var(--w, 0%);
+      background: var(--accent);
+      border-radius: var(--r-pill);
+    }
+    .row-bar.gradient > i {
+      background: var(--ph-grad);
+    }
+    .trend {
+      display: inline-block;
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      margin-left: 6px;
+    }
+    .trend.up   { color: var(--success); }
+    .trend.down { color: var(--danger); }
+    .trend.flat { color: var(--faint); }
     .empty {
-      color: var(--text-faint); font-style: italic; padding: 20px 0;
+      color: var(--faint); font-style: italic; padding: 22px 0;
       text-align: center;
     }
+    code, .mono {
+      font-family: var(--ph-font-mono);
+      font-size: 12px;
+    }
     code {
-      background: var(--bg-card-2); padding: 1px 5px; border-radius: 3px;
-      font-size: 12px; font-family: ui-monospace, SFMono-Regular, monospace;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      padding: 1px 6px; border-radius: 4px;
     }
-    footer {
-      color: var(--text-faint); font-size: 12px; text-align: center;
-      margin-top: 30px;
-    }
-    /* Skeletons */
+
+    /* ============================================================
+       Skeleton loading state.
+       ============================================================ */
     @keyframes skel-pulse {
-      0%, 100% { background-color: var(--skel-1); }
-      50%      { background-color: var(--skel-2); }
+      0%, 100% { opacity: 0.55; }
+      50%      { opacity: 0.85; }
     }
     .skel {
-      animation: skel-pulse 1.4s ease-in-out infinite;
+      background: linear-gradient(90deg,
+        rgba(140, 160, 220, 0.04),
+        rgba(140, 160, 220, 0.12) 50%,
+        rgba(140, 160, 220, 0.04));
+      background-size: 200% 100%;
       border-radius: 4px;
       display: inline-block;
+      animation: skel-pulse 1.6s ease-in-out infinite;
     }
-    .skel-card {
-      background: var(--bg-card-2);
+    .skel.line { width: 100%; height: 12px; }
+    .skel-kpi {
+      background: var(--bg-2);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-md);
       padding: 14px 16px;
-      min-height: 92px;
+      min-height: 96px;
     }
-    .skel-card .skel.label { width: 60%; height: 10px; margin-bottom: 12px; }
-    .skel-card .skel.value { width: 50%; height: 24px; margin-bottom: 8px; }
-    .skel-card .skel.delta { width: 70%; height: 10px; }
-    .skel-chart { width: 100%; height: 180px; }
-    /* Error card */
+    .skel-kpi .skel.label { width: 55%; height: 9px; margin-bottom: 12px; }
+    .skel-kpi .skel.value { width: 45%; height: 24px; margin-bottom: 8px; }
+    .skel-kpi .skel.delta { width: 70%; height: 9px; }
+
+    /* ============================================================
+       Error card.
+       ============================================================ */
     .error-card {
-      background: var(--bg-card-2);
-      border: 1px solid var(--bad);
-      border-radius: 8px;
-      padding: 20px;
-      color: var(--text);
+      background: var(--panel);
+      border: 1px solid rgba(248, 81, 73, 0.55);
+      border-radius: var(--r-lg);
+      padding: 22px;
+      box-shadow: var(--shadow-2);
     }
     .error-card .err-title {
-      color: var(--bad);
-      font-weight: 600; font-size: 14px;
-      margin: 0 0 8px;
-      display: flex; align-items: center; gap: 8px;
+      color: var(--danger);
+      font-weight: 700; font-size: 15px;
+      margin: 0 0 10px;
+      display: flex; align-items: center; gap: 10px;
     }
     .error-card .err-msg {
-      color: var(--text-dim); font-size: 13px;
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      margin: 0 0 12px;
+      color: var(--muted); font-size: 12px;
+      font-family: var(--ph-font-mono);
+      margin: 0 0 8px;
       word-break: break-word;
     }
+    .error-card .hint {
+      color: var(--muted); font-size: 12px;
+      margin: 12px 0;
+    }
     .error-card .err-actions {
-      display: flex; gap: 8px; flex-wrap: wrap;
+      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
     }
     .btn {
       background: var(--accent);
-      color: #fff; border: 0;
-      padding: 7px 14px; border-radius: 6px;
-      cursor: pointer; font: inherit; font-size: 13px; font-weight: 500;
+      color: white; border: 0;
+      padding: 8px 16px; border-radius: var(--r-sm);
+      cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 500;
+      transition: filter var(--t-fast);
     }
     .btn:hover { filter: brightness(1.1); }
     .btn.ghost {
-      background: var(--bg-card);
+      background: transparent;
       color: var(--text);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-strong);
     }
-    .btn.ghost:hover { background: var(--bg-card-2); }
-    .num-tip { cursor: help; border-bottom: 1px dashed var(--text-faint); }
-    /* Mobile tweaks */
+    .btn.ghost:hover { background: var(--panel-2); filter: none; }
+
+    /* ============================================================
+       Footer.
+       ============================================================ */
+    footer {
+      color: var(--faint); font-size: 11.5px; text-align: center;
+      margin-top: 38px;
+      line-height: 1.7;
+    }
+    footer a { color: var(--muted); }
+
+    /* Mobile tweaks. */
     @media (max-width: 600px) {
-      .wrap { padding: 20px 14px 60px; }
-      header { gap: 8px; }
-      h1 { font-size: 19px; }
-      h1 .subtitle { display: block; margin: 4px 0 0; }
-      section { padding: 16px 14px; }
-      .card .value { font-size: 24px; }
+      .wrap { padding: 22px 14px 60px; }
+      .wordmark .mark { font-size: 26px; }
+      section.card { padding: 16px 14px; }
+      .kpi .value { font-size: 22px; }
+      .kpi.is-hero .value { font-size: 28px; }
+      .row-bar { width: 60px; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <header>
-      <h1>Phosphene · stats <span class="subtitle">solo-maintainer dashboard</span></h1>
-      <div class="meta-row">
-        <div class="meta" id="meta" aria-live="polite">
-          <span class="skel" style="width:200px;height:13px"></span>
-        </div>
-        <div class="header-actions">
+    <!-- ============================================================
+         HEADER
+         ============================================================ -->
+    <header class="hero">
+      <div class="hero-top">
+        <a href="/" class="wordmark" title="Back to Phosphene panel">
+          <span class="mark">Phosphene</span>
+          <span class="sep">·</span>
+          <span class="what">stats</span>
+        </a>
+        <div class="hero-actions">
+          <a class="icon-btn" id="repo-link"
+             href="https://github.com/mrbizarro/phosphene"
+             target="_blank" rel="noopener"
+             title="Open the public repo on GitHub">
+             <span class="ico">↗</span> repo
+          </a>
           <a class="icon-btn" id="raw-link"
              href="/stats/data"
              target="_blank" rel="noopener"
-             title="View the raw JSONL data file (served locally — never on the public repo)">raw JSONL ↗</a>
-          <button class="icon-btn" id="theme-toggle"
-                  type="button" aria-label="Toggle light / dark theme"
-                  title="Toggle theme">◐</button>
+             title="View the raw JSONL data file (served locally — never on the public repo)">
+             <span class="ico">{ }</span> raw JSONL
+          </a>
+          <button class="icon-btn" id="refresh-btn" type="button"
+                  title="Manually trigger a refresh (best-effort — refreshes daily automatically)">
+             <span class="ico">↻</span> refresh
+          </button>
         </div>
       </div>
+      <div class="sub-meta">
+        <span class="lock"><span class="ico">●</span> private · localhost only</span>
+        <span class="dot-sep">·</span>
+        <span id="meta" aria-live="polite">
+          <span class="skel" style="width:240px;height:11px"></span>
+        </span>
+      </div>
+      <div class="hero-underline" aria-hidden="true"></div>
     </header>
 
     <!-- Mount point for error state. Hidden unless fetch fails. -->
     <div id="error-mount" hidden></div>
 
-    <!-- Big number cards: state TODAY (last snapshot) -->
-    <section id="sec-now">
-      <h2>Right now</h2>
-      <div class="cards" id="cards" aria-busy="true" aria-label="Current repository stats">
-        <!-- skeleton placeholders -->
-        <div class="skel-card"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
-        <div class="skel-card"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
-        <div class="skel-card"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
-        <div class="skel-card"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
-        <div class="skel-card"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
-        <div class="skel-card"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
+    <!-- ============================================================
+         RIGHT NOW — KPI strip with sparklines + health pulse.
+         ============================================================ -->
+    <section class="card" id="sec-now">
+      <div class="section-head">
+        <h2>Right now <span class="h2-sub">snapshot from latest fetch</span></h2>
+      </div>
+      <div class="kpi-grid" id="kpi-grid" aria-busy="true" aria-label="Current repository stats">
+        <div class="skel-kpi"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
+        <div class="skel-kpi"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
+        <div class="skel-kpi"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
+        <div class="skel-kpi"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
+        <div class="skel-kpi"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
+        <div class="skel-kpi"><span class="skel label"></span><br><span class="skel value"></span><br><span class="skel delta"></span></div>
       </div>
     </section>
 
-    <!-- Time-series charts: cumulative + daily counts -->
-    <section id="sec-over-time">
+    <!-- ============================================================
+         FUNNEL — Views → Clones → Stars → Forks.
+         ============================================================ -->
+    <section class="card" id="sec-funnel">
       <div class="section-head">
-        <h2>Over time</h2>
+        <h2>Discovery funnel <span class="h2-sub">how the repo converts pageviews to commitment</span></h2>
+      </div>
+      <div class="funnel" id="funnel"
+           aria-label="Funnel from views to clones to stars to forks">
+        <!-- populated by JS -->
+      </div>
+    </section>
+
+    <!-- ============================================================
+         OVER TIME — period chips + 4 stacked charts.
+         ============================================================ -->
+    <section class="card" id="sec-over-time">
+      <div class="section-head">
+        <h2>Over time <span class="h2-sub">history from the local archive</span></h2>
         <div class="chips" role="group" aria-label="Date range">
           <button class="chip" type="button" data-period="7"   aria-pressed="false">7d</button>
           <button class="chip" type="button" data-period="30"  aria-pressed="true">30d</button>
           <button class="chip" type="button" data-period="90"  aria-pressed="false">90d</button>
+          <button class="chip" type="button" data-period="365" aria-pressed="false">1y</button>
           <button class="chip" type="button" data-period="all" aria-pressed="false">all</button>
         </div>
       </div>
+
       <div class="chart-row">
         <div class="chart-card">
-          <h3>Stars · cumulative</h3>
-          <div class="chart-wrap" data-skel="1">
-            <canvas id="chart-stars"
-                    aria-label="Line chart of cumulative star count over the selected date range"
+          <h3>
+            Stars &amp; forks · cumulative
+            <span class="legend">
+              <span><i class="swatch" style="background:#58a6ff"></i>stars</span>
+              <span><i class="swatch" style="background:#B14AFF"></i>forks</span>
+            </span>
+          </h3>
+          <div class="chart-wrap">
+            <canvas id="chart-growth"
+                    aria-label="Dual-axis line chart of cumulative stars and forks over the selected date range"
                     role="img"></canvas>
           </div>
         </div>
         <div class="chart-card">
-          <h3>Forks · cumulative</h3>
-          <div class="chart-wrap" data-skel="1">
-            <canvas id="chart-forks"
-                    aria-label="Line chart of cumulative fork count over the selected date range"
+          <h3>
+            Traffic · per day
+            <span class="legend">
+              <span><i class="swatch" style="background:#3fb950"></i>clones</span>
+              <span><i class="swatch" style="background:#d29922"></i>views</span>
+            </span>
+          </h3>
+          <div class="chart-wrap">
+            <canvas id="chart-traffic"
+                    aria-label="Grouped bar chart of git clones and page views per day"
                     role="img"></canvas>
           </div>
         </div>
       </div>
-      <div class="chart-row" style="margin-top:14px">
-        <div class="chart-card">
-          <h3>Clones per day</h3>
-          <div class="chart-wrap" data-skel="1">
-            <canvas id="chart-clones"
-                    aria-label="Bar chart of git clones per day over the selected date range"
+
+      <div class="chart-row">
+        <div class="chart-card" id="card-velocity">
+          <h3>
+            Issue &amp; PR velocity · weekly
+            <span class="legend">
+              <span><i class="swatch" style="background:#58a6ff"></i>opened</span>
+              <span><i class="swatch" style="background:#3fb950"></i>closed</span>
+            </span>
+          </h3>
+          <div class="chart-wrap">
+            <canvas id="chart-velocity"
+                    aria-label="Diverging bar chart of issues and PRs opened versus closed per week"
                     role="img"></canvas>
           </div>
         </div>
-        <div class="chart-card">
-          <h3>Repo page views per day</h3>
-          <div class="chart-wrap" data-skel="1">
-            <canvas id="chart-views"
-                    aria-label="Bar chart of repository page views per day over the selected date range"
+        <div class="chart-card" id="card-commits">
+          <h3>
+            Commit activity · per day
+            <span class="legend">
+              <span><i class="swatch" style="background:#5EEAFF"></i>commits</span>
+            </span>
+          </h3>
+          <div class="chart-wrap">
+            <canvas id="chart-commits"
+                    aria-label="Bar chart of commits per day over the selected date range"
                     role="img"></canvas>
-          </div>
-        </div>
-      </div>
-      <!-- Stars-gained section, only inserted if stars_timeline is present -->
-      <div id="stars-timeline-row" hidden style="margin-top:14px">
-        <div class="chart-row">
-          <div class="chart-card">
-            <h3>New stars per day</h3>
-            <div class="chart-wrap">
-              <canvas id="chart-stars-gained"
-                      aria-label="Bar chart of new stars gained per day over the selected date range"
-                      role="img"></canvas>
-            </div>
-          </div>
-          <div class="chart-card">
-            <h3>Cumulative stars from history</h3>
-            <div class="chart-wrap">
-              <canvas id="chart-stars-history"
-                      aria-label="Line chart of cumulative star count derived from full stargazer history"
-                      role="img"></canvas>
-            </div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- 14-day rolling snapshots from latest fetch -->
-    <section id="sec-traffic">
-      <h2>Where traffic comes from (last 14 days)</h2>
+    <!-- ============================================================
+         TRAFFIC SOURCES — referrers + paths tables.
+         ============================================================ -->
+    <section class="card" id="sec-traffic">
+      <div class="section-head">
+        <h2>Traffic sources <span class="h2-sub">last 14 days — GitHub Traffic API only retains this window</span></h2>
+      </div>
       <div class="two-col">
         <div>
-          <h3 style="font-size:12px;color:var(--text-dim);margin:0 0 6px">Top referrers</h3>
+          <h3>Top referrers</h3>
           <div class="table-wrap">
-            <table id="referrers-table"><thead><tr>
-              <th>Source</th><th class="num">Views</th><th class="num">Uniques</th>
-            </tr></thead><tbody>
-              <tr><td colspan="3" class="empty">loading…</td></tr>
-            </tbody></table>
+            <table id="referrers-table">
+              <thead><tr>
+                <th>Source</th>
+                <th class="num">Views</th>
+                <th class="num">Uniques</th>
+              </tr></thead>
+              <tbody>
+                <tr><td colspan="3" class="empty">loading…</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
         <div>
-          <h3 style="font-size:12px;color:var(--text-dim);margin:0 0 6px">Top paths</h3>
+          <h3>Top paths</h3>
           <div class="table-wrap">
-            <table id="paths-table"><thead><tr>
-              <th>Path</th><th class="num">Views</th><th class="num">Uniques</th>
-            </tr></thead><tbody>
-              <tr><td colspan="3" class="empty">loading…</td></tr>
-            </tbody></table>
+            <table id="paths-table">
+              <thead><tr>
+                <th>Path</th>
+                <th class="num">Views</th>
+                <th class="num">Uniques</th>
+              </tr></thead>
+              <tbody>
+                <tr><td colspan="3" class="empty">loading…</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         RELEASES — only shown when release_timeline has rows.
+         ============================================================ -->
+    <section class="card" id="sec-releases" hidden>
+      <div class="section-head">
+        <h2>Releases <span class="h2-sub">download volume per tag</span></h2>
+      </div>
+      <div class="table-wrap">
+        <table id="releases-table">
+          <thead><tr>
+            <th>Tag</th>
+            <th>Published</th>
+            <th class="num">Downloads</th>
+            <th class="num">Relative</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
@@ -467,650 +861,1140 @@
       never on the public repo. The panel refreshes it once a day in
       the background via <code>scripts/fetch_repo_stats.py</code>.
       <br>
-      The GitHub Traffic API only retains 14 days; this archive is how
-      we keep the history.
+      The GitHub Traffic API only retains 14 days of clones / views /
+      referrers / paths; this archive is how we keep the history.
     </footer>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script>
-    // ====================================================================
-    //  Phosphene stats dashboard — vanilla JS, single file, no build step.
-    //  Loads docs/stats-data.jsonl, renders cards/charts/tables.
-    //
-    //  State is held in module-scope vars, charts are created/destroyed
-    //  on period change. Period selection + theme persist in localStorage.
-    // ====================================================================
+  // =====================================================================
+  //  Phosphene stats dashboard — vanilla JS, single file, no build.
+  //
+  //  Loads /stats/data (JSONL), renders KPI strip + funnel + 4 time-series
+  //  charts + traffic-source tables + optional releases table. Period chip
+  //  selection persists in localStorage. All optional JSONL fields are
+  //  feature-detected so the dashboard renders cleanly even on a brand-
+  //  new install with one row of data.
+  // =====================================================================
 
-    const LS_PERIOD = 'phosphene.stats.period';
-    const LS_THEME  = 'phosphene.stats.theme';
-    const REPO_URL  = 'https://github.com/mrbizarro/phosphene';
-    // Served by the panel at /stats/data — JSONL lives in state/ on the
-    // user's Mac, never in the public repo (Mr Bizarro 2026-05-22).
-    const JSONL_URL = '/stats/data';
-    const RAW_URL   = '/stats/data';
+  const LS_PERIOD = 'phosphene.stats.period';
+  const REPO_URL  = 'https://github.com/mrbizarro/phosphene';
+  const JSONL_URL = '/stats/data';
+  // Refresh endpoint is "coming soon" on the panel side — POST best-effort
+  // and degrade silently when it 404s.
+  const REFRESH_URL = '/stats/refresh';
 
-    let allRows = [];           // every row from JSONL, sorted ascending
-    let currentPeriod = '30';   // '7' | '30' | '90' | 'all'
-    const charts = {};          // id -> Chart instance (so we can destroy & redraw)
-    const sparkCharts = {};     // card-label -> mini Chart
-    const intersectObservers = new Map();
+  // Color tokens for charts (kept here so chart code is theme-agnostic).
+  const C = {
+    accent:    '#58a6ff',
+    accent2:   '#2f81f7',
+    purple:    '#B14AFF',
+    pink:      '#FF2E9F',
+    cyan:      '#5EEAFF',
+    green:     '#3fb950',
+    amber:     '#d29922',
+    red:       '#f85149',
+    text:      '#f0f4fb',
+    muted:     '#b6bfd1',
+    faint:     '#5b6478',
+    border:    '#2c3563',
+    grid:      'rgba(140, 160, 220, 0.06)',
+    gridStrong:'rgba(140, 160, 220, 0.12)',
+    tooltipBg: 'rgba(10, 17, 48, 0.96)',
+  };
 
-    // ---- theme ---------------------------------------------------------
-    function initTheme() {
-      const saved = localStorage.getItem(LS_THEME);
-      const theme = saved === 'light' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', theme);
-      const btn = document.getElementById('theme-toggle');
-      btn.textContent = theme === 'light' ? '☀' : '◐';
-      btn.setAttribute('aria-label',
-        theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
-      btn.addEventListener('click', toggleTheme);
+  let allRows = [];
+  let currentPeriod = '30';
+  const charts = {};       // id -> Chart instance
+  const sparkCharts = {};  // id -> mini Chart
+
+  // ===================================================================
+  //  Helpers
+  // ===================================================================
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+
+  function fmt(n) {
+    return (n == null || Number.isNaN(n)) ? '—' : Number(n).toLocaleString();
+  }
+  function fmtShort(n) {
+    if (n == null || Number.isNaN(n)) return '—';
+    const abs = Math.abs(n);
+    if (abs < 10000) return Number(n).toLocaleString();
+    if (abs < 1e6)   return (n / 1e3).toFixed(n % 1e3 === 0 ? 0 : 1).replace(/\.0$/, '') + 'K';
+    if (abs < 1e9)   return (n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  }
+  function fmtPct(v, opts) {
+    if (v == null || !Number.isFinite(v)) return '—';
+    const fixed = (opts && opts.fixed != null) ? opts.fixed : 1;
+    const sign = (opts && opts.signed && v > 0) ? '+' : '';
+    return sign + v.toFixed(fixed) + '%';
+  }
+  function dayAgo(iso) {
+    const t = new Date(iso).getTime();
+    if (!Number.isFinite(t)) return '—';
+    const ms = Date.now() - t;
+    if (ms < 60_000)         return 'just now';
+    if (ms < 3_600_000)      return Math.floor(ms / 60_000)  + 'm ago';
+    if (ms < 86_400_000)     return Math.floor(ms / 3_600_000) + 'h ago';
+    const d = Math.floor(ms / 86_400_000);
+    if (d === 1) return 'yesterday';
+    if (d < 7)   return d + 'd ago';
+    return Math.floor(d / 7) + 'w ago';
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
+    );
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+  function sum(arr) { return arr.reduce((a, b) => a + (Number(b) || 0), 0); }
+  function avg(arr) { return arr.length ? sum(arr) / arr.length : 0; }
+
+  /** Slice rows by period. period ∈ {'7','30','90','365','all'}. */
+  function sliceByPeriod(rows, period) {
+    if (period === 'all' || !period) return rows;
+    const n = parseInt(period, 10);
+    if (!Number.isFinite(n) || n <= 0) return rows;
+    return rows.slice(-n);
+  }
+
+  /** Slice a {date,count} timeline by period (matches sliceByPeriod). */
+  function sliceTimelineByPeriod(timeline, period) {
+    if (!Array.isArray(timeline) || !timeline.length) return [];
+    if (period === 'all') return timeline;
+    const n = parseInt(period, 10);
+    if (!Number.isFinite(n) || n <= 0) return timeline;
+    const cutoff = Date.now() - n * 86_400_000;
+    return timeline.filter(p => {
+      const t = new Date(p.date).getTime();
+      return Number.isFinite(t) && t >= cutoff;
+    });
+  }
+
+  /** Two-part delta string (yday + week-over-week). */
+  function deltaHtml(today, yesterday, weekAgo) {
+    const out = [];
+    if (today != null && yesterday != null) {
+      out.push(deltaPart(today - yesterday, 'd/d'));
     }
-    function toggleTheme() {
-      const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-      const next = cur === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', next);
-      localStorage.setItem(LS_THEME, next);
-      const btn = document.getElementById('theme-toggle');
-      btn.textContent = next === 'light' ? '☀' : '◐';
-      btn.setAttribute('aria-label',
-        next === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
-      // Chart colors come from CSS-var-tinted JS literals; rerender so they pick up.
-      if (allRows.length) {
-        destroyAllCharts();
-        renderCharts(sliceByPeriod(allRows, currentPeriod));
-        renderCards(allRows);  // sparklines too
+    if (today != null && weekAgo != null && weekAgo !== yesterday) {
+      out.push(deltaPart(today - weekAgo, 'w/w'));
+    }
+    if (!out.length) return '';
+    return `<div class="deltas">${out.join('')}</div>`;
+  }
+  function deltaPart(diff, label) {
+    if (diff === 0) return `<span class="delta"><span class="lbl">${label}</span>±0</span>`;
+    const sign = diff > 0 ? '+' : '';
+    const cls  = diff > 0 ? 'up' : 'down';
+    return `<span class="delta ${cls}"><span class="lbl">${label}</span>${sign}${diff.toLocaleString()}</span>`;
+  }
+
+  // ===================================================================
+  //  Window-aware accessors. The fetcher ships rolling 15-day windows
+  //  for clones+views even on day 1, so on a fresh install we have
+  //  more granularity than the row history alone gives us.
+  // ===================================================================
+
+  /** Returns [{date,count,uniques}] for clones, preferring the window. */
+  function clonesSeries(rows) {
+    if (!rows.length) return [];
+    const last = rows[rows.length - 1];
+    const win = Array.isArray(last.clones_window) ? last.clones_window : null;
+    // Build a map from row history first, then overlay the window so
+    // window dates win when both exist.
+    const map = new Map();
+    for (const r of rows) {
+      if (!r.date) continue;
+      map.set(r.date, { date: r.date, count: r.clones?.count ?? 0, uniques: r.clones?.uniques ?? 0 });
+    }
+    if (win) {
+      for (const p of win) {
+        if (!p.date) continue;
+        map.set(p.date, { date: p.date, count: p.count ?? 0, uniques: p.uniques ?? 0 });
       }
     }
-
-    // ---- load + parse the JSONL ----------------------------------------
-    async function loadRows() {
-      const r = await fetch(JSONL_URL, {cache: 'no-store'});
-      if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + JSONL_URL);
-      const text = await r.text();
-      const rows = text.split(/\n+/).filter(Boolean).map(l => {
-        try { return JSON.parse(l); }
-        catch (e) { console.warn('skipping bad row', e); return null; }
-      }).filter(Boolean);
-      rows.sort((a, b) => (a.date || '') < (b.date || '') ? -1 : 1);
-      return rows;
+    return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
+  }
+  function viewsSeries(rows) {
+    if (!rows.length) return [];
+    const last = rows[rows.length - 1];
+    const win = Array.isArray(last.views_window) ? last.views_window : null;
+    const map = new Map();
+    for (const r of rows) {
+      if (!r.date) continue;
+      map.set(r.date, { date: r.date, count: r.views?.count ?? 0, uniques: r.views?.uniques ?? 0 });
     }
-
-    // ---- helpers --------------------------------------------------------
-    function fmt(n) {
-      return (n == null || Number.isNaN(n)) ? '—' : Number(n).toLocaleString();
-    }
-    /** Format big numbers with K/M shortening (>9999). */
-    function fmtShort(n) {
-      if (n == null || Number.isNaN(n)) return '—';
-      const abs = Math.abs(n);
-      if (abs < 10000) return Number(n).toLocaleString();
-      if (abs < 1e6)   return (n / 1e3).toFixed(n % 1e3 === 0 ? 0 : 1).replace(/\.0$/, '') + 'K';
-      if (abs < 1e9)   return (n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1).replace(/\.0$/, '') + 'M';
-      return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
-    }
-    function dayAgo(iso) {
-      const t = new Date(iso).getTime();
-      if (!Number.isFinite(t)) return '—';
-      const ms = Date.now() - t;
-      if (ms < 60_000)         return 'just now';
-      if (ms < 3_600_000)      return Math.floor(ms / 60_000)  + 'm ago';
-      if (ms < 86_400_000)     return Math.floor(ms / 3_600_000) + 'h ago';
-      const d = Math.floor(ms / 86_400_000);
-      if (d === 1) return 'yesterday';
-      if (d < 7)   return d + 'd ago';
-      return Math.floor(d / 7) + 'w ago';
-    }
-    function escapeHtml(s) {
-      return String(s ?? '').replace(/[&<>"']/g, c =>
-        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
-      );
-    }
-    function escapeAttr(s) { return escapeHtml(s); }
-
-    /** Read a CSS variable from :root so charts respect the active theme. */
-    function cssVar(name) {
-      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    }
-
-    /** Slice rows by period. period ∈ {'7','30','90','all'}. */
-    function sliceByPeriod(rows, period) {
-      if (period === 'all' || !period) return rows;
-      const n = parseInt(period, 10);
-      if (!Number.isFinite(n) || n <= 0) return rows;
-      return rows.slice(-n);
-    }
-
-    /** Two-line delta span (yday + week-over-week). */
-    function deltaSpan(today, yesterday, weekAgo) {
-      const out = [];
-      if (today != null && yesterday != null) {
-        out.push(deltaPart(today - yesterday, 'yday'));
+    if (win) {
+      for (const p of win) {
+        if (!p.date) continue;
+        map.set(p.date, { date: p.date, count: p.count ?? 0, uniques: p.uniques ?? 0 });
       }
-      // w/w only when we have a value 7+ snapshots back
-      if (today != null && weekAgo != null && weekAgo !== yesterday) {
-        out.push(deltaPart(today - weekAgo, 'w/w'));
-      }
-      if (!out.length) return '';
-      return `<div class="deltas">${out.join('')}</div>`;
     }
-    function deltaPart(diff, label) {
-      if (diff === 0)  return `<span class="delta"><span class="lbl">${label}</span>±0</span>`;
-      const sign = diff > 0 ? '+' : '';
-      const cls  = diff > 0 ? 'up' : 'down';
-      return `<span class="delta ${cls}"><span class="lbl">${label}</span>${sign}${diff.toLocaleString()}</span>`;
+    return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
+  }
+
+  // ===================================================================
+  //  KPI STRIP
+  // ===================================================================
+
+  function renderKpiStrip(rows) {
+    const mount = $('#kpi-grid');
+    mount.setAttribute('aria-busy', 'false');
+    if (!rows.length) {
+      mount.innerHTML =
+        '<div class="empty" style="grid-column:1 / -1">no snapshots yet — panel will fetch one in the background within 90s</div>';
+      return;
     }
+    const last = rows[rows.length - 1];
+    const prev = rows.length > 1 ? rows[rows.length - 2] : {};
+    const wkIdx = rows.length - 8;
+    const week = wkIdx >= 0 ? rows[wkIdx] : null;
 
-    // ---- cards + sparklines --------------------------------------------
-    /**
-     * Build the card row. We always source values from allRows so the
-     * "Right now" snapshot is the true latest (period slider only affects
-     * the charts), and sparklines reflect the last 14 days of history.
-     */
-    function renderCards(rows) {
-      const mount = document.getElementById('cards');
-      mount.setAttribute('aria-busy', 'false');
-      if (!rows.length) {
-        mount.innerHTML = '<div class="empty">no snapshots yet — panel will fetch one shortly</div>';
-        return;
+    // 30-day sparkline series (best-effort — uses raw rows).
+    const sparkRows = rows.slice(-30);
+    const sparkOf = pick => sparkRows.map(pick);
+    // Clones+views sparks use the per-day series (window-aware).
+    const clonesS = clonesSeries(rows).slice(-30);
+    const viewsS  = viewsSeries(rows).slice(-30);
+
+    // Health pulse — synthesized.
+    const pulse = computeHealthPulse(rows);
+
+    const cards = [
+      {
+        key: 'stars', label: 'Stars',
+        value: last.stars, yday: prev.stars, wk: week?.stars,
+        spark: sparkOf(r => r.stars), color: C.accent,
+      },
+      {
+        key: 'forks', label: 'Forks',
+        value: last.forks, yday: prev.forks, wk: week?.forks,
+        spark: sparkOf(r => r.forks), color: C.purple,
+      },
+      {
+        key: 'clones', label: 'Clones · today', hero: true,
+        value: last.clones?.count,
+        yday: prev.clones?.count, wk: week?.clones?.count,
+        spark: clonesS.map(p => p.count), color: C.pink,
+        sparkGradient: true,
+      },
+      {
+        key: 'views', label: 'Views · today',
+        value: last.views?.count,
+        yday: prev.views?.count, wk: week?.views?.count,
+        spark: viewsS.map(p => p.count), color: C.amber,
+      },
+      {
+        key: 'work', label: 'Open issues + PRs',
+        value: (last.open_issues ?? 0) + (last.open_prs ?? 0),
+        yday: (prev.open_issues ?? 0) + (prev.open_prs ?? 0),
+        wk:   (week?.open_issues ?? null) != null
+              ? (week.open_issues + (week.open_prs ?? 0))
+              : null,
+        sub: `${last.open_issues ?? 0} issues · ${last.open_prs ?? 0} prs`,
+        spark: sparkOf(r => (r.open_issues ?? 0) + (r.open_prs ?? 0)),
+        color: C.red,
+      },
+      {
+        key: 'pulse', label: 'Health pulse',
+        custom: renderPulseCard(pulse),
+        klass: 'kpi-pulse',
+      },
+    ];
+
+    mount.innerHTML = cards.map(c => {
+      if (c.custom) {
+        return `<div class="kpi ${c.klass || ''}" data-key="${c.key}" tabindex="0">${c.custom}</div>`;
       }
-      const last = rows[rows.length - 1];
-      const prev = rows.length > 1 ? rows[rows.length - 2] : {};
-      // For week-over-week: prefer rows[len-8] (7 days back). If we don't
-      // have 8 rows, fall back to prev so yday is the only signal.
-      const wkIdx = rows.length - 8;
-      const week = wkIdx >= 0 ? rows[wkIdx] : null;
-
-      // 14-day spark series. (Use full history if fewer than 14 rows exist.)
-      const sparkRows = rows.slice(-14);
-      const sparkOf = pick => sparkRows.map(pick);
-
-      const cards = [
-        {
-          key:'stars', label:'Stars', value:last.stars,
-          yday:prev.stars, wk:week?.stars,
-          spark:sparkOf(r => r.stars), color:'#58a6ff',
-        },
-        {
-          key:'forks', label:'Forks', value:last.forks,
-          yday:prev.forks, wk:week?.forks,
-          spark:sparkOf(r => r.forks), color:'#8957e5',
-        },
-        {
-          key:'watchers', label:'Watchers', value:last.subscribers,
-          yday:prev.subscribers, wk:week?.subscribers,
-          spark:sparkOf(r => r.subscribers), color:'#39c5cf',
-        },
-        {
-          key:'clones', label:'Clones · today',
-          value:last.clones?.count,
-          yday:prev.clones?.count, wk:week?.clones?.count,
-          spark:sparkOf(r => r.clones?.count ?? 0), color:'#3fb950',
-        },
-        {
-          key:'views', label:'Views · today',
-          value:last.views?.count,
-          yday:prev.views?.count, wk:week?.views?.count,
-          spark:sparkOf(r => r.views?.count ?? 0), color:'#d29922',
-        },
-        {
-          key:'issues', label:'Open issues',
-          value:last.open_issues,
-          yday:prev.open_issues, wk:week?.open_issues,
-          spark:sparkOf(r => r.open_issues), color:'#f85149',
-        },
-        {
-          key:'prs', label:'Open PRs',
-          value:last.open_prs,
-          yday:prev.open_prs, wk:week?.open_prs,
-          spark:sparkOf(r => r.open_prs), color:'#a371f7',
-        },
-      ];
-
-      // Growth card — the headline "is this growing?" number.
-      // Daily growth = (today_clones - yday_clones) / max(yday,1)
-      // Weekly growth = avg(last 7 clones) vs avg(prev 7 clones).
-      const growth = computeGrowth(rows);
-      cards.push({
-        key:'growth', label:'Clone growth',
-        custom: renderGrowthCard(growth),
-      });
-
-      const total_dl = last.releases?.total ?? null;
-      if (total_dl != null && total_dl > 0) {
-        cards.push({
-          key:'dl', label:'Release downloads',
-          value:total_dl, yday:prev.releases?.total, wk:week?.releases?.total,
-          spark:sparkOf(r => r.releases?.total ?? 0), color:'#58a6ff',
-        });
-      }
-
-      mount.innerHTML = cards.map(c => {
-        if (c.custom) {
-          return `<div class="card" data-key="${c.key}" tabindex="0">${c.custom}</div>`;
-        }
-        const isBig = c.value != null && Math.abs(c.value) > 9999;
-        const valHtml = isBig
-          ? `<div class="value"><span class="num-tip" title="${escapeAttr(fmt(c.value))}">${escapeHtml(fmtShort(c.value))}</span></div>`
-          : `<div class="value">${fmt(c.value)}</div>`;
-        const sparkOk = c.spark && c.spark.length >= 2 &&
-                        c.spark.some(v => v != null && v !== 0);
-        return `
-          <div class="card" data-key="${c.key}" tabindex="0">
-            <div class="label">${escapeHtml(c.label)}</div>
-            ${valHtml}
-            ${deltaSpan(c.value, c.yday, c.wk)}
-            ${sparkOk ? `<canvas class="spark" id="spark-${c.key}" aria-hidden="true"></canvas>` : ''}
-          </div>`;
-      }).join('');
-
-      // Now draw sparklines (after cards are in DOM).
-      cards.forEach(c => {
-        if (!c.spark) return;
-        const sparkOk = c.spark.length >= 2 &&
-                        c.spark.some(v => v != null && v !== 0);
-        if (!sparkOk) return;
-        drawSparkline('spark-' + c.key, c.spark, c.color);
-      });
-    }
-
-    function computeGrowth(rows) {
-      // Daily growth rate from clone counts.
-      const counts = rows.map(r => r.clones?.count ?? 0);
-      const today = counts[counts.length - 1] ?? null;
-      const yday  = counts[counts.length - 2] ?? null;
-      let daily = null;
-      if (today != null && yday != null) {
-        if (yday === 0) daily = today > 0 ? Infinity : 0;
-        else daily = ((today - yday) / yday) * 100;
-      }
-      // Weekly: last 7 vs prior 7 (if we have 14+ rows).
-      let weekly = null;
-      if (counts.length >= 14) {
-        const cur  = counts.slice(-7).reduce((a,b) => a+b, 0);
-        const prev = counts.slice(-14, -7).reduce((a,b) => a+b, 0);
-        if (prev === 0) weekly = cur > 0 ? Infinity : 0;
-        else weekly = ((cur - prev) / prev) * 100;
-      }
-      return { daily, weekly };
-    }
-
-    function renderGrowthCard(g) {
-      // Build {text, cls} for a percent value (or null / Infinity).
-      const pct = v => {
-        if (v == null)        return { text: '—',   cls: '' };
-        if (v === Infinity)   return { text: 'new', cls: 'up' };
-        if (v === 0)          return { text: '0.0%', cls: '' };
-        const sign = v > 0 ? '+' : '';
-        return { text: sign + v.toFixed(1) + '%', cls: v > 0 ? 'up' : 'down' };
-      };
-      const day  = pct(g.daily);
-      const week = pct(g.weekly);
-      // Big number prefers weekly (smoother signal), falls back to daily.
-      const big  = g.weekly != null ? week : day;
-      const bigColor = big.cls === 'up'   ? 'color:var(--good)'
-                    : big.cls === 'down' ? 'color:var(--bad)'
-                    : '';
+      const isBig = c.value != null && Math.abs(c.value) > 9999;
+      const valHtml = isBig
+        ? `<div class="value" title="${escapeAttr(fmt(c.value))}">${escapeHtml(fmtShort(c.value))}</div>`
+        : `<div class="value">${fmt(c.value)}</div>`;
+      const hero = c.hero ? ' is-hero' : '';
+      const sparkOk = c.spark && c.spark.length >= 2 &&
+                      c.spark.some(v => v != null && v !== 0);
+      const sparkHtml = sparkOk
+        ? `<canvas class="spark" id="spark-${c.key}" aria-hidden="true"></canvas>`
+        : '';
+      const subHtml = c.sub
+        ? `<div class="deltas"><span class="delta" style="color:var(--muted)">${escapeHtml(c.sub)}</span></div>`
+        : deltaHtml(c.value, c.yday, c.wk);
       return `
-        <div class="label" title="Daily and weekly clone growth — the simplest 'is this app catching on?' signal.">Clone growth</div>
-        <div class="value" style="${bigColor}">${escapeHtml(big.text)}</div>
-        <div class="deltas" style="margin-top:8px">
-          <span class="delta ${day.cls}"><span class="lbl">day</span>${escapeHtml(day.text)}</span>
-          <span class="delta ${week.cls}"><span class="lbl">week</span>${escapeHtml(week.text)}</span>
+        <div class="kpi${hero}${sparkOk ? ' has-spark' : ''}" data-key="${c.key}" tabindex="0">
+          <div class="label">${escapeHtml(c.label)}</div>
+          ${valHtml}
+          ${subHtml}
+          ${sparkHtml}
         </div>`;
+    }).join('');
+
+    cards.forEach(c => {
+      if (!c.spark) return;
+      const sparkOk = c.spark.length >= 2 && c.spark.some(v => v != null && v !== 0);
+      if (!sparkOk) return;
+      drawSparkline('spark-' + c.key, c.spark, c.color, !!c.sparkGradient);
+    });
+  }
+
+  /**
+   * Health pulse — a synthesized "is this app catching on?" score.
+   *
+   * Combines:
+   *  - clones-week-over-week change (weighted 0.4)
+   *  - views-week-over-week change  (weighted 0.3)
+   *  - new-stars in the last 7 days (weighted 0.3, normalized to expected)
+   *
+   * Returns { label, klass, detail } — label is short ("growing fast"),
+   * klass is one of good/warn/bad/neutral, detail explains the inputs.
+   */
+  function computeHealthPulse(rows) {
+    if (!rows.length) return { label: '—', klass: '', detail: 'not enough data' };
+
+    const clonesS = clonesSeries(rows);
+    const viewsS  = viewsSeries(rows);
+
+    function pctChange(series, days) {
+      if (series.length < days * 2) return null;
+      const cur  = series.slice(-days).reduce((a, p) => a + (p.count || 0), 0);
+      const prev = series.slice(-days * 2, -days).reduce((a, p) => a + (p.count || 0), 0);
+      if (prev === 0) return cur > 0 ? 100 : 0;
+      return ((cur - prev) / prev) * 100;
     }
 
-    function drawSparkline(canvasId, data, color) {
-      const el = document.getElementById(canvasId);
-      if (!el) return;
-      if (sparkCharts[canvasId]) { sparkCharts[canvasId].destroy(); }
-      sparkCharts[canvasId] = new Chart(el.getContext('2d'), {
-        type: 'line',
-        data: {
-          labels: data.map((_, i) => i),
-          datasets: [{
-            data,
-            borderColor: color,
-            backgroundColor: color + '22',
-            fill: true, tension: 0.3,
-            pointRadius: 0, pointHoverRadius: 3,
-            borderWidth: 1.5,
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false }, tooltip: { enabled: false } },
-          scales: { x: { display: false }, y: { display: false } },
-          animation: false,
-        }
-      });
-    }
+    const clonesWow = pctChange(clonesS, 7);
+    const viewsWow  = pctChange(viewsS,  7);
 
-    // ---- main charts ---------------------------------------------------
-    Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, system-ui, sans-serif';
-    Chart.defaults.font.size = 11;
-    Chart.defaults.plugins.legend.display = false;
-
-    function commonOpts() {
-      // Pull colors fresh each render so theme switching works.
-      Chart.defaults.color = cssVar('--text-dim') || '#8b949e';
-      Chart.defaults.borderColor = cssVar('--border') || '#30363d';
-      const grid = cssVar('--grid') || '#21262d';
-      return {
-        responsive: true, maintainAspectRatio: false,
-        scales: {
-          x: { grid: { color: grid }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
-          y: { grid: { color: grid }, beginAtZero: true, ticks: { precision: 0 } },
-        },
-        plugins: { tooltip: { intersect: false, mode: 'index' } },
-      };
-    }
-
-    function lineChart(canvasId, labels, data, color) {
-      const el = document.getElementById(canvasId);
-      if (!el) return;
-      if (charts[canvasId]) { charts[canvasId].destroy(); }
-      charts[canvasId] = new Chart(el.getContext('2d'), {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            data,
-            borderColor: color,
-            backgroundColor: color + '33',
-            fill: true, tension: 0.25, pointRadius: 2,
-            pointHoverRadius: 4, borderWidth: 2,
-          }]
-        },
-        options: commonOpts(),
-      });
-    }
-
-    function barChart(canvasId, labels, data, color) {
-      const el = document.getElementById(canvasId);
-      if (!el) return;
-      if (charts[canvasId]) { charts[canvasId].destroy(); }
-      charts[canvasId] = new Chart(el.getContext('2d'), {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [{ data, backgroundColor: color, borderWidth: 0 }]
-        },
-        options: commonOpts(),
-      });
-    }
-
-    function destroyAllCharts() {
-      Object.values(charts).forEach(c => c?.destroy?.());
-      for (const k in charts) delete charts[k];
-    }
-
-    /**
-     * Render the four "Over time" charts for the given slice.
-     *
-     * For clones+views, we prefer the freshest `clones_window` / `views_window`
-     * array on the LATEST row (if present), because the daily snapshot files
-     * record only a single per-day number, while the GH API actually gives us
-     * a 15-day rolling window each fetch. Using the window on day 1 means we
-     * already see 15 days of granularity instead of one point.
-     */
-    function renderCharts(slice) {
-      if (!slice.length) return;
-      const last = slice[slice.length - 1];
-      const labels = slice.map(r => r.date?.slice(5) || '');
-
-      lineChart('chart-stars', labels, slice.map(r => r.stars ?? null), '#58a6ff');
-      lineChart('chart-forks', labels, slice.map(r => r.forks ?? null), '#8957e5');
-
-      // Clones: prefer the rolling window if present + we'd otherwise show 1 dot.
-      const useClonesWindow = Array.isArray(last.clones_window) && last.clones_window.length > 1
-                              && slice.length < last.clones_window.length;
-      if (useClonesWindow) {
-        const w = last.clones_window;
-        barChart('chart-clones',
-          w.map(p => (p.date || '').slice(5)),
-          w.map(p => p.count ?? 0),
-          '#3fb950');
-      } else {
-        barChart('chart-clones', labels, slice.map(r => r.clones?.count ?? 0), '#3fb950');
-      }
-
-      const useViewsWindow = Array.isArray(last.views_window) && last.views_window.length > 1
-                             && slice.length < last.views_window.length;
-      if (useViewsWindow) {
-        const w = last.views_window;
-        barChart('chart-views',
-          w.map(p => (p.date || '').slice(5)),
-          w.map(p => p.count ?? 0),
-          '#d29922');
-      } else {
-        barChart('chart-views', labels, slice.map(r => r.views?.count ?? 0), '#d29922');
-      }
-
-      renderStarsTimeline(last, slice);
-    }
-
-    /**
-     * stars_timeline (optional): list of {starred_at, login_hash}.
-     * If present on the latest row, draw a per-day stars-gained bar chart
-     * and a cumulative line derived from the FULL history (not just the
-     * fetcher's daily snapshot). Feature-detect; silent skip if absent.
-     */
-    function renderStarsTimeline(last, slice) {
-      const row = document.getElementById('stars-timeline-row');
-      const tl = Array.isArray(last.stars_timeline) ? last.stars_timeline : null;
-      if (!tl || tl.length === 0) { row.hidden = true; return; }
-      row.hidden = false;
-
-      // Group by date (UTC yyyy-mm-dd) → count.
-      const byDay = new Map();
-      for (const ev of tl) {
-        const d = (ev.starred_at || '').slice(0, 10);
-        if (!d) continue;
-        byDay.set(d, (byDay.get(d) || 0) + 1);
-      }
-      const sortedDays = [...byDay.keys()].sort();
-      if (!sortedDays.length) { row.hidden = true; return; }
-
-      // Limit timeline to the current period (matches the chip selection).
-      let days = sortedDays;
-      if (currentPeriod !== 'all') {
-        const n = parseInt(currentPeriod, 10);
-        if (Number.isFinite(n)) days = sortedDays.slice(-n);
-      }
-
-      const labels = days.map(d => d.slice(5));
-      const gained = days.map(d => byDay.get(d) || 0);
-
-      // Cumulative from the START of full history (so the line is meaningful
-      // even when sliced).
-      const cum = [];
-      let total = 0;
-      for (const d of sortedDays) {
-        total += byDay.get(d) || 0;
-        if (days.includes(d)) cum.push(total);
-      }
-
-      barChart ('chart-stars-gained',  labels, gained, '#58a6ff');
-      lineChart('chart-stars-history', labels, cum,    '#58a6ff');
-    }
-
-    // ---- tables --------------------------------------------------------
-    /** Turn a referrer string (e.g. "reddit.com" or "Google") into a URL
-     *  if we can confidently link it. Returns null for opaque search-engine
-     *  names like "Google" / "DuckDuckGo" / "Bing" where the real URL is
-     *  hidden by GitHub. */
-    function referrerHref(name) {
-      if (!name) return null;
-      const SEARCH_ENGINES = new Set(['google','bing','duckduckgo','yahoo','baidu','yandex']);
-      if (SEARCH_ENGINES.has(name.toLowerCase())) return null;
-      // Heuristic: looks like a domain if it contains a dot and no spaces.
-      if (/\s/.test(name)) return null;
-      if (!/\./.test(name)) return null;
-      // Strip stray protocol if present.
-      const host = name.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-      if (!host) return null;
-      return 'https://' + host;
-    }
-
-    function renderTables(rows) {
-      const last = rows[rows.length - 1] || {};
-      const refs = last.referrers || [];
-      const paths = last.paths || [];
-      const refBody = document.querySelector('#referrers-table tbody');
-      const pathBody = document.querySelector('#paths-table tbody');
-      if (refs.length === 0) {
-        refBody.innerHTML = '<tr><td colspan="3" class="empty">no referrer data yet</td></tr>';
-      } else {
-        refBody.innerHTML = refs.map(r => {
-          const href = referrerHref(r.referrer);
-          const name = href
-            ? `<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.referrer)}</a>`
-            : escapeHtml(r.referrer);
-          return `<tr>
-            <td>${name}</td>
-            <td class="num" title="${escapeAttr(fmt(r.count))}">${escapeHtml(fmtShort(r.count))}</td>
-            <td class="num" title="${escapeAttr(fmt(r.uniques))}">${escapeHtml(fmtShort(r.uniques))}</td>
-          </tr>`;
-        }).join('');
-      }
-      if (paths.length === 0) {
-        pathBody.innerHTML = '<tr><td colspan="3" class="empty">no path data yet</td></tr>';
-      } else {
-        pathBody.innerHTML = paths.map(p => `
-          <tr><td><a href="https://github.com${escapeAttr(p.path)}"
-                     target="_blank" rel="noopener">${escapeHtml(p.path)}</a></td>
-              <td class="num" title="${escapeAttr(fmt(p.count))}">${escapeHtml(fmtShort(p.count))}</td>
-              <td class="num" title="${escapeAttr(fmt(p.uniques))}">${escapeHtml(fmtShort(p.uniques))}</td></tr>
-        `).join('');
-      }
-    }
-
-    function renderMeta(rows) {
+    // New stars in last 7d (from snapshot deltas — fast and good enough).
+    let starsLast7 = null;
+    if (rows.length >= 2) {
       const last = rows[rows.length - 1];
-      const meta = document.getElementById('meta');
-      if (!last) {
-        meta.textContent = 'no data yet — panel will fetch one shortly';
-        return;
+      const idx = Math.max(0, rows.length - 8);
+      const past = rows[idx];
+      if (last.stars != null && past?.stars != null) {
+        starsLast7 = last.stars - past.stars;
       }
-      const local = new Date(last.fetched_at);
-      const localStr = Number.isFinite(local.getTime()) ? local.toString() : last.fetched_at;
-      meta.innerHTML = `
-        <strong>${rows.length}</strong> ${rows.length === 1 ? 'snapshot' : 'daily snapshots'} ·
-        last refresh <span title="${escapeAttr(last.fetched_at)} (UTC)&#10;${escapeAttr(localStr)} (local)"><strong>${escapeHtml(dayAgo(last.fetched_at))}</strong></span> ·
-        <a href="${REPO_URL}" target="_blank" rel="noopener">repo ↗</a>
-      `;
     }
 
-    // ---- period chips --------------------------------------------------
-    function initChips() {
-      const saved = localStorage.getItem(LS_PERIOD);
-      if (saved && ['7','30','90','all'].includes(saved)) currentPeriod = saved;
-      document.querySelectorAll('.chip').forEach(b => {
-        b.setAttribute('aria-pressed', String(b.dataset.period === currentPeriod));
-        b.addEventListener('click', () => {
-          currentPeriod = b.dataset.period;
-          localStorage.setItem(LS_PERIOD, currentPeriod);
-          document.querySelectorAll('.chip').forEach(x =>
-            x.setAttribute('aria-pressed', String(x === b)));
-          renderCharts(sliceByPeriod(allRows, currentPeriod));
-        });
-      });
+    // Compose. Each component contributes a normalized score in [-1, 1].
+    function norm(v, scale) {
+      if (v == null) return null;
+      return Math.max(-1, Math.min(1, v / scale));
     }
+    const parts = [];
+    let weightSum = 0;
+    let sumScore = 0;
+    const cN = norm(clonesWow, 50); // 50% w/w == 1.0
+    if (cN != null) { parts.push(cN * 0.4); sumScore += cN * 0.4; weightSum += 0.4; }
+    const vN = norm(viewsWow, 50);
+    if (vN != null) { parts.push(vN * 0.3); sumScore += vN * 0.3; weightSum += 0.3; }
+    if (starsLast7 != null) {
+      // A solo-maintainer repo: 1 star/wk = neutral, 10/wk = healthy.
+      const sN = norm(starsLast7 - 1, 10);
+      sumScore += sN * 0.3; weightSum += 0.3;
+    }
+    if (weightSum === 0) {
+      return { label: '—', klass: '', detail: 'collect 14+ days for a reading' };
+    }
+    const score = sumScore / weightSum;
 
-    // ---- error state ---------------------------------------------------
-    function showError(err) {
-      // Hide the loading/skeleton sections.
-      document.getElementById('sec-now').hidden = true;
-      document.getElementById('sec-over-time').hidden = true;
-      document.getElementById('sec-traffic').hidden = true;
+    let label, klass;
+    if      (score >  0.30) { label = 'growing fast'; klass = 'good'; }
+    else if (score >  0.05) { label = 'growing';      klass = 'good'; }
+    else if (score > -0.05) { label = 'steady';       klass = 'warn'; }
+    else if (score > -0.30) { label = 'slowing';      klass = 'warn'; }
+    else                    { label = 'declining';    klass = 'bad';  }
 
-      const meta = document.getElementById('meta');
-      meta.innerHTML = `<span style="color:var(--bad)">could not load stats</span>`;
+    const bits = [];
+    if (clonesWow != null) bits.push(`clones ${fmtPct(clonesWow, {signed:true, fixed:0})} w/w`);
+    if (viewsWow  != null) bits.push(`views ${fmtPct(viewsWow, {signed:true, fixed:0})} w/w`);
+    if (starsLast7 != null) bits.push(`${starsLast7 >= 0 ? '+' : ''}${starsLast7} stars/7d`);
+    return { label, klass, detail: bits.join(' · ') };
+  }
 
-      const mount = document.getElementById('error-mount');
-      mount.hidden = false;
-      mount.innerHTML = `
-        <div class="error-card" role="alert">
-          <p class="err-title">Could not load /stats/data</p>
-          <p class="err-msg">${escapeHtml(err.message || String(err))}</p>
-          <p style="color:var(--text-dim);font-size:12px;margin:0 0 12px">
-            URL: <a href="${JSONL_URL}" target="_blank" rel="noopener">${JSONL_URL}</a>
-            (relative to this page)
-          </p>
-          <div class="err-actions">
-            <button class="btn" id="retry-btn" type="button">Try again</button>
-            <a class="btn ghost" href="${RAW_URL}" target="_blank" rel="noopener">View on GitHub ↗</a>
+  function renderPulseCard(p) {
+    const arrow = p.klass === 'good' ? '↗' : p.klass === 'bad' ? '↘' : '→';
+    return `
+      <div class="label">Health pulse</div>
+      <div class="pulse">
+        <span class="pulse-dot ${p.klass}" aria-hidden="true"></span>
+        <span class="pulse-label">${arrow} ${escapeHtml(p.label)}</span>
+      </div>
+      <div class="pulse-detail">${escapeHtml(p.detail || '')}</div>`;
+  }
+
+  function drawSparkline(canvasId, data, color, gradient) {
+    const el = document.getElementById(canvasId);
+    if (!el) return;
+    if (sparkCharts[canvasId]) { sparkCharts[canvasId].destroy(); }
+    const ctx = el.getContext('2d');
+    let stroke = color;
+    let fill = color + '33';
+    if (gradient) {
+      const grad = ctx.createLinearGradient(0, 0, el.width || 200, 0);
+      grad.addColorStop(0, C.pink);
+      grad.addColorStop(0.5, C.purple);
+      grad.addColorStop(1, C.cyan);
+      stroke = grad;
+      const fgrad = ctx.createLinearGradient(0, 0, 0, 38);
+      fgrad.addColorStop(0, 'rgba(177,74,255,0.30)');
+      fgrad.addColorStop(1, 'rgba(177,74,255,0.00)');
+      fill = fgrad;
+    }
+    sparkCharts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: data.map((_, i) => i),
+        datasets: [{
+          data, borderColor: stroke, backgroundColor: fill,
+          fill: true, tension: 0.32,
+          pointRadius: 0, pointHoverRadius: 3,
+          borderWidth: 1.5,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: { x: { display: false }, y: { display: false } },
+        animation: false,
+      }
+    });
+  }
+
+  // ===================================================================
+  //  FUNNEL
+  // ===================================================================
+
+  function renderFunnel(rows) {
+    const mount = $('#funnel');
+    if (!rows.length) { mount.innerHTML = ''; return; }
+    const last = rows[rows.length - 1];
+
+    // Views (14d) — sum of views_window if available, else use today's count.
+    const win14 = Array.isArray(last.views_window) ? last.views_window : null;
+    const cwin14 = Array.isArray(last.clones_window) ? last.clones_window : null;
+    const views14  = win14  ? sum(win14.map(p => p.count || 0))  : (last.views?.count ?? 0);
+    const clones14 = cwin14 ? sum(cwin14.map(p => p.count || 0)) : (last.clones?.count ?? 0);
+    const stars  = last.stars ?? 0;
+    const forks  = last.forks ?? 0;
+
+    const steps = [
+      { stage: 'Views',  scope: '· 14d',    value: views14,  klass: '' },
+      { stage: 'Clones', scope: '· 14d',    value: clones14, klass: 'is-hero' },
+      { stage: 'Stars',  scope: '· lifetime', value: stars,  klass: '' },
+      { stage: 'Forks',  scope: '· lifetime', value: forks,  klass: '' },
+    ];
+    const max = Math.max(...steps.map(s => s.value || 0), 1);
+    // Conversion labels go between steps.
+    function conv(a, b) {
+      if (!a || a === 0) return '—';
+      const pct = (b / a) * 100;
+      // Cap displayed "very small" pcts at one decimal, very large at zero.
+      if (pct >= 100) return Math.round(pct) + '%';
+      if (pct >= 10)  return pct.toFixed(0) + '%';
+      if (pct >= 1)   return pct.toFixed(1) + '%';
+      return pct.toFixed(2) + '%';
+    }
+    mount.innerHTML = steps.map((s, i) => {
+      const fill = Math.max(8, Math.min(100, (s.value / max) * 100));
+      const last = i === steps.length - 1;
+      const next = steps[i + 1];
+      const convPct = !last ? conv(s.value, next.value) : '';
+      const convLabel = !last ? `${escapeHtml(steps[i].stage.toLowerCase())} → ${escapeHtml(next.stage.toLowerCase())}` : '';
+      return `
+        <div class="funnel-step ${s.klass}" style="--fill:${fill}%">
+          <div>
+            <div class="funnel-stage">${escapeHtml(s.stage)}<span class="scope">${escapeHtml(s.scope)}</span></div>
+            <div class="funnel-value">${escapeHtml(fmtShort(s.value))}</div>
           </div>
+          ${!last ? `<div class="funnel-conv"><span class="pct">${escapeHtml(convPct)}</span> · ${convLabel}</div>` : ''}
+          ${!last ? `<div class="funnel-arrow" aria-hidden="true">›</div>` : ''}
         </div>`;
-      document.getElementById('retry-btn').addEventListener('click', () => {
-        mount.hidden = true;
-        document.getElementById('sec-now').hidden = false;
-        document.getElementById('sec-over-time').hidden = false;
-        document.getElementById('sec-traffic').hidden = false;
-        main();
+    }).join('');
+  }
+
+  // ===================================================================
+  //  CHARTS — common defaults + helpers.
+  // ===================================================================
+
+  Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = C.muted;
+  Chart.defaults.borderColor = C.border;
+  Chart.defaults.plugins.legend.display = false;
+
+  function commonOpts(opts) {
+    return Object.assign({
+      responsive: true, maintainAspectRatio: false,
+      interaction: { intersect: false, mode: 'index' },
+      scales: {
+        x: {
+          grid: { color: C.grid, drawBorder: false },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, color: C.muted },
+        },
+        y: {
+          grid: { color: C.grid, drawBorder: false },
+          ticks: { precision: 0, color: C.muted, callback: v => fmtShort(v) },
+          beginAtZero: true,
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: C.tooltipBg,
+          borderColor: C.border, borderWidth: 1,
+          titleColor: C.text, bodyColor: C.muted,
+          titleFont: { weight: '600', size: 11.5 },
+          bodyFont: { size: 11.5, family: '-apple-system, system-ui, sans-serif' },
+          padding: 10, cornerRadius: 6,
+          callbacks: {
+            label: ctx => {
+              const lbl = ctx.dataset.label || '';
+              const v = ctx.parsed.y ?? ctx.parsed;
+              const num = (v == null || Number.isNaN(v))
+                ? '—' : Number(v).toLocaleString();
+              return (lbl ? lbl + ':  ' : '') + num;
+            }
+          }
+        },
+      },
+    }, opts || {});
+  }
+
+  function destroyChart(id) {
+    if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+  }
+
+  /**
+   * Render an "empty / unavailable" message inside a chart-wrap WITHOUT
+   * destroying the canvas. We hide the canvas and stamp an absolute-
+   * positioned message on top; on the next render, removeEmpty() clears
+   * the message and unhides the canvas. This way period changes can
+   * re-fill a chart that was previously empty.
+   */
+  function chartEmpty(id, message) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    destroyChart(id);
+    const wrap = el.parentElement;
+    if (!wrap) return;
+    el.style.display = 'none';
+    let overlay = wrap.querySelector('.chart-empty');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'chart-empty';
+      wrap.appendChild(overlay);
+    }
+    overlay.textContent = message;
+    overlay.style.display = '';
+  }
+  function clearEmpty(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.display = '';
+    const wrap = el.parentElement;
+    const overlay = wrap && wrap.querySelector('.chart-empty');
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  // ===================================================================
+  //  CHART — Stars + Forks growth (dual line, secondary axis).
+  // ===================================================================
+
+  function renderGrowthChart(slice, rows, period) {
+    const id = 'chart-growth';
+    const el = document.getElementById(id);
+    if (!el) return;
+    destroyChart(id);
+    if (!slice.length) return;
+    clearEmpty(id);
+
+    const last = rows[rows.length - 1] || {};
+
+    // Prefer the cumulative timelines (stars_timeline / forks_timeline) when
+    // present — they're back-filled from the full GitHub history and give
+    // useful resolution even when we only have one or two daily snapshots.
+    // Fall back to the per-row sequence otherwise.
+    const useTimelines =
+      Array.isArray(last.stars_timeline) && last.stars_timeline.length >= 2 ||
+      Array.isArray(last.forks_timeline) && last.forks_timeline.length >= 2;
+
+    let labels, starsData, forksData;
+    if (useTimelines) {
+      const st = sliceTimelineByPeriod(last.stars_timeline || [], period);
+      const ft = sliceTimelineByPeriod(last.forks_timeline || [], period);
+      // Union of dates so both series line up.
+      const dateSet = new Set([...st.map(p => p.date), ...ft.map(p => p.date)]);
+      const dates = [...dateSet].sort();
+      const sMap = new Map(st.map(p => [p.date, p.count]));
+      const fMap = new Map(ft.map(p => [p.date, p.count]));
+      // Carry-forward cumulative values (so a missing day doesn't dip the line).
+      let lastS = null, lastF = null;
+      labels    = dates.map(d => d.slice(5));
+      starsData = dates.map(d => {
+        if (sMap.has(d)) lastS = sMap.get(d);
+        return lastS;
       });
+      forksData = dates.map(d => {
+        if (fMap.has(d)) lastF = fMap.get(d);
+        return lastF;
+      });
+    } else {
+      labels    = slice.map(r => (r.date || '').slice(5));
+      starsData = slice.map(r => r.stars ?? null);
+      forksData = slice.map(r => r.forks ?? null);
     }
 
-    // ---- lazy chart init via IntersectionObserver ----------------------
-    /**
-     * Defers main-section chart rendering until the section scrolls into
-     * view. The "Right now" cards (+ their sparklines) draw immediately,
-     * since they're above the fold and small.
-     */
-    function lazyMountCharts() {
-      const section = document.getElementById('sec-over-time');
-      if (!section) return;
-      let drawn = false;
-      const draw = () => {
-        if (drawn) return;
-        drawn = true;
-        renderCharts(sliceByPeriod(allRows, currentPeriod));
-      };
-      if (!('IntersectionObserver' in window)) {
-        // Fallback for very old browsers.
-        draw();
+    // If the magnitudes differ a lot (stars >> forks usually), use a
+    // secondary axis so forks don't sit flat at the bottom.
+    const starMax = Math.max(...starsData.filter(v => v != null), 0);
+    const forkMax = Math.max(...forksData.filter(v => v != null), 0);
+    const useDualAxis = starMax > 0 && forkMax > 0 && (starMax / Math.max(forkMax, 1)) > 4;
+
+    charts[id] = new Chart(el.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'stars',
+            data: starsData,
+            borderColor: C.accent,
+            backgroundColor: C.accent + '22',
+            yAxisID: 'y',
+            fill: true, tension: 0.25, borderWidth: 2,
+            pointRadius: 0, pointHoverRadius: 4,
+          },
+          {
+            label: 'forks',
+            data: forksData,
+            borderColor: C.purple,
+            backgroundColor: C.purple + '22',
+            yAxisID: useDualAxis ? 'y1' : 'y',
+            fill: !useDualAxis, tension: 0.25, borderWidth: 2,
+            pointRadius: 0, pointHoverRadius: 4,
+          },
+        ],
+      },
+      options: commonOpts({
+        scales: {
+          x: { grid: { color: C.grid }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, color: C.muted } },
+          y: { position: 'left',  grid: { color: C.grid }, ticks: { precision: 0, color: C.muted, callback: v => fmtShort(v) }, beginAtZero: true },
+          y1: useDualAxis
+            ? { position: 'right', grid: { display: false }, ticks: { precision: 0, color: C.purple, callback: v => fmtShort(v) }, beginAtZero: true }
+            : { display: false },
+        },
+      }),
+    });
+  }
+
+  // ===================================================================
+  //  CHART — Clones + Views per day (grouped bars).
+  //  Uses clonesSeries / viewsSeries (window-aware) so day-1 has detail.
+  // ===================================================================
+
+  function renderTrafficChart(rows, period) {
+    const id = 'chart-traffic';
+    const el = document.getElementById(id);
+    if (!el) return;
+    destroyChart(id);
+    if (!rows.length) return;
+
+    let cs = clonesSeries(rows);
+    let vs = viewsSeries(rows);
+    if (!cs.length && !vs.length) {
+      chartEmpty(id, 'no traffic data yet');
+      return;
+    }
+    clearEmpty(id);
+    cs = sliceTimelineByPeriod(cs, period);
+    vs = sliceTimelineByPeriod(vs, period);
+
+    // Union labels across both series (sorted).
+    const dateSet = new Set([...cs.map(p => p.date), ...vs.map(p => p.date)]);
+    const dates = [...dateSet].sort();
+    const cMap = new Map(cs.map(p => [p.date, p.count || 0]));
+    const vMap = new Map(vs.map(p => [p.date, p.count || 0]));
+
+    charts[id] = new Chart(el.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: dates.map(d => d.slice(5)),
+        datasets: [
+          {
+            label: 'clones',
+            data: dates.map(d => cMap.get(d) ?? 0),
+            backgroundColor: C.green + 'cc',
+            borderRadius: 2,
+            categoryPercentage: 0.8, barPercentage: 0.95,
+          },
+          {
+            label: 'views',
+            data: dates.map(d => vMap.get(d) ?? 0),
+            backgroundColor: C.amber + 'cc',
+            borderRadius: 2,
+            categoryPercentage: 0.8, barPercentage: 0.95,
+          },
+        ],
+      },
+      options: commonOpts(),
+    });
+  }
+
+  // ===================================================================
+  //  CHART — Issue + PR velocity (weekly stacked).
+  //  Opened above x-axis, closed below (negative). Stacks issues + PRs.
+  // ===================================================================
+
+  function rollupWeekly(daily) {
+    // daily: [{date, count}]. Returns map weekStart -> count.
+    const out = new Map();
+    if (!Array.isArray(daily)) return out;
+    for (const p of daily) {
+      const d = new Date(p.date);
+      if (!Number.isFinite(d.getTime())) continue;
+      // Week starts Monday.
+      const day = d.getUTCDay();
+      const offset = (day + 6) % 7;
+      d.setUTCDate(d.getUTCDate() - offset);
+      const key = d.toISOString().slice(0, 10);
+      out.set(key, (out.get(key) || 0) + (Number(p.count) || 0));
+    }
+    return out;
+  }
+
+  function renderVelocityChart(rows, period) {
+    const id = 'chart-velocity';
+    const el = document.getElementById(id);
+    if (!el) return;
+    destroyChart(id);
+    const last = rows[rows.length - 1] || {};
+
+    const haveAny = ['issues_opened', 'issues_closed', 'prs_opened', 'prs_closed']
+      .some(k => Array.isArray(last[k]) && last[k].length);
+    if (!haveAny) {
+      chartEmpty(id, 'issue/PR velocity will appear once the fetcher emits the new fields');
+      return;
+    }
+
+    const ioW = rollupWeekly(sliceTimelineByPeriod(last.issues_opened || [], period));
+    const icW = rollupWeekly(sliceTimelineByPeriod(last.issues_closed || [], period));
+    const poW = rollupWeekly(sliceTimelineByPeriod(last.prs_opened    || [], period));
+    const pcW = rollupWeekly(sliceTimelineByPeriod(last.prs_closed    || [], period));
+
+    const weekSet = new Set([
+      ...ioW.keys(), ...icW.keys(), ...poW.keys(), ...pcW.keys(),
+    ]);
+    const weeks = [...weekSet].sort();
+    if (!weeks.length) {
+      chartEmpty(id, 'no velocity data in this range');
+      return;
+    }
+    clearEmpty(id);
+    const labels = weeks.map(w => w.slice(5));
+
+    charts[id] = new Chart(el.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'issues opened',
+            data: weeks.map(w => (ioW.get(w) || 0)),
+            backgroundColor: C.accent + 'cc',
+            stack: 'opened',
+            borderRadius: 2,
+          },
+          {
+            label: 'prs opened',
+            data: weeks.map(w => (poW.get(w) || 0)),
+            backgroundColor: C.purple + 'cc',
+            stack: 'opened',
+            borderRadius: 2,
+          },
+          {
+            label: 'issues closed',
+            data: weeks.map(w => -(icW.get(w) || 0)),
+            backgroundColor: C.green + 'cc',
+            stack: 'closed',
+            borderRadius: 2,
+          },
+          {
+            label: 'prs closed',
+            data: weeks.map(w => -(pcW.get(w) || 0)),
+            backgroundColor: C.cyan + 'aa',
+            stack: 'closed',
+            borderRadius: 2,
+          },
+        ],
+      },
+      options: commonOpts({
+        scales: {
+          x: { grid: { color: C.grid }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, color: C.muted },
+               stacked: true },
+          y: { grid: { color: C.grid }, ticks: { color: C.muted, callback: v => fmtShort(Math.abs(v)) },
+               stacked: true },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: C.tooltipBg, borderColor: C.border, borderWidth: 1,
+            titleColor: C.text, bodyColor: C.muted, padding: 10, cornerRadius: 6,
+            callbacks: {
+              label: ctx => {
+                const v = Math.abs(ctx.parsed.y || 0);
+                return `${ctx.dataset.label}: ${v.toLocaleString()}`;
+              }
+            }
+          },
+        },
+      }),
+    });
+  }
+
+  // ===================================================================
+  //  CHART — Commit activity (daily bars).
+  // ===================================================================
+
+  function renderCommitsChart(rows, period) {
+    const id = 'chart-commits';
+    const el = document.getElementById(id);
+    if (!el) return;
+    destroyChart(id);
+    const last = rows[rows.length - 1] || {};
+
+    let tl = Array.isArray(last.commits_timeline) ? last.commits_timeline : null;
+    if (!tl || !tl.length) {
+      chartEmpty(id, 'commit activity will appear once the fetcher emits commits_timeline');
+      return;
+    }
+    tl = sliceTimelineByPeriod(tl, period);
+    if (!tl.length) {
+      chartEmpty(id, 'no commits in this range');
+      return;
+    }
+    clearEmpty(id);
+    const labels = tl.map(p => (p.date || '').slice(5));
+    const data = tl.map(p => p.count || 0);
+
+    charts[id] = new Chart(el.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'commits', data,
+          backgroundColor: C.cyan + 'cc',
+          borderRadius: 2,
+        }],
+      },
+      options: commonOpts(),
+    });
+  }
+
+  // ===================================================================
+  //  CHARTS — orchestration.
+  // ===================================================================
+
+  function renderAllCharts(rows, period) {
+    const slice = sliceByPeriod(rows, period);
+    renderGrowthChart(slice, rows, period);
+    renderTrafficChart(rows, period);
+    renderVelocityChart(rows, period);
+    renderCommitsChart(rows, period);
+  }
+
+  // ===================================================================
+  //  TABLES — referrers + paths.
+  // ===================================================================
+
+  function referrerHref(name) {
+    if (!name) return null;
+    const SEARCH_ENGINES = new Set(['google','bing','duckduckgo','yahoo','baidu','yandex','brave']);
+    if (SEARCH_ENGINES.has(name.toLowerCase())) return null;
+    if (/\s/.test(name)) return null;
+    if (!/\./.test(name)) return null;
+    const host = name.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (!host) return null;
+    return 'https://' + host;
+  }
+
+  /** Previous-row map for a given table key, used for trend arrows. */
+  function prevMap(rows, key, idKey) {
+    if (rows.length < 2) return new Map();
+    const prev = rows[rows.length - 2];
+    const arr = Array.isArray(prev[key]) ? prev[key] : [];
+    return new Map(arr.map(r => [r[idKey], r.count || 0]));
+  }
+
+  function trendArrow(today, yesterday) {
+    if (yesterday == null) return '';
+    const diff = (today || 0) - yesterday;
+    if (diff === 0) return `<span class="trend flat" title="no change">·</span>`;
+    if (diff > 0)  return `<span class="trend up"   title="+${diff.toLocaleString()} vs prior snapshot">↑</span>`;
+    return `<span class="trend down" title="${diff.toLocaleString()} vs prior snapshot">↓</span>`;
+  }
+
+  function renderTables(rows) {
+    const last = rows[rows.length - 1] || {};
+    const refs = Array.isArray(last.referrers) ? last.referrers : [];
+    const paths = Array.isArray(last.paths) ? last.paths : [];
+    const refBody  = $('#referrers-table tbody');
+    const pathBody = $('#paths-table tbody');
+
+    // Bar reference: largest count in this set.
+    const refMax  = Math.max(1, ...refs.map(r => r.count || 0));
+    const pathMax = Math.max(1, ...paths.map(p => p.count || 0));
+
+    const refPrev  = prevMap(rows, 'referrers', 'referrer');
+    const pathPrev = prevMap(rows, 'paths', 'path');
+
+    if (!refs.length) {
+      refBody.innerHTML = '<tr><td colspan="3" class="empty">no referrer data yet</td></tr>';
+    } else {
+      refBody.innerHTML = refs.map(r => {
+        const href = referrerHref(r.referrer);
+        const name = href
+          ? `<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.referrer)}</a>`
+          : escapeHtml(r.referrer);
+        const w = Math.max(2, (r.count / refMax) * 100);
+        const trend = trendArrow(r.count, refPrev.get(r.referrer));
+        return `<tr>
+          <td>${name}${trend}</td>
+          <td class="num" title="${escapeAttr(fmt(r.count))}">
+            ${escapeHtml(fmtShort(r.count))}
+            <span class="row-bar" aria-hidden="true"><i style="--w:${w}%"></i></span>
+          </td>
+          <td class="num" title="${escapeAttr(fmt(r.uniques))}">${escapeHtml(fmtShort(r.uniques))}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    if (!paths.length) {
+      pathBody.innerHTML = '<tr><td colspan="3" class="empty">no path data yet</td></tr>';
+    } else {
+      pathBody.innerHTML = paths.map(p => {
+        const w = Math.max(2, (p.count / pathMax) * 100);
+        const trend = trendArrow(p.count, pathPrev.get(p.path));
+        return `<tr>
+          <td>
+            <a href="https://github.com${escapeAttr(p.path)}" target="_blank" rel="noopener">${escapeHtml(p.path)}</a>
+            ${trend}
+          </td>
+          <td class="num" title="${escapeAttr(fmt(p.count))}">
+            ${escapeHtml(fmtShort(p.count))}
+            <span class="row-bar gradient" aria-hidden="true"><i style="--w:${w}%"></i></span>
+          </td>
+          <td class="num" title="${escapeAttr(fmt(p.uniques))}">${escapeHtml(fmtShort(p.uniques))}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // ===================================================================
+  //  RELEASES — only renders when release_timeline is present.
+  // ===================================================================
+
+  function renderReleases(rows) {
+    const last = rows[rows.length - 1] || {};
+    const tl = Array.isArray(last.release_timeline) ? last.release_timeline : null;
+    const sec = $('#sec-releases');
+    if (!tl || !tl.length) { sec.hidden = true; return; }
+    sec.hidden = false;
+    const max = Math.max(1, ...tl.map(r => r.total_downloads || 0));
+    const body = $('#releases-table tbody');
+    body.innerHTML = tl.map(r => {
+      const w = Math.max(2, ((r.total_downloads || 0) / max) * 100);
+      const when = r.published_at ? new Date(r.published_at) : null;
+      const whenStr = (when && Number.isFinite(when.getTime()))
+        ? when.toISOString().slice(0, 10) : '—';
+      return `<tr>
+        <td><code>${escapeHtml(r.tag || '—')}</code></td>
+        <td class="mono" style="color:var(--muted)">${escapeHtml(whenStr)}</td>
+        <td class="num" title="${escapeAttr(fmt(r.total_downloads))}">${escapeHtml(fmtShort(r.total_downloads || 0))}</td>
+        <td class="num" style="width:30%">
+          <span class="row-bar gradient" style="width:100%"><i style="--w:${w}%"></i></span>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ===================================================================
+  //  META BAR — snapshot count + last refresh.
+  // ===================================================================
+
+  function renderMeta(rows) {
+    const last = rows[rows.length - 1];
+    const meta = $('#meta');
+    if (!last) {
+      meta.textContent = 'no data yet — panel will fetch one shortly';
+      return;
+    }
+    const localStr = (() => {
+      const d = new Date(last.fetched_at);
+      return Number.isFinite(d.getTime()) ? d.toString() : last.fetched_at;
+    })();
+    meta.innerHTML = `
+      refreshed every 24h · <strong>${rows.length}</strong> ${rows.length === 1 ? 'snapshot' : 'snapshots'} ·
+      last refresh
+      <strong title="${escapeAttr(last.fetched_at)} (UTC)&#10;${escapeAttr(localStr)} (local)">
+        ${escapeHtml(dayAgo(last.fetched_at))}
+      </strong>
+    `;
+  }
+
+  // ===================================================================
+  //  PERIOD CHIPS
+  // ===================================================================
+
+  function initChips() {
+    const saved = localStorage.getItem(LS_PERIOD);
+    if (saved && ['7','30','90','365','all'].includes(saved)) currentPeriod = saved;
+    $$('.chip').forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.period === currentPeriod));
+      b.addEventListener('click', () => {
+        currentPeriod = b.dataset.period;
+        localStorage.setItem(LS_PERIOD, currentPeriod);
+        $$('.chip').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+        renderAllCharts(allRows, currentPeriod);
+      });
+    });
+  }
+
+  // ===================================================================
+  //  REFRESH — best-effort POST. Endpoint may 404; fall back to a reload.
+  // ===================================================================
+
+  function initRefresh() {
+    const btn = $('#refresh-btn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      btn.classList.add('is-busy');
+      btn.disabled = true;
+      try {
+        // Try the manual endpoint first; if the panel hasn't shipped it
+        // yet (404), fall back to just re-loading the data file.
+        try {
+          await fetch(REFRESH_URL, { method: 'POST', cache: 'no-store' });
+        } catch (_) { /* network / 404 — fine, refetch anyway */ }
+        // Small delay so any background job has time to land.
+        await new Promise(r => setTimeout(r, 600));
+        await main();
+      } finally {
+        btn.classList.remove('is-busy');
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // ===================================================================
+  //  ERROR STATE
+  // ===================================================================
+
+  function showError(err) {
+    ['sec-now', 'sec-funnel', 'sec-over-time', 'sec-traffic', 'sec-releases']
+      .forEach(id => { const e = document.getElementById(id); if (e) e.hidden = true; });
+    const meta = $('#meta');
+    if (meta) meta.innerHTML = `<span style="color:var(--danger)">could not load stats</span>`;
+
+    const mount = $('#error-mount');
+    mount.hidden = false;
+    mount.innerHTML = `
+      <div class="error-card" role="alert">
+        <p class="err-title"><span aria-hidden="true">⚠</span> could not load /stats/data</p>
+        <p class="err-msg">${escapeHtml(err.message || String(err))}</p>
+        <p class="hint">
+          The panel might not have run its first fetch yet — give it about
+          90 seconds and click <em>Try again</em>. The data file lives at
+          <code>${escapeHtml(JSONL_URL)}</code>.
+        </p>
+        <div class="err-actions">
+          <button class="btn" id="retry-btn" type="button">Try again</button>
+          <a class="btn ghost" href="${REPO_URL}" target="_blank" rel="noopener">View repo ↗</a>
+        </div>
+      </div>`;
+    $('#retry-btn').addEventListener('click', () => {
+      mount.hidden = true;
+      ['sec-now', 'sec-funnel', 'sec-over-time', 'sec-traffic']
+        .forEach(id => { const e = document.getElementById(id); if (e) e.hidden = false; });
+      main();
+    });
+  }
+
+  // ===================================================================
+  //  Lazy chart init via IntersectionObserver — keeps the first paint
+  //  cheap by deferring chart construction until the section is near
+  //  the viewport.
+  // ===================================================================
+
+  function lazyMountCharts() {
+    const section = $('#sec-over-time');
+    if (!section) return;
+    let drawn = false;
+    const draw = () => {
+      if (drawn) return;
+      drawn = true;
+      renderAllCharts(allRows, currentPeriod);
+    };
+    if (!('IntersectionObserver' in window)) { draw(); return; }
+    const io = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        if (e.isIntersecting) { draw(); io.disconnect(); return; }
+      }
+    }, { rootMargin: '300px' });
+    io.observe(section);
+  }
+
+  // ===================================================================
+  //  DATA LOAD
+  // ===================================================================
+
+  async function loadRows() {
+    const r = await fetch(JSONL_URL, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + JSONL_URL);
+    const text = await r.text();
+    const rows = text.split(/\n+/).filter(Boolean).map(l => {
+      try { return JSON.parse(l); }
+      catch (e) { console.warn('skipping bad row', e); return null; }
+    }).filter(Boolean);
+    rows.sort((a, b) => (a.date || '') < (b.date || '') ? -1 : 1);
+    return rows;
+  }
+
+  // ===================================================================
+  //  MAIN
+  // ===================================================================
+
+  async function main() {
+    try {
+      allRows = await loadRows();
+      renderMeta(allRows);
+      if (!allRows.length) {
+        $('#kpi-grid').setAttribute('aria-busy', 'false');
+        $('#kpi-grid').innerHTML =
+          '<div class="empty" style="grid-column:1 / -1">no snapshots yet — panel will fetch one in the background within 90s</div>';
+        $('#funnel').innerHTML = '';
         return;
       }
-      const io = new IntersectionObserver(entries => {
-        for (const e of entries) {
-          if (e.isIntersecting) {
-            draw();
-            io.disconnect();
-            return;
-          }
-        }
-      }, { rootMargin: '200px' });
-      io.observe(section);
-      // Also redraw on chip change after initial paint.
+      renderKpiStrip(allRows);
+      renderFunnel(allRows);
+      renderTables(allRows);
+      renderReleases(allRows);
+      lazyMountCharts();
+    } catch (e) {
+      console.error(e);
+      showError(e);
     }
+  }
 
-    // ---- main flow -----------------------------------------------------
-    async function main() {
-      try {
-        allRows = await loadRows();
-        renderMeta(allRows);
-        if (!allRows.length) {
-          // Render empty cards row with a friendly message.
-          document.getElementById('cards').setAttribute('aria-busy', 'false');
-          document.getElementById('cards').innerHTML =
-            '<div class="empty" style="grid-column:1 / -1">no snapshots yet — panel will fetch one shortly</div>';
-          return;
-        }
-        renderCards(allRows);
-        renderTables(allRows);
-        lazyMountCharts();
-      } catch (e) {
-        console.error(e);
-        showError(e);
-      }
-    }
-
-    // ---- boot ----------------------------------------------------------
-    initTheme();
-    initChips();
-    main();
+  // ===================================================================
+  //  BOOT
+  // ===================================================================
+  initChips();
+  initRefresh();
+  main();
   </script>
 </body>
 </html>
