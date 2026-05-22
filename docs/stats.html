@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Phosphene · stats</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <!--
+    Phosphene repo-stats dashboard.
+
+    Reads docs/stats-data.jsonl (appended daily by .github/workflows/
+    repo-stats.yml) and shows simple cards + sparkline charts. Pure
+    vanilla — single file, no build, no framework. Chart.js from CDN
+    is the only outside dep. View at:
+        https://mrbizarro.github.io/phosphene/stats.html
+    (Enable in repo Settings → Pages → "Deploy from a branch → main /docs"
+    on first setup.)
+
+    No login, no telemetry, no analytics-ception. The data file is
+    public because it's committed to the public repo — that's by
+    design (open dashboards build trust).
+  -->
+  <style>
+    :root {
+      --bg:        #0d1117;
+      --bg-card:   #161b22;
+      --bg-card-2: #1f2630;
+      --border:    #30363d;
+      --text:      #c9d1d9;
+      --text-dim:  #8b949e;
+      --text-faint:#6e7681;
+      --accent:    #58a6ff;
+      --good:      #3fb950;
+      --warn:      #d29922;
+      --bad:       #f85149;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+            "Segoe UI", system-ui, sans-serif;
+      min-height: 100vh;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 24px 80px; }
+    header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
+    }
+    h1 {
+      font-size: 22px; font-weight: 600; margin: 0;
+    }
+    h1 .subtitle {
+      color: var(--text-dim); font-weight: 400; font-size: 14px;
+      margin-left: 10px;
+    }
+    .meta {
+      color: var(--text-dim); font-size: 13px;
+    }
+    .meta strong { color: var(--text); font-weight: 500; }
+    section {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 18px;
+    }
+    h2 {
+      font-size: 13px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--text-dim); margin: 0 0 14px;
+    }
+    /* Cards row */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: var(--bg-card-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
+    .card .label {
+      color: var(--text-dim);
+      font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .card .value {
+      font-size: 28px; font-weight: 600; line-height: 1.1;
+      margin-top: 6px;
+    }
+    .card .delta {
+      font-size: 12px; color: var(--text-faint); margin-top: 4px;
+    }
+    .card .delta.up   { color: var(--good); }
+    .card .delta.down { color: var(--bad); }
+    /* Chart blocks */
+    .chart-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 720px) {
+      .chart-row { grid-template-columns: 1fr; }
+    }
+    .chart-card {
+      background: var(--bg-card-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
+    .chart-card h3 {
+      font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--text-dim);
+      margin: 0 0 8px;
+    }
+    .chart-card .chart-wrap {
+      position: relative; height: 180px;
+    }
+    /* Tables */
+    table {
+      width: 100%; border-collapse: collapse; font-size: 13px;
+    }
+    th, td {
+      text-align: left; padding: 7px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      font-weight: 500; color: var(--text-dim);
+      text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;
+    }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .two-col {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    }
+    @media (max-width: 720px) {
+      .two-col { grid-template-columns: 1fr; }
+    }
+    .empty {
+      color: var(--text-faint); font-style: italic; padding: 20px 0;
+      text-align: center;
+    }
+    code {
+      background: var(--bg-card-2); padding: 1px 5px; border-radius: 3px;
+      font-size: 12px; font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    footer {
+      color: var(--text-faint); font-size: 12px; text-align: center;
+      margin-top: 30px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Phosphene · stats <span class="subtitle">solo-maintainer dashboard</span></h1>
+      <div class="meta" id="meta">loading…</div>
+    </header>
+
+    <!-- Big number cards: state TODAY (last snapshot) -->
+    <section>
+      <h2>Right now</h2>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <!-- Time-series charts: cumulative + daily counts -->
+    <section>
+      <h2>Over time</h2>
+      <div class="chart-row">
+        <div class="chart-card">
+          <h3>Stars · cumulative</h3>
+          <div class="chart-wrap"><canvas id="chart-stars"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <h3>Forks · cumulative</h3>
+          <div class="chart-wrap"><canvas id="chart-forks"></canvas></div>
+        </div>
+      </div>
+      <div class="chart-row" style="margin-top:14px">
+        <div class="chart-card">
+          <h3>Clones per day</h3>
+          <div class="chart-wrap"><canvas id="chart-clones"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <h3>Repo page views per day</h3>
+          <div class="chart-wrap"><canvas id="chart-views"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 14-day rolling snapshots from latest fetch -->
+    <section>
+      <h2>Where traffic comes from (last 14 days)</h2>
+      <div class="two-col">
+        <div>
+          <h3 style="font-size:12px;color:var(--text-dim);margin:0 0 6px">Top referrers</h3>
+          <table id="referrers-table"><thead><tr>
+            <th>Source</th><th class="num">Views</th><th class="num">Uniques</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div>
+          <h3 style="font-size:12px;color:var(--text-dim);margin:0 0 6px">Top paths</h3>
+          <table id="paths-table"><thead><tr>
+            <th>Path</th><th class="num">Views</th><th class="num">Uniques</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Data lives at <code>docs/stats-data.jsonl</code>, refreshed daily by
+      <code>.github/workflows/repo-stats.yml</code>.
+      <br>
+      The GitHub Traffic API only retains 14 days; this file is how we keep
+      the history.
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+    // ---- load + parse the JSONL ----------------------------------------
+    async function loadRows() {
+      const r = await fetch('stats-data.jsonl', {cache: 'no-store'});
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' on stats-data.jsonl');
+      const text = await r.text();
+      return text.split(/\n+/).filter(Boolean).map(l => JSON.parse(l));
+    }
+
+    // ---- small helpers --------------------------------------------------
+    const fmt    = n => (n == null ? '—' : n.toLocaleString());
+    const dayAgo = (iso) => {
+      const t = new Date(iso).getTime();
+      const ms = Date.now() - t;
+      const d = Math.floor(ms / 86400000);
+      if (d === 0) return 'today';
+      if (d === 1) return 'yesterday';
+      if (d < 7)   return d + 'd ago';
+      return Math.floor(d / 7) + 'w ago';
+    };
+
+    function deltaSpan(today, yesterday) {
+      if (today == null || yesterday == null) return '';
+      const d = today - yesterday;
+      if (d === 0) return '<span class="delta">no change</span>';
+      const sign = d > 0 ? '+' : '';
+      const cls  = d > 0 ? 'up' : 'down';
+      return `<span class="delta ${cls}">${sign}${d.toLocaleString()} vs yday</span>`;
+    }
+
+    function renderCards(rows) {
+      const last = rows[rows.length - 1];
+      const prev = rows.length > 1 ? rows[rows.length - 2] : {};
+      const cards = [
+        {label: "Stars",         value: last.stars,            yday: prev.stars},
+        {label: "Forks",         value: last.forks,            yday: prev.forks},
+        {label: "Watchers",      value: last.subscribers,      yday: prev.subscribers},
+        {label: "Clones · today",value: last.clones?.count,    yday: prev.clones?.count},
+        {label: "Views · today", value: last.views?.count,     yday: prev.views?.count},
+        {label: "Open issues",   value: last.open_issues,      yday: prev.open_issues},
+        {label: "Open PRs",      value: last.open_prs,         yday: prev.open_prs},
+      ];
+      const total_dl = last.releases?.total ?? null;
+      if (total_dl != null && total_dl > 0) {
+        cards.push({label: "Release downloads", value: total_dl, yday: prev.releases?.total});
+      }
+      document.getElementById('cards').innerHTML = cards.map(c => `
+        <div class="card">
+          <div class="label">${c.label}</div>
+          <div class="value">${fmt(c.value)}</div>
+          ${deltaSpan(c.value, c.yday)}
+        </div>
+      `).join('');
+    }
+
+    // ---- charts ---------------------------------------------------------
+    Chart.defaults.color = '#8b949e';
+    Chart.defaults.borderColor = '#30363d';
+    Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, system-ui, sans-serif';
+    Chart.defaults.font.size = 11;
+    Chart.defaults.plugins.legend.display = false;
+
+    const COMMON_OPTS = {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { grid: { color: '#21262d' }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+        y: { grid: { color: '#21262d' }, beginAtZero: true, ticks: { precision: 0 } },
+      },
+      plugins: { tooltip: { intersect: false, mode: 'index' } },
+    };
+
+    function lineChart(canvasId, labels, data, color) {
+      const el = document.getElementById(canvasId);
+      if (!el) return;
+      new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            borderColor: color,
+            backgroundColor: color + '33',
+            fill: true, tension: 0.25, pointRadius: 2,
+            pointHoverRadius: 4, borderWidth: 2,
+          }]
+        },
+        options: COMMON_OPTS,
+      });
+    }
+
+    function barChart(canvasId, labels, data, color) {
+      const el = document.getElementById(canvasId);
+      if (!el) return;
+      new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{ data, backgroundColor: color, borderWidth: 0 }]
+        },
+        options: COMMON_OPTS,
+      });
+    }
+
+    function renderCharts(rows) {
+      // X-axis labels in MM-DD so they fit on mobile.
+      const labels = rows.map(r => r.date?.slice(5) || '');
+      lineChart('chart-stars', labels, rows.map(r => r.stars        ?? null), '#58a6ff');
+      lineChart('chart-forks', labels, rows.map(r => r.forks        ?? null), '#8957e5');
+      barChart ('chart-clones', labels, rows.map(r => r.clones?.count ?? 0),  '#3fb950');
+      barChart ('chart-views',  labels, rows.map(r => r.views?.count  ?? 0),  '#d29922');
+    }
+
+    function renderTables(rows) {
+      const last = rows[rows.length - 1] || {};
+      const refs = last.referrers || [];
+      const paths = last.paths || [];
+      const refBody = document.querySelector('#referrers-table tbody');
+      const pathBody = document.querySelector('#paths-table tbody');
+      if (refs.length === 0) {
+        refBody.innerHTML = '<tr><td colspan="3" class="empty">no referrer data yet</td></tr>';
+      } else {
+        refBody.innerHTML = refs.map(r => `
+          <tr><td>${escapeHtml(r.referrer)}</td>
+              <td class="num">${fmt(r.count)}</td>
+              <td class="num">${fmt(r.uniques)}</td></tr>
+        `).join('');
+      }
+      if (paths.length === 0) {
+        pathBody.innerHTML = '<tr><td colspan="3" class="empty">no path data yet</td></tr>';
+      } else {
+        pathBody.innerHTML = paths.map(p => `
+          <tr><td><a href="https://github.com/mrbizarro/phosphene${escapeAttr(p.path)}"
+                     target="_blank" rel="noopener">${escapeHtml(p.path)}</a></td>
+              <td class="num">${fmt(p.count)}</td>
+              <td class="num">${fmt(p.uniques)}</td></tr>
+        `).join('');
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
+      );
+    }
+    function escapeAttr(s) { return escapeHtml(s); }
+
+    function renderMeta(rows) {
+      const last = rows[rows.length - 1];
+      const meta = document.getElementById('meta');
+      if (!last) { meta.textContent = 'no data yet — first snapshot due 03:17 UTC'; return; }
+      meta.innerHTML = `
+        <strong>${rows.length}</strong> daily snapshots ·
+        last refresh <strong>${escapeHtml(dayAgo(last.fetched_at))}</strong>
+        (${escapeHtml(last.fetched_at)}) ·
+        <a href="https://github.com/mrbizarro/phosphene" target="_blank" rel="noopener">repo ↗</a>
+      `;
+    }
+
+    (async function main() {
+      try {
+        const rows = await loadRows();
+        rows.sort((a, b) => (a.date || '') < (b.date || '') ? -1 : 1);
+        renderMeta(rows);
+        if (!rows.length) return;
+        renderCards(rows);
+        renderCharts(rows);
+        renderTables(rows);
+      } catch (e) {
+        document.getElementById('meta').innerHTML =
+          `<span style="color:var(--bad)">could not load stats-data.jsonl: ${escapeHtml(e.message)}</span>`;
+      }
+    })();
+  </script>
+</body>
+</html>
