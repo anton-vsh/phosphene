@@ -15,7 +15,7 @@
 
 ## Overview
 
-Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) and an MLX port of [HiDream-O1-Image-Dev](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys. Anonymous usage analytics are opt-in and OFF by default — see [TELEMETRY.md](TELEMETRY.md).
+Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) and an MLX port of [HiDream-O1-Image-Dev](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys, no telemetry.
 
 3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab with two MLX-native engines, hardware capability tiering, and an agentic prompt enhancer / shot planner driven by the same local Gemma 3 12B used for auto-captioning.
 
@@ -248,6 +248,4 @@ Phosphene is free and open source.
 
 ## Network note
 
-Phosphene runs locally. A clean production install checks GitHub every 30 minutes for an update badge, and only touches Hugging Face or CivitAI when you download models or LoRAs. Disable the update check with `PHOSPHENE_DISABLE_VERSION_CHECK=1`. The panel binds to `127.0.0.1` with no auth. It's not designed for LAN exposure or tunneling.
-
-**Telemetry.** OFF by default. If you opt in under **Settings → Anonymous analytics**, the panel sends a small JSON event per render — type, duration, hardware tier, error category. Never prompts, image bytes, filenames, paths, or hostname. Full schema and rationale: [TELEMETRY.md](TELEMETRY.md). Point at a self-hosted endpoint with `PHOSPHENE_ANALYTICS_ENDPOINT`.
+Phosphene runs locally. No telemetry. A clean production install checks GitHub every 30 minutes for an update badge, and only touches Hugging Face or CivitAI when you download models or LoRAs. Disable the update check with `PHOSPHENE_DISABLE_VERSION_CHECK=1`. The panel binds to `127.0.0.1` with no auth. It's not designed for LAN exposure or tunneling.
