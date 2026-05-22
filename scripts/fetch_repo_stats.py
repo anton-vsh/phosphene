@@ -12,34 +12,77 @@ Why a custom script (not the off-the-shelf `github-repo-stats` Action):
 - Schema lives next to us; we can add fields later without renegotiating
   with an upstream marketplace action.
 
-Output schema (one JSON object per UTC day, newline-delimited):
+------------------------------------------------------------------------
+RUNNING LOCALLY
+------------------------------------------------------------------------
+
+    GITHUB_TOKEN=$(gh auth token) python3 scripts/fetch_repo_stats.py
+    GITHUB_TOKEN=$(gh auth token) python3 scripts/fetch_repo_stats.py --dry-run
+    GITHUB_TOKEN=$(gh auth token) python3 scripts/fetch_repo_stats.py \
+        --repo owner/name
+
+Env vars:
+- GITHUB_TOKEN     default token (auto-injected in GitHub Actions)
+- GH_STATS_TOKEN   explicit override; wins over GITHUB_TOKEN
+- PHOSPHENE_REPO   default repo override (CLI --repo wins over env)
+
+Required token scopes for the default repo:
+- public_repo / repo  (Traffic API requires push access)
+- read:org            (only if querying a private org repo)
+
+The classic `gh auth token` for the repo owner is sufficient.
+
+------------------------------------------------------------------------
+OUTPUT SCHEMA  (one JSON object per UTC day, newline-delimited)
+------------------------------------------------------------------------
 
     {
       "date":   "2026-05-22",          # UTC YYYY-MM-DD (the day fetched)
       "fetched_at": "...Z",            # full ISO timestamp
-      "clones": {"count": N, "uniques": N},      # daily-window slice
-      "views":  {"count": N, "uniques": N},
       "stars":         N,                         # total today
       "forks":         N,
-      "open_issues":   N,
+      "open_issues":   N,                         # excludes PRs
+      "watchers":      N,                         # alias for stars (GH legacy)
+      "subscribers":   N,                         # actual GitHub "watch"
       "open_prs":      N,
-      "watchers":      N,
-      "subscribers":   N,                         # actual GitHub watch
+      # Back-compat: most-recent-day slice. Same numbers as the last
+      # element of clones_window/views_window. Kept so older dashboards
+      # don't break.
+      "clones": {"count": N, "uniques": N},
+      "views":  {"count": N, "uniques": N},
+      # Full 15-day window from the Traffic API. The API window rotates
+      # daily — snapshotting this gives us a continuous record once we
+      # accumulate a few days.
+      "clones_window": [{"date": "2026-05-08", "count": N, "uniques": N}, ...],
+      "views_window":  [{"date": "2026-05-08", "count": N, "uniques": N}, ...],
+      # Cumulative star count per day, derived from /stargazers. Lets a
+      # fresh dashboard show a stars curve from day 1 instead of
+      # waiting for daily snapshots to accumulate.
+      "stars_timeline": [{"date": "2024-09-12", "count": 1}, ...],
       "referrers": [{"referrer": "...", "count": N, "uniques": N}, ...],
-      "paths":     [{"path": "...", "count": N, "uniques": N, "title": "..."}, ...]
+      "paths":     [{"path": "...", "count": N, "uniques": N, "title": "..."}, ...],
+      "releases":  {"total": N, "by_release": {"v1.0": N, ...}}
     }
 
-The clones/views counts here are the SUM of the latest 24 hours of the
-Traffic API's 15-day day-array. The full 15-day curve from the API rotates
-out by tomorrow, so the only way to retain it is to snapshot daily and
-append. The dashboard reads the JSONL append-only.
+Schema invariants:
+- `date` is UTC YYYY-MM-DD, lexicographic-sortable.
+- New fields may be added; existing field names/shapes must not change.
+- stars_timeline is cumulative (not per-day). The dashboard derives
+  deltas itself. Cumulative is monotonic, which is friendlier for
+  partial / capped fetches.
+- All counts are non-negative ints.
 
 Idempotent: if today's date already has an entry, the new fetch REPLACES
 it (so re-runs in the same UTC day don't duplicate rows).
+
+The clones/views fields are duplicated for back-compat: they're the
+SUM of the latest 24-hour entry. clones_window/views_window have the
+full 15-day curve from the same API call.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -51,7 +94,7 @@ from pathlib import Path
 
 # ---- config --------------------------------------------------------------
 
-REPO = os.environ.get("PHOSPHENE_REPO", "mrbizarro/phosphene")
+DEFAULT_REPO = os.environ.get("PHOSPHENE_REPO", "mrbizarro/phosphene")
 TOKEN = (
     os.environ.get("GH_STATS_TOKEN")  # explicit override
     or os.environ.get("GITHUB_TOKEN")  # default in GH Actions
@@ -60,7 +103,21 @@ TOKEN = (
 OUTPUT = Path(__file__).resolve().parent.parent / "docs" / "stats-data.jsonl"
 
 API = "https://api.github.com"
-UA = "phosphene-repo-stats/1"
+UA = "phosphene-repo-stats/2"
+
+# Star scan ceiling. /stargazers paginates 100/page so this is 50 pages.
+# A real repo crossing 5k stars deserves a deliberate revisit, not a
+# silent runaway.
+STARS_CAP = 5000
+
+# Retry policy for transient failures.
+RETRY_BACKOFFS = (2, 8, 30)
+
+# Rate-limit floor — sleep until reset if we drop below this.
+RATE_LIMIT_FLOOR = 100
+
+# Tracked across the run so we can print a single-line summary at exit.
+_last_rate_limit: dict = {"remaining": None, "limit": None, "reset": None}
 
 if not TOKEN:
     sys.stderr.write(
@@ -69,12 +126,49 @@ if not TOKEN:
     )
     sys.exit(1)
 
+
 # ---- http helpers --------------------------------------------------------
 
 
-def _get(path: str, accept: str = "application/vnd.github+json") -> dict | list:
-    """GET an API path. Raises on non-2xx so the Action surfaces failures."""
-    url = path if path.startswith("http") else f"{API}{path}"
+def _handle_rate_limit(headers) -> None:
+    """Record current rate-limit state. If we're below the floor, sleep
+    until the documented reset time."""
+    remaining_raw = headers.get("X-RateLimit-Remaining")
+    limit_raw = headers.get("X-RateLimit-Limit")
+    reset_raw = headers.get("X-RateLimit-Reset")
+    if remaining_raw is None:
+        return
+    try:
+        remaining = int(remaining_raw)
+    except (TypeError, ValueError):
+        return
+    try:
+        limit = int(limit_raw) if limit_raw is not None else None
+    except (TypeError, ValueError):
+        limit = None
+    try:
+        reset = int(reset_raw) if reset_raw is not None else None
+    except (TypeError, ValueError):
+        reset = None
+    _last_rate_limit["remaining"] = remaining
+    _last_rate_limit["limit"] = limit
+    _last_rate_limit["reset"] = reset
+
+    if remaining < RATE_LIMIT_FLOOR and reset:
+        now = int(time.time())
+        wait = max(0, reset - now) + 2  # small cushion
+        # Cap absurd waits so a misconfigured token doesn't hang CI.
+        wait = min(wait, 3600)
+        sys.stderr.write(
+            f"  rate-limit low: {remaining}/{limit} — sleeping {wait}s "
+            f"until reset\n"
+        )
+        time.sleep(wait)
+
+
+def _do_request(url: str, accept: str):
+    """Single HTTP request. Returns (parsed_body, headers).
+    Raises HTTPError on non-2xx and URLError on network failure."""
     req = urllib.request.Request(
         url,
         headers={
@@ -84,17 +178,65 @@ def _get(path: str, accept: str = "application/vnd.github+json") -> dict | list:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        sys.stderr.write(f"HTTP {exc.code} on {url}: {body[:300]}\n")
-        raise
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        body = resp.read()
+        headers = resp.headers
+    _handle_rate_limit(headers)
+    parsed = json.loads(body) if body else None
+    return parsed, headers
 
 
-def _get_paginated(path: str, accept: str = "application/vnd.github+json") -> list:
-    """Drain ?per_page=100 pages. Used for stargazers timeline."""
+def _get(path: str, accept: str = "application/vnd.github+json", *,
+         with_headers: bool = False):
+    """GET an API path with retries. Permanent errors (4xx) fail fast;
+    transient ones (5xx / network) retry per RETRY_BACKOFFS.
+
+    If with_headers=True, returns (body, headers); else just body.
+    """
+    url = path if path.startswith("http") else f"{API}{path}"
+    last_exc: Exception | None = None
+    for attempt, backoff in enumerate((0,) + RETRY_BACKOFFS):
+        if backoff:
+            sys.stderr.write(
+                f"  retry {attempt}/{len(RETRY_BACKOFFS)} after {backoff}s: {url}\n"
+            )
+            time.sleep(backoff)
+        try:
+            body, headers = _do_request(url, accept)
+            return (body, headers) if with_headers else body
+        except urllib.error.HTTPError as exc:
+            err_body = b""
+            try:
+                err_body = exc.read()
+            except Exception:
+                pass
+            # Try to record rate-limit headers even on errors.
+            _handle_rate_limit(exc.headers or {})
+            text = err_body.decode("utf-8", errors="replace")
+            if exc.code in (401, 403, 404, 422):
+                sys.stderr.write(
+                    f"HTTP {exc.code} on {url}: {text[:300]}\n"
+                )
+                # 403 with rate-limit body is technically transient, but
+                # without a token-permission diff we can't distinguish a
+                # "you can't see this" 403 from a "you hit the limit"
+                # 403. Fail fast; the operator can re-run later.
+                raise
+            sys.stderr.write(
+                f"HTTP {exc.code} on {url} (transient): {text[:200]}\n"
+            )
+            last_exc = exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            sys.stderr.write(f"network error on {url}: {exc}\n")
+            last_exc = exc
+    assert last_exc is not None
+    raise last_exc
+
+
+def _get_paginated(path: str, accept: str = "application/vnd.github+json",
+                   *, max_items: int | None = None) -> list:
+    """Drain ?per_page=100 pages. Used for stargazers timeline. Stops
+    when a page is short or when max_items is hit."""
     out: list = []
     page = 1
     sep = "&" if "?" in path else "?"
@@ -102,11 +244,16 @@ def _get_paginated(path: str, accept: str = "application/vnd.github+json") -> li
         chunk = _get(f"{path}{sep}per_page=100&page={page}", accept=accept)
         if not chunk:
             break
+        if not isinstance(chunk, list):
+            break
         out.extend(chunk)
+        if max_items is not None and len(out) >= max_items:
+            out = out[:max_items]
+            break
         if len(chunk) < 100:
             break
         page += 1
-        if page > 200:  # safety — 20k stars is enough
+        if page > 200:  # absolute safety
             break
     return out
 
@@ -114,9 +261,9 @@ def _get_paginated(path: str, accept: str = "application/vnd.github+json") -> li
 # ---- metric fetchers -----------------------------------------------------
 
 
-def fetch_repo() -> dict:
+def fetch_repo(repo: str) -> dict:
     """The repo object — covers stars/forks/issues/watchers."""
-    r = _get(f"/repos/{REPO}")
+    r = _get(f"/repos/{repo}")
     return {
         "stars":       int(r.get("stargazers_count", 0)),
         "forks":       int(r.get("forks_count", 0)),
@@ -126,43 +273,95 @@ def fetch_repo() -> dict:
     }
 
 
-def fetch_open_prs() -> int:
+def fetch_open_prs(repo: str) -> int:
     """The repo's open_issues_count includes PRs. Disambiguate so the
     dashboard can show issues and PRs separately."""
     # /search counts are cheap and don't paginate full result lists.
-    q = f"repo:{REPO}+is:pr+is:open"
+    q = f"repo:{repo}+is:pr+is:open"
     r = _get(f"/search/issues?q={q}")
     return int(r.get("total_count", 0))
 
 
-def fetch_clones() -> tuple[int, int]:
-    """Last 24 hours of clones (the most recent entry in the 15-day array).
-    Returns (count, uniques) for the most-recent day so we can graph day-
-    over-day. Older entries get permanently archived in previous JSONL
-    rows."""
-    r = _get(f"/repos/{REPO}/traffic/clones")
+def _normalize_traffic_day(entry: dict) -> dict:
+    """Map a Traffic-API entry to our schema. `timestamp` arrives as an
+    ISO-8601 datetime (e.g. '2026-05-08T00:00:00Z'); we keep only the
+    date portion to match our row-level `date` field."""
+    ts = entry.get("timestamp", "")
+    date = ts[:10] if isinstance(ts, str) and len(ts) >= 10 else ""
+    return {
+        "date":    date,
+        "count":   int(entry.get("count", 0)),
+        "uniques": int(entry.get("uniques", 0)),
+    }
+
+
+def fetch_clones_window(repo: str) -> list[dict]:
+    """Full 15-day clones array. Per-day, normalized to {date,count,uniques}.
+    The Traffic API rotates this window daily, so the only way to retain
+    older days is to snapshot them into JSONL rows."""
+    r = _get(f"/repos/{repo}/traffic/clones")
     days = r.get("clones") or []
-    if not days:
-        return 0, 0
-    today = days[-1]
-    return int(today.get("count", 0)), int(today.get("uniques", 0))
+    return [_normalize_traffic_day(d) for d in days]
 
 
-def fetch_views() -> tuple[int, int]:
-    """Last 24h of repo page views — same shape as clones."""
-    r = _get(f"/repos/{REPO}/traffic/views")
+def fetch_views_window(repo: str) -> list[dict]:
+    """Full 15-day views array — same shape as clones."""
+    r = _get(f"/repos/{repo}/traffic/views")
     days = r.get("views") or []
-    if not days:
-        return 0, 0
-    today = days[-1]
-    return int(today.get("count", 0)), int(today.get("uniques", 0))
+    return [_normalize_traffic_day(d) for d in days]
 
 
-def fetch_referrers() -> list[dict]:
+def fetch_stars_timeline(repo: str, total_stars: int) -> tuple[list[dict], bool]:
+    """Cumulative star count per UTC day.
+
+    Walks /stargazers with the star+json accept header (which adds
+    `starred_at`). We DO NOT keep `user.login` — only the timestamp.
+    Aggregates into a cumulative count: for each day where ≥1 star
+    landed, emit {date, count}. Days with no stars are omitted so
+    sparse history stays small; the dashboard can ffill itself.
+
+    Returns (timeline, partial).
+    `partial` is True if we hit STARS_CAP and bailed out — the dashboard
+    can show a "showing first N stars" note.
+    """
+    # Skip the heavy pagination if the repo is empty.
+    if total_stars <= 0:
+        return [], False
+
+    capped = total_stars > STARS_CAP
+    max_items = STARS_CAP if capped else None
+    entries = _get_paginated(
+        f"/repos/{repo}/stargazers",
+        accept="application/vnd.github.v3.star+json",
+        max_items=max_items,
+    )
+
+    # Buckets keyed by YYYY-MM-DD. Use timestamps only — no login.
+    counts_by_day: dict[str, int] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("starred_at", "")
+        if not isinstance(ts, str) or len(ts) < 10:
+            continue
+        day = ts[:10]
+        counts_by_day[day] = counts_by_day.get(day, 0) + 1
+
+    # Convert to cumulative timeline.
+    timeline: list[dict] = []
+    running = 0
+    for day in sorted(counts_by_day.keys()):
+        running += counts_by_day[day]
+        timeline.append({"date": day, "count": running})
+
+    return timeline, capped
+
+
+def fetch_referrers(repo: str) -> list[dict]:
     """Top 10 referring domains over the rolling 14-day window. We snapshot
     the 14d aggregate every day rather than try to derive a per-day
     breakdown (the API doesn't give one)."""
-    r = _get(f"/repos/{REPO}/traffic/popular/referrers")
+    r = _get(f"/repos/{repo}/traffic/popular/referrers")
     if not isinstance(r, list):
         return []
     return [
@@ -175,10 +374,10 @@ def fetch_referrers() -> list[dict]:
     ]
 
 
-def fetch_paths() -> list[dict]:
+def fetch_paths(repo: str) -> list[dict]:
     """Top 10 paths viewed over the rolling 14d. Tells us which docs are
     actually getting read (README vs STATE vs ROADMAP, etc)."""
-    r = _get(f"/repos/{REPO}/traffic/popular/paths")
+    r = _get(f"/repos/{repo}/traffic/popular/paths")
     if not isinstance(r, list):
         return []
     return [
@@ -192,13 +391,13 @@ def fetch_paths() -> list[dict]:
     ]
 
 
-def fetch_release_downloads() -> dict:
+def fetch_release_downloads(repo: str) -> dict:
     """Cumulative downloads per release asset. GitHub provides no time
     series here, so we just take a snapshot — the dashboard can derive
     deltas across snapshots itself. Empty when the repo has no releases
     (Phosphene currently ships via Pinokio clone, not release binaries)."""
     try:
-        rs = _get(f"/repos/{REPO}/releases?per_page=100")
+        rs = _get(f"/repos/{repo}/releases?per_page=100")
         if not isinstance(rs, list):
             return {}
     except urllib.error.HTTPError:
@@ -216,67 +415,184 @@ def fetch_release_downloads() -> dict:
     return {"total": total, "by_release": per_release}
 
 
+# ---- summary helpers -----------------------------------------------------
+
+
+def _window_total(window: list[dict]) -> int:
+    return sum(int(d.get("count", 0)) for d in window)
+
+
+def _wow_delta(window: list[dict]) -> int:
+    """Week-over-week count delta inside the same 15-day window. Compares
+    the last 7 entries to the 7 before them. Returns 0 if we don't have
+    14 days of data yet."""
+    if len(window) < 14:
+        return 0
+    recent = sum(int(d.get("count", 0)) for d in window[-7:])
+    prior = sum(int(d.get("count", 0)) for d in window[-14:-7])
+    return recent - prior
+
+
+def _stars_wow_delta(timeline: list[dict]) -> int:
+    """Stars gained in the last 7 UTC days, vs the 7 before. Cumulative
+    timeline → derive deltas."""
+    if len(timeline) < 2:
+        return 0
+    now = datetime.now(timezone.utc).date()
+    today_iso = now.isoformat()
+    # Find cumulative star count as of T, T-7d, T-14d. timeline is
+    # cumulative-by-day with gaps; carry-forward by using the last entry
+    # whose date <= target.
+    def cum_at(target: str) -> int:
+        last = 0
+        for entry in timeline:
+            if entry.get("date", "") <= target:
+                last = int(entry.get("count", 0))
+            else:
+                break
+        return last
+    seven = (now.toordinal() - 7)
+    fourteen = (now.toordinal() - 14)
+    seven_iso = datetime.fromordinal(seven).strftime("%Y-%m-%d")
+    fourteen_iso = datetime.fromordinal(fourteen).strftime("%Y-%m-%d")
+    recent = cum_at(today_iso) - cum_at(seven_iso)
+    prior = cum_at(seven_iso) - cum_at(fourteen_iso)
+    return recent - prior
+
+
 # ---- main ----------------------------------------------------------------
 
 
-def main() -> int:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Fetch GitHub repo stats and append a daily JSONL row.",
+    )
+    p.add_argument(
+        "--repo",
+        default=DEFAULT_REPO,
+        help=f"OWNER/NAME (default: {DEFAULT_REPO}, or $PHOSPHENE_REPO)",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and print, but don't write the JSONL file.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv or sys.argv[1:])
+    repo = args.repo
+
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
     iso_now = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[{iso_now}] fetching stats for {REPO}", flush=True)
+    print(f"[{iso_now}] fetching stats for {repo}"
+          + ("  (dry-run)" if args.dry_run else ""), flush=True)
 
-    repo = fetch_repo()
-    print(f"  repo: {repo}", flush=True)
-    open_prs = fetch_open_prs()
-    repo["open_prs"] = open_prs
+    repo_obj = fetch_repo(repo)
+    print(f"  repo: {repo_obj}", flush=True)
+    open_prs = fetch_open_prs(repo)
+    repo_obj["open_prs"] = open_prs
     # open_issues from the repo API includes PRs — subtract to disambiguate.
-    repo["open_issues"] = max(0, repo["open_issues"] - open_prs)
-    print(f"  prs: {open_prs} (open_issues adjusted to {repo['open_issues']})", flush=True)
+    repo_obj["open_issues"] = max(0, repo_obj["open_issues"] - open_prs)
+    print(f"  prs: {open_prs} (open_issues adjusted to {repo_obj['open_issues']})",
+          flush=True)
 
-    clones_count, clones_uniques = fetch_clones()
-    views_count, views_uniques = fetch_views()
-    print(f"  clones today: {clones_count} ({clones_uniques} unique)", flush=True)
-    print(f"  views today:  {views_count} ({views_uniques} unique)", flush=True)
+    clones_window = fetch_clones_window(repo)
+    views_window = fetch_views_window(repo)
+    # Back-compat: most-recent-day slice as a dict.
+    if clones_window:
+        last = clones_window[-1]
+        clones_today = {"count": last["count"], "uniques": last["uniques"]}
+    else:
+        clones_today = {"count": 0, "uniques": 0}
+    if views_window:
+        last = views_window[-1]
+        views_today = {"count": last["count"], "uniques": last["uniques"]}
+    else:
+        views_today = {"count": 0, "uniques": 0}
+    print(f"  clones window: {len(clones_window)} days, "
+          f"total={_window_total(clones_window)}, "
+          f"today={clones_today['count']} ({clones_today['uniques']} unique)",
+          flush=True)
+    print(f"  views  window: {len(views_window)} days, "
+          f"total={_window_total(views_window)}, "
+          f"today={views_today['count']} ({views_today['uniques']} unique)",
+          flush=True)
 
-    referrers = fetch_referrers()
-    paths = fetch_paths()
-    releases = fetch_release_downloads()
+    timeline, partial = fetch_stars_timeline(repo, repo_obj["stars"])
+    if partial:
+        print(f"  stars timeline: PARTIAL — capped at {STARS_CAP} "
+              f"(repo has {repo_obj['stars']})", flush=True)
+    else:
+        print(f"  stars timeline: {len(timeline)} day-buckets, "
+              f"final cum={(timeline[-1]['count'] if timeline else 0)}",
+              flush=True)
+
+    referrers = fetch_referrers(repo)
+    paths = fetch_paths(repo)
+    releases = fetch_release_downloads(repo)
     print(f"  referrers: {len(referrers)}  paths: {len(paths)}  "
           f"release downloads total: {releases.get('total', 0)}", flush=True)
 
     row = {
         "date": today,
         "fetched_at": iso_now,
-        **repo,
-        "clones": {"count": clones_count, "uniques": clones_uniques},
-        "views":  {"count": views_count,  "uniques": views_uniques},
+        **repo_obj,
+        "clones": clones_today,
+        "views":  views_today,
+        "clones_window": clones_window,
+        "views_window":  views_window,
+        "stars_timeline": timeline,
         "referrers": referrers,
         "paths":     paths,
         "releases":  releases,
     }
 
-    # Idempotent append: replace today's row if it already exists.
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict] = []
-    if OUTPUT.exists():
-        for line in OUTPUT.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                if obj.get("date") == today:
-                    continue  # drop today's prior row
-                existing.append(obj)
-            except json.JSONDecodeError:
-                continue
-    existing.append(row)
-    OUTPUT.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in existing) + "\n",
-        encoding="utf-8",
+    if args.dry_run:
+        print("  dry-run: not writing JSONL", flush=True)
+    else:
+        # Idempotent append: replace today's row if it already exists.
+        OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+        existing: list[dict] = []
+        if OUTPUT.exists():
+            for line in OUTPUT.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if obj.get("date") == today:
+                        continue  # drop today's prior row
+                    existing.append(obj)
+                except json.JSONDecodeError:
+                    continue
+        existing.append(row)
+        OUTPUT.write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in existing) + "\n",
+            encoding="utf-8",
+        )
+        print(f"  wrote {len(existing)} rows -> "
+              f"{OUTPUT.relative_to(OUTPUT.parent.parent)}", flush=True)
+
+    # Summary line for GitHub Actions step output.
+    clones_wow = _wow_delta(clones_window)
+    views_wow = _wow_delta(views_window)
+    stars_wow = _stars_wow_delta(timeline)
+    summary = (
+        f"summary: stars={repo_obj['stars']} ({stars_wow:+d} w/w)  "
+        f"clones={_window_total(clones_window)} ({clones_wow:+d} w/w)  "
+        f"views={_window_total(views_window)} ({views_wow:+d} w/w)  "
+        f"referrers={len(referrers)}  paths={len(paths)}"
     )
-    print(f"  wrote {len(existing)} rows → {OUTPUT.relative_to(OUTPUT.parent.parent)}",
-          flush=True)
+    print(summary, flush=True)
+
+    rl = _last_rate_limit
+    if rl["remaining"] is not None:
+        print(f"  rate-limit remaining: {rl['remaining']}/{rl['limit']}",
+              flush=True)
+
     return 0
 
 

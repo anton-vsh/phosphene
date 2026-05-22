@@ -338,6 +338,72 @@ phosphene-dev.git/
 
 ## 7. Known bugs / fixed bugs
 
+### 2026-05-22 — ship-prep pass: GitHub-data dashboard + analytics ROLLED BACK
+
+Mr Bizarro decision: opt-in telemetry won't be well-received in the OSS
+world. Replaced with a GitHub-Traffic-API-only dashboard that gives the
+"how is the app doing" signal without putting any privacy weight on
+users. Three additional commits to dev:
+
+- **`da1d6f5` — analytics fully removed.** -871 lines. `analytics.py`
+  and `TELEMETRY.md` deleted. `mlx_ltx_panel.py` stripped of the
+  default-settings entries, validator branches, public-safe view
+  fields, `/settings` opt-in/opt-out/forget-me lifecycle,
+  `__main__` install + `panel_boot` emit, serve_forever-finally
+  shutdown, worker `render_start` / `render_done` / `render_failed`
+  / `render_cancelled` emits + error_category bucketing, the
+  Settings → Anonymous analytics HTML section, and the three JS
+  functions + modal-open hook. README reverted to "no telemetry".
+  Existing `panel_settings.json` files may still carry the old keys;
+  the loader ignores them silently — no migration script needed.
+
+- **`151d0d2` — solo-maintainer GitHub stats dashboard.** Three
+  files: `scripts/fetch_repo_stats.py` (stdlib-only Python fetches
+  repo + traffic + referrers + paths + releases; appends one JSON
+  line per UTC day to `docs/stats-data.jsonl`; idempotent),
+  `docs/stats.html` (vanilla-JS + Chart.js dashboard with cards,
+  time-series, referrer/path tables), and the seed snapshot.
+  `.github/workflows/repo-stats.yml` is staged locally — Mr Bizarro
+  must run `gh auth refresh -s workflow` + push it from a local
+  clone (the in-session OAuth token doesn't have `workflow` scope).
+
+- **Polish pass (next commit, batched with this STATE update).**
+  Three parallel research/improvement agents:
+    - **Dashboard polish**: period selector (7d/30d/90d/all),
+      week-over-week + yesterday delta per card, sparklines per
+      card, "Growth" daily + weekly card, stars-timeline section
+      (feature-detected), 15-day rolling window from
+      `clones_window`/`views_window` when present, loading
+      skeleton + error card, raw-JSONL header link, theme
+      toggle (light/dark, persists), keyboard focus rings,
+      sticky table headers + internal scroll, K/M number
+      shortening, clickable referrer domains, lazy chart init
+      via IntersectionObserver, mobile stacking, `aria-label`
+      everywhere. 1117 lines total, still single file + one CDN.
+    - **Fetcher enrichment**: full 15-day `clones_window` +
+      `views_window` arrays; `stars_timeline` (cumulative, login
+      DROPPED for privacy, capped at 5000); rate-limit handling
+      (sleep until reset when remaining < 100); 3-retry backoff
+      on 5xx/network; `--dry-run` + `--repo OWNER/NAME` flags;
+      one-line summary at exit for `$GITHUB_STEP_SUMMARY`.
+    - **Workflow hardening + maintainer README**: SHA-pinned
+      `actions/checkout@v4.3.1` + `actions/setup-python@v5.6.0`;
+      concurrency group; `dry_run` + `repo` inputs on
+      workflow_dispatch; `$GITHUB_STEP_SUMMARY` + commit-body
+      summary; failure-issue creation that DE-DUPES across
+      consecutive outage days; minimized `permissions:`
+      (contents:write + issues:write only); pip cache enabled.
+      Plus a new `docs/stats-README.md` explaining the whole
+      stack for future maintainers (running locally, enabling
+      Pages, adding metrics, what GitHub data CAN'T tell you,
+      FAQ, troubleshooting).
+
+Today's seed data lands on the dashboard the moment Pages comes
+online: 57 stars, 5 forks, 8 open issues, 1 PR, 3954 clones in the
+last 14 days (148 unique today), 1601 views, with Google / GitHub
+/ Huggingface / Twitter / Reddit as the top funnels. W/w delta:
+clones -1130 (last week was a spike — likely a Reddit/HN bump).
+
 ### Fixed 2026-05-21 EVENING (overnight push — read this first)
 
 Late-evening continuation after Mr Bizarro called out the still-broken
