@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch GitHub repo stats and append a daily snapshot to docs/stats-data.jsonl.
+"""Fetch GitHub repo stats and append a daily snapshot to state/stats-data.jsonl.
 
 Runs from .github/workflows/repo-stats.yml on a 24h cron. The GitHub Action
 default token has push access to the repo it runs in, which is exactly what
@@ -100,7 +100,17 @@ TOKEN = (
     or os.environ.get("GITHUB_TOKEN")  # default in GH Actions
     or ""
 ).strip()
-OUTPUT = Path(__file__).resolve().parent.parent / "docs" / "stats-data.jsonl"
+# Writes into the panel's gitignored state/ dir (NEVER in the public
+# repo — Mr Bizarro 2026-05-22). PHOSPHENE_STATS_OUT overrides for
+# debugging against a sandbox path. Pre-2026-05-22 this was
+# docs/stats-data.jsonl which got committed publicly; that was rolled
+# back and the location moved here.
+OUTPUT = Path(
+    os.environ.get(
+        "PHOSPHENE_STATS_OUT",
+        str(Path(__file__).resolve().parent.parent / "state" / "stats-data.jsonl"),
+    )
+)
 
 API = "https://api.github.com"
 UA = "phosphene-repo-stats/2"
@@ -109,6 +119,12 @@ UA = "phosphene-repo-stats/2"
 # A real repo crossing 5k stars deserves a deliberate revisit, not a
 # silent runaway.
 STARS_CAP = 5000
+# Pagination ceilings on the other historical pulls. Each cap maps to ~50
+# API pages at per_page=100. For a fresh project these never trip; they're
+# bounded-runtime insurance for forks/issues/PRs/commits on a viral repo.
+FORKS_CAP   = 2000
+ISSUES_CAP  = 5000   # combined issues + PRs in one stream
+COMMITS_CAP = 3000   # trailing 365-day window
 
 # Retry policy for transient failures.
 RETRY_BACKOFFS = (2, 8, 30)
@@ -357,6 +373,133 @@ def fetch_stars_timeline(repo: str, total_stars: int) -> tuple[list[dict], bool]
     return timeline, capped
 
 
+def fetch_forks_timeline(repo: str, total_forks: int) -> tuple[list[dict], bool]:
+    """Cumulative fork count per UTC day. Same shape as stars_timeline,
+    derived from /forks created_at. Cheap — most repos have few forks.
+    Capped at FORKS_CAP for safety on viral repos."""
+    if total_forks <= 0:
+        return [], False
+    capped = total_forks > FORKS_CAP
+    max_items = FORKS_CAP if capped else None
+    entries = _get_paginated(f"/repos/{repo}/forks?sort=oldest",
+                             max_items=max_items)
+    counts_by_day: dict[str, int] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("created_at", "")
+        if not isinstance(ts, str) or len(ts) < 10:
+            continue
+        day = ts[:10]
+        counts_by_day[day] = counts_by_day.get(day, 0) + 1
+    timeline: list[dict] = []
+    running = 0
+    for day in sorted(counts_by_day.keys()):
+        running += counts_by_day[day]
+        timeline.append({"date": day, "count": running})
+    return timeline, capped
+
+
+def fetch_issue_pr_timelines(repo: str) -> dict:
+    """Daily opened/closed counts for both Issues and PRs.
+
+    Walks /issues with state=all (GitHub's "issues" endpoint returns
+    PRs too — they're a subclass of Issue — discriminated by the
+    presence of a `pull_request` key). Splits into 4 separate
+    timelines: issues_opened / issues_closed / prs_opened / prs_closed.
+
+    Each timeline: list of {date, count} for DAILY counts (not
+    cumulative — the dashboard wants "velocity" which is a daily
+    rate). Capped at ISSUES_CAP entries total."""
+    entries = _get_paginated(
+        f"/repos/{repo}/issues?state=all&sort=created&direction=asc",
+        max_items=ISSUES_CAP,
+    )
+    issues_opened: dict[str, int] = {}
+    issues_closed: dict[str, int] = {}
+    prs_opened: dict[str, int]    = {}
+    prs_closed: dict[str, int]    = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        is_pr = "pull_request" in e and bool(e.get("pull_request"))
+        opened_at = (e.get("created_at") or "")[:10]
+        closed_at = (e.get("closed_at") or "")[:10] if e.get("closed_at") else ""
+        if len(opened_at) == 10:
+            d = prs_opened if is_pr else issues_opened
+            d[opened_at] = d.get(opened_at, 0) + 1
+        if len(closed_at) == 10:
+            d = prs_closed if is_pr else issues_closed
+            d[closed_at] = d.get(closed_at, 0) + 1
+    def _to_list(bucket: dict[str, int]) -> list[dict]:
+        return [{"date": d, "count": bucket[d]} for d in sorted(bucket)]
+    return {
+        "issues_opened": _to_list(issues_opened),
+        "issues_closed": _to_list(issues_closed),
+        "prs_opened":    _to_list(prs_opened),
+        "prs_closed":    _to_list(prs_closed),
+    }
+
+
+def fetch_commits_timeline(repo: str) -> list[dict]:
+    """Daily commit count over the trailing window. Walks /commits with
+    ?since=ISO-365-days-ago paginated. Capped at COMMITS_CAP to bound
+    runtime on a long-lived repo. Daily counts (not cumulative — the
+    dashboard wants activity, not totals)."""
+    from datetime import timedelta
+    since = (datetime.now(timezone.utc) - timedelta(days=365)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    entries = _get_paginated(
+        f"/repos/{repo}/commits?since={since}",
+        max_items=COMMITS_CAP,
+    )
+    counts_by_day: dict[str, int] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        # Commit author date (the developer's clock). /commits.commit.author.date
+        # is the canonical timestamp; .committer.date can differ on rebases.
+        commit = e.get("commit", {}) or {}
+        author = commit.get("author", {}) or {}
+        ts = (author.get("date") or "")[:10]
+        if len(ts) != 10:
+            continue
+        counts_by_day[ts] = counts_by_day.get(ts, 0) + 1
+    return [{"date": d, "count": counts_by_day[d]} for d in sorted(counts_by_day)]
+
+
+def fetch_release_timeline(repo: str) -> list[dict]:
+    """Release publish dates + cumulative download counts. Lets the
+    dashboard show "release X shipped on Y, has Z downloads" — much
+    more useful than the bare {total, by_release: {...}} blob."""
+    try:
+        rs = _get(f"/repos/{repo}/releases?per_page=100")
+        if not isinstance(rs, list):
+            return []
+    except urllib.error.HTTPError:
+        return []
+    out: list[dict] = []
+    for rel in rs:
+        if not isinstance(rel, dict):
+            continue
+        tag = rel.get("tag_name", "?")
+        published = (rel.get("published_at") or rel.get("created_at") or "")
+        total = 0
+        for a in rel.get("assets") or []:
+            try:
+                total += int(a.get("download_count", 0))
+            except (TypeError, ValueError):
+                continue
+        out.append({
+            "tag": tag,
+            "published_at": published,
+            "total_downloads": total,
+        })
+    # GitHub returns newest-first; sort oldest-first for charting.
+    out.sort(key=lambda r: r.get("published_at") or "")
+    return out
+
+
 def fetch_referrers(repo: str) -> list[dict]:
     """Top 10 referring domains over the rolling 14-day window. We snapshot
     the 14d aggregate every day rather than try to derive a per-day
@@ -530,6 +673,34 @@ def main(argv: list[str] | None = None) -> int:
               f"final cum={(timeline[-1]['count'] if timeline else 0)}",
               flush=True)
 
+    # Full historical backfill — captured fresh each run so old days
+    # never need to be re-derived. These are the signals the GitHub
+    # Traffic API can't ever give us beyond 14 days (clones/views), but
+    # everything else has full history available retroactively. Mr Bizarro
+    # 2026-05-22: "Can you retroactively pull the data from the first
+    # days of the project?" — yes, for these.
+    forks_timeline, forks_partial = fetch_forks_timeline(repo, repo_obj["forks"])
+    if forks_partial:
+        print(f"  forks timeline: PARTIAL — capped at {FORKS_CAP}", flush=True)
+    else:
+        print(f"  forks timeline: {len(forks_timeline)} day-buckets, "
+              f"final cum={(forks_timeline[-1]['count'] if forks_timeline else 0)}",
+              flush=True)
+
+    issue_pr = fetch_issue_pr_timelines(repo)
+    print(f"  issues/PRs: opened {len(issue_pr['issues_opened'])}/"
+          f"{len(issue_pr['prs_opened'])} buckets, "
+          f"closed {len(issue_pr['issues_closed'])}/"
+          f"{len(issue_pr['prs_closed'])} buckets", flush=True)
+
+    commits_timeline = fetch_commits_timeline(repo)
+    commits_total_365 = sum(d["count"] for d in commits_timeline)
+    print(f"  commits timeline (365d): {len(commits_timeline)} active days, "
+          f"{commits_total_365} commits total", flush=True)
+
+    release_timeline = fetch_release_timeline(repo)
+    print(f"  release timeline: {len(release_timeline)} releases", flush=True)
+
     referrers = fetch_referrers(repo)
     paths = fetch_paths(repo)
     releases = fetch_release_downloads(repo)
@@ -544,7 +715,14 @@ def main(argv: list[str] | None = None) -> int:
         "views":  views_today,
         "clones_window": clones_window,
         "views_window":  views_window,
-        "stars_timeline": timeline,
+        "stars_timeline":   timeline,
+        "forks_timeline":   forks_timeline,
+        "issues_opened":    issue_pr["issues_opened"],
+        "issues_closed":    issue_pr["issues_closed"],
+        "prs_opened":       issue_pr["prs_opened"],
+        "prs_closed":       issue_pr["prs_closed"],
+        "commits_timeline": commits_timeline,
+        "release_timeline": release_timeline,
         "referrers": referrers,
         "paths":     paths,
         "releases":  releases,
