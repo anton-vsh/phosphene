@@ -141,6 +141,15 @@ COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main
 STATE_DIR = Path(os.environ.get("LTX_STATE_DIR", str(ROOT / "state")))
 QUEUE_FILE = STATE_DIR / "panel_queue.json"
 HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
+# Repo-stats dashboard (Mr Bizarro 2026-05-22: solo-maintainer signal,
+# stays on the user's Mac, never in the public repo). The HTML
+# template ships at panel_assets/stats.html and is served at /stats;
+# the JSONL data is appended daily by a background thread (see
+# stats_fetch_loop) and served at /stats/data. Both endpoints are
+# 127.0.0.1-only like the rest of the panel.
+STATS_DATA_FILE = STATE_DIR / "stats-data.jsonl"
+STATS_HTML_FILE = ROOT / "panel_assets" / "stats.html"
+STATS_FETCHER = ROOT / "scripts" / "fetch_repo_stats.py"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 FPS = 24
@@ -2279,6 +2288,111 @@ def get_version_state() -> dict:
     so the caller can't mutate the live state under the lock."""
     with _VERSION_LOCK:
         return dict(_VERSION_STATE)
+
+
+# ---------------------------------------------------------------------------
+# Repo-stats background fetcher (Mr Bizarro's solo-maintainer dashboard).
+# Runs the stdlib-only fetcher script as a subprocess once per 24h, appending
+# a JSON line to state/stats-data.jsonl. Dashboard at /stats reads this file.
+# 127.0.0.1-only by design (state/ is gitignored, file lives on the user's
+# Mac only). Skipped silently if no GitHub token is resolvable — no telemetry
+# is the floor, this is opt-in via "have a token configured".
+# ---------------------------------------------------------------------------
+
+_STATS_POLL_INTERVAL_SEC = 24 * 60 * 60  # daily
+_STATS_STARTUP_DELAY_SEC = 90            # let the panel finish booting first
+_STATS_MIN_REFETCH_SEC   = 6 * 60 * 60   # don't re-fetch faster than every 6h
+
+
+def _resolve_github_token() -> str:
+    """Token resolution for the stats fetcher, in priority order:
+       1. PHOSPHENE_REPO_STATS_TOKEN — explicit override for this purpose
+       2. GH_STATS_TOKEN — fetcher's own preferred name
+       3. GH_TOKEN / GITHUB_TOKEN — generic env vars
+       4. `gh auth token` subprocess (when gh CLI is installed + authed)
+    Returns empty string if nothing works — caller logs once and skips."""
+    for name in ("PHOSPHENE_REPO_STATS_TOKEN", "GH_STATS_TOKEN",
+                 "GH_TOKEN", "GITHUB_TOKEN"):
+        v = (os.environ.get(name) or "").strip()
+        if v:
+            return v
+    try:
+        out = subprocess.run(
+            ["gh", "auth", "token"], check=True, capture_output=True,
+            timeout=5, text=True,
+        )
+        return (out.stdout or "").strip()
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+
+
+_STATS_WARNED_NO_TOKEN = False
+
+
+def _run_stats_fetch_once() -> None:
+    """Spawn scripts/fetch_repo_stats.py as a subprocess. Output to the
+    panel's `push()` log so the user can see what happened. Idempotent —
+    the fetcher itself replaces today's row on re-runs in the same UTC day."""
+    global _STATS_WARNED_NO_TOKEN
+    if not STATS_FETCHER.is_file():
+        return  # repo install missing the script — fail silent
+    token = _resolve_github_token()
+    if not token:
+        if not _STATS_WARNED_NO_TOKEN:
+            push(
+                "stats: no GitHub token resolvable (tried "
+                "PHOSPHENE_REPO_STATS_TOKEN, GH_STATS_TOKEN, GH_TOKEN, "
+                "GITHUB_TOKEN, `gh auth token`). Dashboard will be empty "
+                "until you set one. See docs/stats-README.md."
+            )
+            _STATS_WARNED_NO_TOKEN = True
+        return
+    env = os.environ.copy()
+    env["GITHUB_TOKEN"] = token
+    try:
+        cp = subprocess.run(
+            [sys.executable, str(STATS_FETCHER)],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        if cp.returncode != 0:
+            push(f"stats: fetch failed (exit {cp.returncode}): "
+                 f"{(cp.stderr or cp.stdout or '').strip().splitlines()[-1][:200]}")
+            return
+        # Last stdout line is the human-readable summary the fetcher prints
+        # at exit. Forward to the panel log so /status surfaces it.
+        last_line = ""
+        for line in (cp.stdout or "").splitlines():
+            if line.strip():
+                last_line = line.strip()
+        if last_line:
+            push(f"stats: {last_line}")
+    except subprocess.TimeoutExpired:
+        push("stats: fetch timed out after 120s (rate limit? network?)")
+    except Exception as exc:  # noqa: BLE001
+        push(f"stats: fetch raised {exc!r}")
+
+
+def stats_fetch_loop() -> None:
+    """Daemon thread entry: fetch repo stats once at startup (if the data
+    file is missing or stale), then daily on _STATS_POLL_INTERVAL_SEC.
+
+    The startup-fetch is gated by _STATS_MIN_REFETCH_SEC so multiple panel
+    restarts in a short window don't hammer the GitHub API for nothing."""
+    time.sleep(_STATS_STARTUP_DELAY_SEC)
+    # First-run / cold-start fetch — but only if it's been a while.
+    try:
+        last_age = (time.time() - STATS_DATA_FILE.stat().st_mtime
+                    if STATS_DATA_FILE.exists() else float("inf"))
+    except OSError:
+        last_age = float("inf")
+    if last_age >= _STATS_MIN_REFETCH_SEC:
+        _run_stats_fetch_once()
+    while True:
+        time.sleep(_STATS_POLL_INTERVAL_SEC)
+        try:
+            _run_stats_fetch_once()
+        except Exception as exc:  # noqa: BLE001 — belt + braces
+            sys.stderr.write(f"WARN: stats fetch loop raised: {exc}\n")
 
 
 def parse_loras_from_form(form: dict) -> list[dict]:
@@ -7643,6 +7757,38 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._ok(page().encode())
+            return
+        # Repo-stats dashboard. HTML is a static file in panel_assets/;
+        # JSONL data lives in state/ and gets appended by stats_fetch_loop.
+        # Both 127.0.0.1-only via the early _is_local_request guard above.
+        if parsed.path in ("/stats", "/stats/"):
+            try:
+                html = STATS_HTML_FILE.read_bytes()
+            except FileNotFoundError:
+                self.send_error(404, "stats.html missing — repo install broken")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            try: self.wfile.write(html)
+            except (BrokenPipeError, ConnectionResetError): pass
+            return
+        if parsed.path == "/stats/data":
+            try:
+                body = STATS_DATA_FILE.read_bytes()
+            except FileNotFoundError:
+                # No snapshot yet — return an empty but valid JSONL so the
+                # dashboard's "no data yet" path renders cleanly.
+                body = b""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/jsonl; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try: self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError): pass
             return
         if parsed.path == "/status":
             qs = parse_qs(parsed.query)
@@ -28401,6 +28547,11 @@ if __name__ == "__main__":
         threading.Thread(target=version_check_loop, daemon=True).start()
     else:
         _detect_local_install_state()
+    # Repo-stats fetcher — appends to state/stats-data.jsonl daily so
+    # the dashboard at /stats has historic data. Data stays on disk in
+    # state/ (gitignored), never on the public repo. Skipped silently
+    # when no GitHub token is resolvable.
+    threading.Thread(target=stats_fetch_loop, daemon=True).start()
     # Pre-flight: bind in a try/except so a busy port surfaces an actionable
     # one-liner instead of a 6-frame Python traceback. The bare OSError
     # ("[Errno 48] Address already in use") was confusing users who'd closed

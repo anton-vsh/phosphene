@@ -338,6 +338,31 @@ phosphene-dev.git/
 
 ## 7. Known bugs / fixed bugs
 
+### 2026-05-22 (later) — stats dashboard moves INSIDE the panel (private)
+
+Mr Bizarro: "don't put it in the public repo." Pivoted the architecture
+from GitHub Pages + committed JSONL to entirely panel-internal:
+
+- **Dashboard URL is now `http://127.0.0.1:8199/stats`** (panel-served,
+  127.0.0.1-only). Bookmark this; the panel must be running to view.
+- **Data lives at `state/stats-data.jsonl`** — gitignored, on the user's
+  Mac only, never on the public repo.
+- **`panel_assets/stats.html`** holds the dashboard template (still public
+  code — only the data is private).
+- **Panel background thread `stats_fetch_loop`** runs `scripts/fetch_repo_stats.py`
+  once at startup (if data file is missing/stale ≥ 6h) and daily thereafter.
+- **GitHub Action deleted** — no public cron, no GitHub Pages, no GitHub
+  push needed at all to keep the dashboard working.
+- **Token resolution** (first hit wins): `PHOSPHENE_REPO_STATS_TOKEN` →
+  `GH_STATS_TOKEN` → `GH_TOKEN` / `GITHUB_TOKEN` → `gh auth token`. Skipped
+  silently if none works (panel logs one warning + carries on).
+- The brief window where the data was on the public repo
+  (`151d0d2`..`827c5d8`) only contained one snapshot of public aggregate
+  counts — nothing private leaked. Door closed before it became a habit.
+
+Setup is now ZERO steps for the user (panel + token both already there);
+just open `/stats`. See `scripts/STATS_DASHBOARD.md` for the full guide.
+
 ### 2026-05-22 — ship-prep pass: GitHub-data dashboard + analytics ROLLED BACK
 
 Mr Bizarro decision: opt-in telemetry won't be well-received in the OSS
