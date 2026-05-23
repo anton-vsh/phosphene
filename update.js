@@ -22,10 +22,18 @@ module.exports = {
       method: "shell.run",
       params: {
         message: [
-          "git fetch origin",
+          // Branch-aware + remote-aware fetch+pull. Resolves the
+          // current branch's upstream (could be origin/main on the
+          // prod clone, or beta/main on the private dev clone — see
+          // 2026-05-22 split into public + private repos). The
+          // explicit-origin form `git pull origin <branch>` broke
+          // when public origin/dev was deleted.
+          "REMOTE=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null | cut -d/ -f1)",
           "BRANCH=$(git rev-parse --abbrev-ref HEAD)",
-          "echo \"updating branch: $BRANCH\"",
-          "git pull --ff-only origin $BRANCH || (echo 'history diverged from origin (force-push?); falling back to reset --hard' && git reset --hard origin/$BRANCH)",
+          "UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)",
+          "echo \"updating branch: $BRANCH (upstream: $UPSTREAM)\"",
+          "git fetch $REMOTE",
+          "git pull --ff-only $UPSTREAM || (echo 'history diverged from upstream; falling back to reset --hard' && git reset --hard $UPSTREAM)",
           "git rev-parse --short HEAD"
         ]
       }
