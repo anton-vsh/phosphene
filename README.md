@@ -13,6 +13,10 @@
 
 </p>
 
+> ### Updating from v2.x to v3.0? Click Update TWICE.
+>
+> Pinokio runs your existing v2 `update.js` on the first click — it pulls the new code but doesn't install 3.0's new Python deps (ltx-trainer, mlx-vlm for Gemma auto-caption, mflux 0.17.5, pyyaml/pydantic/tqdm/rich). The panel will boot to errors on first launch. **Click Update again** and Pinokio runs the new 3.0 script, installs everything, and the panel boots clean. Fresh installs are unaffected — this only hits v2.x → v3.0 upgrades.
+
 ## Overview
 
 Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) and an MLX port of [HiDream-O1-Image-Dev](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys, no telemetry.
