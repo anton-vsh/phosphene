@@ -83,6 +83,23 @@ module.exports = {
     {
       method: "shell.run",
       params: {
+        // mlx-teacache 0.4.1 (MIT, github.com/IonDen/mlx-teacache). Powers
+        // the optional TeaCache wrap for the FLUX.2 family — skips 3/25
+        // timesteps on flux2-klein-base-4b at SSIM>0.99 (~1.41x speedup)
+        // and gives a smaller ~1.25x on the 4-step distilled klein-4b
+        // (mostly mx.compile avoid). Wired by run_mflux_with_teacache.py
+        // which image_engine.py launches in place of mflux-generate-flux2
+        // when MFLUX_TC_FLUX=1 (default). The wrapper itself falls back
+        // to the bare CLI if this import isn't present, so the install
+        // step failing isn't fatal — but we pin it next to mflux so a
+        // user who opted into Qwen also gets the FLUX.2 speedup.
+        // Library is compatible with mflux>=0.17,<0.18 (matches our pin).
+        message: "./ltx-2-mlx/env/bin/pip install 'mlx-teacache==0.4.1'"
+      }
+    },
+    {
+      method: "shell.run",
+      params: {
         // FBCache patch — injects optional step-caching into mflux's Qwen
         // transformer layer loop. Line-targeted against mflux==0.17.5 (the
         // pin enforced above). Idempotent — script checks for its marker

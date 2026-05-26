@@ -190,7 +190,13 @@ module.exports = {
           "  ./ltx-2-mlx/env/bin/pip install 'mflux==0.17.5' && \\",
           // Step 3: force-reinstall WITHOUT deps to lock the version
           // without churning the deps we just installed.
-          "  ./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'; \\",
+          "  ./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5' && \\",
+          // Step 4: install (or refresh) mlx-teacache 0.4.1 (MIT) for the
+          // optional FLUX.2 TeaCache wrap (run_mflux_with_teacache.py).
+          // Gated by the same `import mflux` probe above — only land this
+          // for users who actually opted into mflux. Pinned exact for
+          // reproducibility; compatible with mflux>=0.17,<0.18.
+          "  ./ltx-2-mlx/env/bin/pip install 'mlx-teacache==0.4.1'; \\",
           "else \\",
           "  echo 'mflux not installed (user never opted into Qwen image gen) — skipping mflux repair.'; \\",
           "fi"
