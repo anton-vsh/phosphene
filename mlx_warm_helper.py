@@ -1178,7 +1178,29 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
         if "frame_rate" in sig.parameters:
             call_kwargs["frame_rate"] = kwargs.get("frame_rate", 24.0)
         return pipe.generate_from_image(**call_kwargs)
-    if not needs_image and hasattr(pipe, "generate"):
+    # Env gate (2026-05-26, perf-experiment E1): when PHOSPHENE_T2V_TWO_STAGE=1
+    # is set, route T2V Standard through pipe.generate_two_stage() instead of
+    # the legacy single-stage pipe.generate(). The two-stage path renders at
+    # half-resolution (640×352 for 1280×704), spatially 2× upsamples the
+    # latent via the Q4 upsampler, then runs a 3-step Stage-2 refine. It's the
+    # same recipe HQ + I2V Standard already use successfully — I2V Standard
+    # exercises it daily because DistilledPipeline has no `generate_from_image`
+    # method, so I2V already falls through to generate_two_stage below.
+    #
+    # Predicted T2V wall reduction: ~30-35% on Standard (M4 Max 7:40 → 5:15,
+    # M4 Pro 10 min → 6:45). Math:
+    #   Stage-1 at half res ≈ 0.25× tokens × 8 steps = 2 step-equivalents
+    #   Stage-2 at full res ≈ 1.0× tokens × 3 steps = 3 step-equivalents
+    #   Upsampler ≈ ~30s constant
+    #   Total ≈ 5.0 step-equivalents + 30s vs 8.0 step-equivalents native.
+    #
+    # OFF by default for v3.0.x stability — flip on for A/B with
+    #   PHOSPHENE_T2V_TWO_STAGE=1
+    # Same prompt+seed twice (env on / env off) to compare. The eventual
+    # Option-A (deleting this legacy branch entirely so two-stage T2V is
+    # universal) lands after we've validated quality on dev for a stretch.
+    _t2v_two_stage = os.environ.get("PHOSPHENE_T2V_TWO_STAGE", "").strip().lower() in ("1", "true", "yes", "on")
+    if not needs_image and not _t2v_two_stage and hasattr(pipe, "generate"):
         try:
             import inspect as _inspect
             sig = _inspect.signature(pipe.generate)
@@ -1199,6 +1221,11 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
             # generate_two_stage which absorbs everything via
             # **_unused_kwargs.
             pass
+    if not needs_image and _t2v_two_stage:
+        # Log once per render so the A/B harness can correlate wall time
+        # in the panel's log tab without grepping env at boot.
+        emit({"event": "log",
+              "line": "[t2v-two-stage] PHOSPHENE_T2V_TWO_STAGE=1 — routing T2V Standard through generate_two_stage (half-res → 2× upsample → Stage-2 refine)."})
     # Unified new-API fallback (post-refactor packages).
     return pipe.generate_two_stage(
         prompt=kwargs["prompt"],
