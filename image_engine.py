@@ -197,7 +197,7 @@ class ImageEngineConfig:
     mflux_model: str = "Runpod/FLUX.2-klein-4B-mflux-4bit"
     mflux_family: str = "auto"                      # "auto" or one of the family ids above
     mflux_base_model: str = ""                      # only needed when mflux_model is a path/HF id and family inference can't tell the architecture
-    mflux_steps: int = 0                            # 0 = use family default (4/9/25 per family)
+    mflux_steps: int = 4                            # Lightning 4-step default (was 0 = family default). The default Lightning LoRA below is distilled for 4 steps; the auto-promote in mlx_ltx_panel.py picks this up when promoting mock/legacy configs onto qwen_edit. Non-Lightning families ignore this and use the family default in MFLUX_FAMILY_DEFAULTS via the `eff_steps = config.mflux_steps if config.mflux_steps > 0 else ...` path in _generate_mflux — set this back to 0 to force the family default.
     mflux_quantize: int = 6                         # 3 | 4 | 5 | 6 | 8 — Q6 is the Apple-Silicon community sweet spot (~4-6% quality loss vs full precision; Q4 is 8-12%). Draw Things uses Q6/Q5 by default. Q4 only matters on ≤16 GB Macs; on 64 GB M4 Max the speed gap is negligible and the quality jump is visible.
     mflux_guidance: float | None = None             # None = use family default (1.0 / 0.0 / 4.5 / 5.0 per family)
     mflux_python_path: str = ""                     # optional override for the mflux CLI location
@@ -208,8 +208,22 @@ class ImageEngineConfig:
     # rejects the mismatch). Each path is a HuggingFace repo id, a
     # collection-format string (`repo:filename.safetensors`), or a
     # local file path.
-    mflux_lora_paths: list[str] = field(default_factory=list)
-    mflux_lora_scales: list[float] = field(default_factory=list)
+    #
+    # DEFAULT shipped 2026-05-26 (E2): bake the Lightning 4-step LoRA in
+    # so a fresh ImageEngineConfig() — and any v2.x upgrade promoted by
+    # _auto_promote_image_engine_kind — lands on the ~1:20-per-image tier
+    # out of the box instead of the legacy ~2:35 8-step path. Lightning
+    # was distilled for scale 1.0 — don't change it. Only applies when
+    # the resolved family is qwen_edit; other families silently skip the
+    # LoRA flags because mflux's non-qwen CLIs reject Lightning entries
+    # on unrelated architectures. (No-op for the FLUX.2 / Z-Image / FIBO
+    # paths because _resolve_mflux_family returns flux2/etc. and the
+    # auto-promote rewrites the whole config — model + family + steps +
+    # loras — when a real engine binary is detected on PATH.)
+    mflux_lora_paths: list[str] = field(default_factory=lambda: [
+        "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    ])
+    mflux_lora_scales: list[float] = field(default_factory=lambda: [1.0])
 
     # HiDream-O1-Image-Dev (BF16 MLX) — runs out of a separate lab venv outside
     # Phosphene's tree. Subprocess pattern; we never import mlx-vlm into
@@ -642,6 +656,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     import os
     import random
     import subprocess
+    import sys  # sys.executable used by the TeaCache wrap fallback below
 
     bin_path = _resolve_mflux_bin(config)
     fam = _resolve_mflux_family(config)
@@ -796,9 +811,50 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         env["MFLUX_FB_CACHE"] = "1"
         env.setdefault("MFLUX_FB_THRESHOLD", "0.15")
         env.setdefault("MFLUX_FB_KEEP_LAST", "8")
+    # TeaCache wrap for FLUX.2 (mlx-teacache 0.4.1, github.com/IonDen/
+    # mlx-teacache, MIT). Skip-decodes ~3/25 timesteps on the base
+    # 25-step Klein at SSIM>0.99 and ~1.25x on the distilled 4-step path
+    # (mostly mx.compile avoid). Default on — set MFLUX_TC_FLUX=0 to
+    # bypass. We export the env var unconditionally so the wrapper
+    # subprocess sees the threshold; the wrapper itself decides whether
+    # to wrap based on MFLUX_TC_FLUX. The bin_path swap below is what
+    # actually launches the wrapper instead of bare mflux-generate-flux2.
+    if fam == "flux2" and os.environ.get("MFLUX_TC_FLUX", "1").strip().lower() not in ("0", "false", "no"):
+        env["MFLUX_TC_FLUX"] = "1"
+        env.setdefault("MFLUX_TC_FLUX_THRESH", "0.20")
     per_image_budget = 60 if fam in ("flux2", "z_image_turbo") else 360
     cold_start_budget = 240 if fam in ("flux2", "z_image_turbo") else 1800
     timeout_s = cold_start_budget + per_image_budget * n
+
+    # TeaCache bin-path swap: when wrapping is on, the subprocess command
+    # becomes `<venv-python> run_mflux_with_teacache.py <args...>` instead
+    # of the bare CLI. The wrapper imports mlx_teacache + monkey-patches
+    # Flux2Klein.generate_image to enter apply_teacache, then defers to
+    # mflux's own flux2_generate.main() with sys.argv intact — so the
+    # argv contract (--model / --prompt / --output / --steps / --lora-
+    # paths / ...) is exactly what bare mflux expects. If the import or
+    # patch fails the wrapper itself shells back out to the bare CLI, so
+    # there's no scenario where this swap loses a render — only the
+    # speedup.
+    if fam == "flux2" and env.get("MFLUX_TC_FLUX") == "1":
+        # bin_path is .../ltx-2-mlx/env/bin/mflux-generate-flux2; the
+        # corresponding python is the sibling python3 in the same bin/.
+        # Use sys.executable as a sanity fallback if the inferred path
+        # doesn't exist (e.g. the user has a non-standard mflux install
+        # via mflux_python_path that lives outside our venv layout).
+        bin_dir = Path(bin_path).parent
+        venv_py = bin_dir / "python3"
+        if not venv_py.is_file():
+            venv_py = bin_dir / "python"
+        if not venv_py.is_file():
+            venv_py = Path(sys.executable)
+        wrapper = Path(__file__).resolve().parent / "run_mflux_with_teacache.py"
+        if wrapper.is_file():
+            cmd[:1] = [str(venv_py), str(wrapper)]
+            if on_log is not None:
+                try: on_log(f"[mflux-teacache] wrap on (thresh={env.get('MFLUX_TC_FLUX_THRESH')})")
+                except Exception:  # noqa: BLE001
+                    pass
 
     # Switched to Popen + line-streaming so the panel can surface mflux's
     # tqdm progress bars (`[12/30]`-style step lines) and weight-download

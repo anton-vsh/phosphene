@@ -7273,7 +7273,30 @@ def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
             cfg = agent_image_engine.ImageEngineConfig()
 
         # Auto-promote away from mock if a real engine is installed.
+        # Also migrate v2.x users still on raw qwen_edit (8-step Q6, no
+        # LoRA) onto the Lightning 4-step path so the Image Studio default
+        # and the agent's Settings default land on the same ~1:20-per-image
+        # tier instead of the legacy ~2:35 path. Escape hatch:
+        # PHOSPHENE_SKIP_QWEN_PROMOTE=1 keeps the user's existing config.
+        needs_promote = False
+        reason = ""
         if cfg.kind == "mock":
+            needs_promote = True
+            reason = "mock"
+        elif (cfg.kind == "mflux"
+              and (cfg.mflux_family == "qwen_edit"
+                   or agent_image_engine._infer_mflux_family(cfg.mflux_model) == "qwen_edit")
+              and cfg.mflux_steps in (0, 8)
+              and not cfg.mflux_lora_paths):
+            needs_promote = True
+            reason = "qwen_edit_no_lightning"
+
+        # Env escape hatch — lets a power user pin the old behaviour
+        # (e.g. for A/B benchmarking or to keep a slow but exact path).
+        if os.environ.get("PHOSPHENE_SKIP_QWEN_PROMOTE", "").strip() in ("1", "true", "yes"):
+            needs_promote = False
+
+        if needs_promote:
             promoted = _auto_promote_image_engine_kind(cfg)
             if promoted is not None:
                 cfg = promoted
@@ -7291,7 +7314,7 @@ def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
                         os.chmod(AGENT_IMAGE_CONFIG_PATH, 0o600)
                     except OSError:
                         pass
-                    push(f"agent: auto-promoted image engine mock -> {cfg.kind}/{cfg.mflux_family} (model={cfg.mflux_model})")
+                    push(f"agent: auto-promoted image engine ({reason}) -> {cfg.kind}/{cfg.mflux_family} (model={cfg.mflux_model}, steps={cfg.mflux_steps}, loras={len(cfg.mflux_lora_paths)})")
                 except OSError as e:
                     push(f"agent: image-engine auto-promote in-memory only (write failed: {e})")
 
@@ -7333,12 +7356,19 @@ def _auto_promote_image_engine_kind(
                 "mflux_model": model,
                 "mflux_family": fam,
             }
-            # Fresh install fast-path: bake Lightning into the qwen_edit
-            # auto-promotion so first-time "Auto" runs hit the 90-second
-            # tier instead of the 2:35 8-step path. Only applies when the
-            # user hasn't customized steps/LoRAs yet (cur.mflux_steps == 0
-            # means "use family default" and no LoRAs picked).
-            if fam == "qwen_edit" and cur.mflux_steps == 0 and not cur.mflux_lora_paths:
+            # Fresh install + v2.x upgrade fast-path: bake Lightning into
+            # the qwen_edit auto-promotion so first-time "Auto" runs hit
+            # the 90-second tier instead of the 2:35 8-step path. Applies
+            # to BOTH a brand-new fresh install (cur.mflux_steps == 0,
+            # the dataclass default) AND to existing v2.x users who saved
+            # the previous 8-step default to disk and never picked their
+            # own LoRA (steps in {0, 8} + no LoRAs picked). The matching
+            # gate in _load_agent_image_config catches the v2.x case;
+            # this branch then writes the Lightning recipe in. Users
+            # who picked a custom step count or LoRA are left alone.
+            if (fam == "qwen_edit"
+                    and cur.mflux_steps in (0, 8)
+                    and not cur.mflux_lora_paths):
                 overrides["mflux_steps"] = 4
                 overrides["mflux_lora_paths"] = [
                     "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
@@ -18463,9 +18493,9 @@ HTML = r"""<!doctype html>
           <div class="studio-engine-row">
             <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();imgStudioUpdateRefWarning();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto">Auto (use Settings)</option>
-              <option value="qwen_edit_lightning_inline" selected>Qwen Fast (Lightning &middot; 4-step Q6 + FBCache, ~1:20 / image, multi-ref)</option>
-              <option value="qwen_edit_inline">Qwen Medium (8-step Q6 + FBCache, ~2:05 / image, multi-ref)</option>
-              <option value="qwen_edit_high_inline">Qwen Quality (40-step Q8 + CFG 4.0 + FBCache, ~3:50 / image, multi-ref)</option>
+              <option value="qwen_edit_lightning_inline" selected>Fast &mdash; Lightning 4-step (~1:20, default, multi-ref)</option>
+              <option value="qwen_edit_inline">Standard &mdash; 8-step Q6 (~2:05, no LoRA)</option>
+              <option value="qwen_edit_high_inline">Quality &mdash; 40-step Q8 + CFG (~3:50, final renders)</option>
               <option value="hidream_fast_inline">HiDream Fast (3-step, ~3:45 / 4-img batch, slight bg softness)</option>
               <option value="hidream_inline">HiDream Medium (6-step + FBCache, ~6 min / 4-img batch, character-preserving)</option>
               <option value="hidream_quality_inline">HiDream Quality (12-step + light FBCache, ~9 min / 4-img batch, best detail)</option>
