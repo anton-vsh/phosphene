@@ -966,6 +966,16 @@ def get_kf_pipe(model_dir: str):
     global _kf_pipe, _kf_model_dir
     from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
 
+    # Install the same runtime patches that get_pipe / get_hq_pipe / get_a2v_pipe
+    # install. Before 2026-05-25 this getter was the only one that skipped them,
+    # so FFLF renders crashed with
+    # `VideoDecoder.decode_and_stream() got an unexpected keyword argument
+    # 'frame_rate'` on machines that downloaded a post-rename upstream build
+    # (reported by @oo2music in #9). The install funcs are all idempotent.
+    _install_lora_fusion_patches()
+    _install_video_decoder_patch()
+    _install_a2v_frame_rate_patch()
+
     with _pipe_lock:
         release_pipelines(keep_kind="keyframe")
         if _kf_pipe is None or _kf_model_dir != model_dir:
