@@ -18496,9 +18496,16 @@ HTML = r"""<!doctype html>
               <option value="qwen_edit_lightning_inline" selected>Fast &mdash; Lightning 4-step (~1:20, default, multi-ref)</option>
               <option value="qwen_edit_inline">Standard &mdash; 8-step Q6 (~2:05, no LoRA)</option>
               <option value="qwen_edit_high_inline">Quality &mdash; 40-step Q8 + CFG (~3:50, final renders)</option>
-              <option value="hidream_fast_inline">HiDream Fast (3-step, ~3:45 / 4-img batch, slight bg softness)</option>
-              <option value="hidream_inline">HiDream Medium (6-step + FBCache, ~6 min / 4-img batch, character-preserving)</option>
-              <option value="hidream_quality_inline">HiDream Quality (12-step + light FBCache, ~9 min / 4-img batch, best detail)</option>
+              <!-- HiDream-O1 hidden 2026-05-28 (issue #15): the engine expects a
+                   standalone lab-repo clone at ~/HIDREAM-O1-MLX-LAB-active/.venv
+                   which hasn't been made public yet, so selecting any of these
+                   crashes for everyone outside the dev machine. Re-enable when
+                   the lab repo is published + the install step pulls it. The
+                   `hidden` attribute keeps the option-value parsing intact for
+                   anyone whose existing config already names one of these. -->
+              <option value="hidream_fast_inline" hidden>HiDream Fast (3-step, ~3:45 / 4-img batch, slight bg softness)</option>
+              <option value="hidream_inline" hidden>HiDream Medium (6-step + FBCache, ~6 min / 4-img batch, character-preserving)</option>
+              <option value="hidream_quality_inline" hidden>HiDream Quality (12-step + light FBCache, ~9 min / 4-img batch, best detail)</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"
