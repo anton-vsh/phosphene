@@ -719,6 +719,135 @@
     </section>
 
     <!-- ============================================================
+         CLONES — dedicated all-time line chart with own period+bucket.
+         Independent from the global over-time chips below so flipping
+         it doesn't reset everything else.
+         ============================================================ -->
+    <section class="card" id="sec-clones-history">
+      <div class="section-head">
+        <h2>Clones <span class="h2-sub">accumulated history — grows as the panel keeps fetching</span></h2>
+        <div class="chips" role="group" aria-label="Clones date range">
+          <button class="chip clones-chip-period" type="button" data-clones-period="30"  aria-pressed="false">30d</button>
+          <button class="chip clones-chip-period" type="button" data-clones-period="90"  aria-pressed="false">90d</button>
+          <button class="chip clones-chip-period" type="button" data-clones-period="365" aria-pressed="false">1y</button>
+          <button class="chip clones-chip-period" type="button" data-clones-period="all" aria-pressed="true">all</button>
+        </div>
+        <div class="chips" role="group" aria-label="Clones bucketing" style="margin-left:8px">
+          <button class="chip clones-chip-bucket" type="button" data-clones-bucket="daily" aria-pressed="false">daily</button>
+          <button class="chip clones-chip-bucket" type="button" data-clones-bucket="weekly" aria-pressed="true">weekly</button>
+          <button class="chip clones-chip-bucket" type="button" data-clones-bucket="monthly" aria-pressed="false">monthly</button>
+        </div>
+      </div>
+
+      <div class="chart-card" style="margin-top:8px">
+        <h3>
+          Clones · per <span id="clones-bucket-label">week</span>
+          <span class="legend">
+            <span><i class="swatch" style="background:#3fb950"></i>total clones</span>
+            <span><i class="swatch" style="background:#3fb950;opacity:0.45"></i>unique IPs</span>
+          </span>
+        </h3>
+        <div class="chart-wrap" style="height:300px">
+          <canvas id="chart-clones-history"
+                  aria-label="Line chart of clones per day, week, or month over the selected date range — all-time history from the local archive"
+                  role="img"></canvas>
+        </div>
+        <!-- Derived-metric KPI strip — what we can infer from the daily
+             count + uniques pair. Populated by renderClonesHistoryChart. -->
+        <div id="clones-derived" class="clones-kpi-strip">
+          <div class="clones-kpi">
+            <div class="lbl">total clones</div>
+            <div class="val" id="ck-total">—</div>
+            <div class="sub" id="ck-total-sub">in range</div>
+          </div>
+          <div class="clones-kpi">
+            <div class="lbl">est. distinct installers</div>
+            <div class="val" id="ck-est">—</div>
+            <div class="sub" title="Heuristic: sum of daily uniques ÷ ~1.7 (avg clones per real person; v2→v3 reinstall pattern). Lower bound, real number is somewhere between this and the sum of uniques.">heuristic ÷1.7 · ?</div>
+          </div>
+          <div class="clones-kpi">
+            <div class="lbl">retry pressure</div>
+            <div class="val" id="ck-retry">—</div>
+            <div class="sub" title="Daily count ÷ daily uniques. >1.5 means people are re-cloning (failed installs, Reset → Install cycles).">avg clones per IP/day</div>
+          </div>
+          <div class="clones-kpi">
+            <div class="lbl">last 7d daily avg</div>
+            <div class="val" id="ck-recent">—</div>
+            <div class="sub">unique IPs/day · recent activity</div>
+          </div>
+        </div>
+        <div class="clones-foot" id="clones-foot">
+          <span class="lbl">limits:</span>
+          GitHub returns only the last 14 days of clones (older data was never collected before the panel started archiving).
+          Updates (<code>git pull</code> from Pinokio's Update button) <strong>do not</strong> show up here at all — only fresh <code>git clone</code> operations.
+          <span id="clones-releases-marker"></span>
+        </div>
+      </div>
+    </section>
+
+    <style>
+      .clones-kpi-strip {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-top: 14px;
+        padding: 12px;
+        background: rgba(63, 185, 80, 0.04);
+        border: 1px solid rgba(63, 185, 80, 0.15);
+        border-radius: 8px;
+      }
+      .clones-kpi {
+        padding: 8px 12px;
+      }
+      .clones-kpi .lbl {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--faint);
+        font-weight: 500;
+        margin-bottom: 4px;
+      }
+      .clones-kpi .val {
+        font-size: 22px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        font-family: var(--ph-font-mono), 'SF Mono', Menlo, monospace;
+        color: var(--fg);
+        line-height: 1.2;
+      }
+      .clones-kpi .sub {
+        font-size: 11px;
+        color: var(--faint);
+        margin-top: 2px;
+        cursor: help;
+      }
+      .clones-foot {
+        margin-top: 12px;
+        padding: 10px 14px;
+        background: rgba(140, 160, 220, 0.04);
+        border-left: 3px solid rgba(140, 160, 220, 0.25);
+        border-radius: 4px;
+        font-size: 12px;
+        color: var(--faint);
+        line-height: 1.55;
+      }
+      .clones-foot .lbl {
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-size: 10.5px;
+        font-weight: 600;
+        color: var(--faint);
+        margin-right: 6px;
+      }
+      .clones-foot code {
+        background: rgba(140, 160, 220, 0.08);
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-size: 11px;
+      }
+    </style>
+
+    <!-- ============================================================
          OVER TIME — period chips + 4 stacked charts.
          ============================================================ -->
     <section class="card" id="sec-over-time">
@@ -906,6 +1035,12 @@
 
   let allRows = [];
   let currentPeriod = '30';
+  // Independent state for the dedicated clones-history chart — does NOT
+  // share with currentPeriod so flipping the clones range doesn't
+  // re-render every other chart in the "Over time" section.
+  const clonesAllTime = { period: 'all', bucket: 'weekly' };
+  const LS_CLONES_PERIOD = 'phosphene-stats-clones-period';
+  const LS_CLONES_BUCKET = 'phosphene-stats-clones-bucket';
   const charts = {};       // id -> Chart instance
   const sparkCharts = {};  // id -> mini Chart
 
@@ -1035,6 +1170,80 @@
       }
     }
     return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
+  }
+
+  /**
+   *  All-time clones series. Unlike clonesSeries() which only overlays the
+   *  LAST snapshot's clones_window, this iterates EVERY snapshot and unions
+   *  every rolling window — so once the panel has been running long enough
+   *  for non-overlapping windows, we still have continuous per-day history
+   *  beyond the GitHub-API 14-day cutoff. Later snapshots win on overlap
+   *  (their counts for a given day are more recently confirmed by GitHub).
+   *  Returns [{date,count,uniques}] sorted ascending.
+   */
+  function clonesSeriesAllTime(rows) {
+    if (!rows.length) return [];
+    const map = new Map();
+    for (const r of rows) {
+      // 1. Each row's top-level clones field reflects the day-1 fetch for
+      //    that row's date (one data point per snapshot).
+      if (r.date && r.clones) {
+        // Don't overwrite a window-sourced point if it's already there.
+        if (!map.has(r.date)) {
+          map.set(r.date, {
+            date: r.date,
+            count: r.clones.count ?? 0,
+            uniques: r.clones.uniques ?? 0,
+          });
+        }
+      }
+      // 2. The rolling 14-day window in each snapshot — union all of them.
+      //    Later snapshots win (more recent GitHub data for the same date).
+      const win = Array.isArray(r.clones_window) ? r.clones_window : null;
+      if (win) {
+        for (const p of win) {
+          if (!p.date) continue;
+          map.set(p.date, {
+            date: p.date,
+            count: p.count ?? 0,
+            uniques: p.uniques ?? 0,
+          });
+        }
+      }
+    }
+    return [...map.values()].sort((a, b) => a.date < b.date ? -1 : 1);
+  }
+
+  /**
+   *  Bucket a daily timeline into weekly or monthly buckets by summing.
+   *  bucket ∈ {'daily','weekly','monthly'}. Returns [{date,count,uniques}].
+   *  Bucket key: daily=YYYY-MM-DD, weekly=YYYY-MM-DD (Monday start), monthly=YYYY-MM.
+   */
+  function bucketTimeline(timeline, bucket) {
+    if (!Array.isArray(timeline) || !timeline.length) return [];
+    const keyOf = (dateStr) => {
+      if (bucket === 'monthly') return dateStr.slice(0, 7); // YYYY-MM
+      if (bucket === 'weekly') {
+        const d = new Date(dateStr);
+        if (!Number.isFinite(d.getTime())) return dateStr.slice(0, 10);
+        // ISO week — start Monday.
+        const day = d.getUTCDay();
+        const offset = (day + 6) % 7;
+        const wk = new Date(d);
+        wk.setUTCDate(d.getUTCDate() - offset);
+        return wk.toISOString().slice(0, 10);
+      }
+      return dateStr.slice(0, 10);
+    };
+    const out = new Map();
+    for (const p of timeline) {
+      const k = keyOf(p.date);
+      const prev = out.get(k) || { date: k, count: 0, uniques: 0 };
+      prev.count += Number(p.count) || 0;
+      prev.uniques += Number(p.uniques) || 0;
+      out.set(k, prev);
+    }
+    return [...out.values()].sort((a, b) => a.date < b.date ? -1 : 1);
   }
 
   // ===================================================================
@@ -1492,6 +1701,139 @@
   }
 
   // ===================================================================
+  //  CHART — Clones · all-time history (dedicated line chart).
+  //  Independent state (clonesAllTime.period / .bucket). Bucketing keeps
+  //  long ranges readable (weekly default; monthly for multi-year).
+  // ===================================================================
+
+  function updateClonesDerivedKpis(rangeSeries) {
+    // rangeSeries is the per-day series for the selected period (NOT bucketed).
+    // We compute the derived metrics on the daily granularity so the
+    // numbers don't change when the user flips daily↔weekly↔monthly.
+    const totalClones = rangeSeries.reduce((a, p) => a + (p.count || 0), 0);
+    const totalUniques = rangeSeries.reduce((a, p) => a + (p.uniques || 0), 0);
+    const dayCount = rangeSeries.length;
+
+    // Heuristic from the v2→v3 reinstall pattern analysis: each unique
+    // IP that clones today might be a person who'll clone again on a
+    // future day (Reset → Install cycle), or another machine. So the
+    // sum-of-daily-uniques OVER-counts the real number of distinct
+    // people. Dividing by ~1.7 is the central estimate from earlier
+    // analysis. Real number is somewhere between (sum/1.7) and sum.
+    const estInstallers = totalUniques > 0 ? Math.round(totalUniques / 1.7) : 0;
+
+    // Retry pressure — across the range, weighted properly: total
+    // clones / total uniques. >1.5 = people are re-cloning a lot.
+    const retryRate = totalUniques > 0 ? (totalClones / totalUniques) : 0;
+
+    // Recent 7-day avg of daily uniques (recent install activity).
+    const recent7 = rangeSeries.slice(-7);
+    const recent7Sum = recent7.reduce((a, p) => a + (p.uniques || 0), 0);
+    const recent7Avg = recent7.length ? recent7Sum / recent7.length : 0;
+
+    const $val = (id) => document.getElementById(id);
+    const $set = (id, v) => { const e = $val(id); if (e) e.textContent = v; };
+    $set('ck-total', fmt(totalClones));
+    $set('ck-total-sub', `over ${dayCount} day${dayCount === 1 ? '' : 's'} in range`);
+    $set('ck-est', fmt(estInstallers));
+    $set('ck-retry', retryRate > 0 ? retryRate.toFixed(2) + '×' : '—');
+    $set('ck-recent', recent7Avg > 0 ? Math.round(recent7Avg).toLocaleString() : '—');
+  }
+
+  function renderClonesHistoryChart(rows) {
+    const id = 'chart-clones-history';
+    const el = document.getElementById(id);
+    if (!el) return;
+    destroyChart(id);
+    // Reset KPIs to em-dash before any early-return.
+    ['ck-total','ck-est','ck-retry','ck-recent'].forEach(k => {
+      const e = document.getElementById(k); if (e) e.textContent = '—';
+    });
+    if (!rows.length) {
+      chartEmpty(id, 'no clones data yet — first snapshot fetches within 90s of panel boot');
+      return;
+    }
+    let dailySeries = clonesSeriesAllTime(rows);
+    dailySeries = sliceTimelineByPeriod(dailySeries, clonesAllTime.period);
+    if (!dailySeries.length) {
+      chartEmpty(id, 'no clones data in this range');
+      return;
+    }
+    // Compute derived KPIs from the DAILY series (before bucketing) so
+    // the numbers are bucket-independent.
+    updateClonesDerivedKpis(dailySeries);
+
+    // Add a 7-day rolling average on top of the daily uniques for
+    // smoother trend reading. Only meaningful when bucket=daily.
+    let series = bucketTimeline(dailySeries, clonesAllTime.bucket);
+
+    // Release markers — surface release dates in the footnote so users
+    // can correlate spikes. Pulled from release_timeline if present in
+    // the latest row.
+    const lastRow = rows[rows.length - 1] || {};
+    const releases = Array.isArray(lastRow.release_timeline)
+      ? lastRow.release_timeline.slice().sort(
+          (a, b) => (a.published_at || '') < (b.published_at || '') ? -1 : 1
+        )
+      : [];
+    const relMarker = document.getElementById('clones-releases-marker');
+    if (relMarker) {
+      if (releases.length) {
+        const txt = releases.slice(-4).map(r => {
+          const date = (r.published_at || '').slice(0, 10);
+          return `<code>${escapeHtml(r.tag || '?')}</code> ${escapeHtml(date)}`;
+        }).join(' · ');
+        relMarker.innerHTML = ` &nbsp;<span class="lbl">recent releases:</span> ${txt}`;
+      } else {
+        relMarker.innerHTML = '';
+      }
+    }
+
+    clearEmpty(id);
+
+    const labelEl = document.getElementById('clones-bucket-label');
+    if (labelEl) {
+      labelEl.textContent = ({ daily: 'day', weekly: 'week', monthly: 'month' })[clonesAllTime.bucket] || 'day';
+    }
+
+    // Label formatting depends on bucket: daily/weekly show MM-DD, monthly shows YYYY-MM.
+    const labelFmt = (d) => clonesAllTime.bucket === 'monthly' ? d : d.slice(5);
+
+    charts[id] = new Chart(el.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: series.map(p => labelFmt(p.date)),
+        datasets: [
+          {
+            label: 'total clones',
+            data: series.map(p => p.count || 0),
+            borderColor: C.green,
+            backgroundColor: C.green + '22',
+            fill: true,
+            tension: 0.25,
+            pointRadius: series.length < 60 ? 3 : 0,
+            pointHoverRadius: 5,
+            borderWidth: 2,
+          },
+          {
+            label: 'unique IPs',
+            data: series.map(p => p.uniques || 0),
+            borderColor: C.green + 'aa',
+            borderDash: [4, 4],
+            backgroundColor: 'transparent',
+            fill: false,
+            tension: 0.25,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            borderWidth: 1.5,
+          },
+        ],
+      },
+      options: commonOpts(),
+    });
+  }
+
+  // ===================================================================
   //  CHART — Clones + Views per day (grouped bars).
   //  Uses clonesSeries / viewsSeries (window-aware) so day-1 has detail.
   // ===================================================================
@@ -1852,13 +2194,46 @@
   function initChips() {
     const saved = localStorage.getItem(LS_PERIOD);
     if (saved && ['7','30','90','365','all'].includes(saved)) currentPeriod = saved;
-    $$('.chip').forEach(b => {
+    // ONLY chips with data-period — exclude the clones-specific chips
+    // (they have data-clones-period / data-clones-bucket instead).
+    $$('.chip[data-period]').forEach(b => {
       b.setAttribute('aria-pressed', String(b.dataset.period === currentPeriod));
       b.addEventListener('click', () => {
         currentPeriod = b.dataset.period;
         localStorage.setItem(LS_PERIOD, currentPeriod);
-        $$('.chip').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+        $$('.chip[data-period]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
         renderAllCharts(allRows, currentPeriod);
+      });
+    });
+  }
+
+  function initClonesChart() {
+    const sp = localStorage.getItem(LS_CLONES_PERIOD);
+    const sb = localStorage.getItem(LS_CLONES_BUCKET);
+    if (sp && ['30','90','365','all'].includes(sp)) clonesAllTime.period = sp;
+    if (sb && ['daily','weekly','monthly'].includes(sb)) clonesAllTime.bucket = sb;
+    // Period chips
+    $$('.clones-chip-period').forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.clonesPeriod === clonesAllTime.period));
+      b.addEventListener('click', () => {
+        clonesAllTime.period = b.dataset.clonesPeriod;
+        localStorage.setItem(LS_CLONES_PERIOD, clonesAllTime.period);
+        $$('.clones-chip-period').forEach(x =>
+          x.setAttribute('aria-pressed', String(x.dataset.clonesPeriod === clonesAllTime.period))
+        );
+        renderClonesHistoryChart(allRows);
+      });
+    });
+    // Bucket chips
+    $$('.clones-chip-bucket').forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.clonesBucket === clonesAllTime.bucket));
+      b.addEventListener('click', () => {
+        clonesAllTime.bucket = b.dataset.clonesBucket;
+        localStorage.setItem(LS_CLONES_BUCKET, clonesAllTime.bucket);
+        $$('.clones-chip-bucket').forEach(x =>
+          x.setAttribute('aria-pressed', String(x.dataset.clonesBucket === clonesAllTime.bucket))
+        );
+        renderClonesHistoryChart(allRows);
       });
     });
   }
@@ -1982,6 +2357,10 @@
       renderFunnel(allRows);
       renderTables(allRows);
       renderReleases(allRows);
+      // Render the clones-history chart immediately (small, cheap). The
+      // bigger over-time grid is still lazy-mounted via intersection
+      // observer below.
+      renderClonesHistoryChart(allRows);
       lazyMountCharts();
     } catch (e) {
       console.error(e);
@@ -1993,6 +2372,7 @@
   //  BOOT
   // ===================================================================
   initChips();
+  initClonesChart();
   initRefresh();
   main();
   </script>

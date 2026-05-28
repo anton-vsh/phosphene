@@ -1440,15 +1440,36 @@ def _build_adaptive_x0_loop(mode_name: str, max_skips: int, video_thresh: float,
         steps = list(zip(sigmas[:-1], sigmas[1:]))
         iterator = samplers.tqdm(steps, desc="Denoising", disable=not show_progress)
         protected_head = min(2, len(steps))
-        # 2026-05-09 lab finding: with the previous tail = ceil(N/3), the
-        # 8-step distilled schedule protected only steps 5,6,7 — leaving
-        # step 4 cache-eligible. Step 4's relative MAE (~0.0245) sits
-        # between Boost's threshold (0.02) and Turbo's (0.03), so Boost
-        # protected it by chance and Turbo cached it — producing visible
-        # eye/skin artifacts on the final frame. Bumping to ceil(N/2)
-        # protects step 4 deterministically (~+13% wall, no more
-        # late-step drift).
-        protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 2))) if steps else 0
+        # 2026-05-27 — per-mode tail protection (restores Turbo's distinctiveness).
+        #
+        # History: the 2026-05-09 fix (commit 3e4bfd8) bumped protected_tail
+        # from ceil(N/3) to ceil(N/2) to eliminate step-4 eye/skin artifacts
+        # under Turbo (step 4's relative MAE ~0.0245 sits between Boost's
+        # 0.02 threshold and Turbo's 0.03 — Boost protected it by chance,
+        # Turbo cached it and produced visible artifacts).
+        #
+        # Side effect of that fix: on the 8-step distilled schedule, cacheable
+        # slots dropped from 3 (steps 2,3,4) to 2 (steps 2,3). Boost's
+        # max_skips=2 saturated both, and Turbo's max_skips=3 hit the same
+        # cap — making Turbo functionally identical to Boost. Compounded
+        # with the bug where the accel patch only hit 3 of 9 denoise_loop
+        # import sites (silent no-op on T2V Standard since the upstream
+        # rename around May 9), Turbo's whole reason to exist has been
+        # invisible for two months.
+        #
+        # Fix: per-mode tail. Boost keeps the strict tail (safe fast).
+        # Turbo gets the original loose tail — step 4 is cacheable again,
+        # so on warm-light prompts you may see the eye/skin mesh. That IS
+        # the intentional tradeoff of Turbo ("aggressive fast, may
+        # artifact"); users picked it knowing the cost. Boost remains the
+        # artifact-free fast mode.
+        if steps:
+            if mode_name == "turbo":
+                protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 3)))
+            else:
+                protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 2)))
+        else:
+            protected_tail = 0
 
         global _LAST_ACCEL_STATS
         stats = {
@@ -1577,6 +1598,23 @@ def configure_acceleration(mode: str) -> str:
     mode: off | boost | turbo
     boost: skip at most 2 stable middle X0Model calls.
     turbo: skip at most 3 stable middle X0Model calls.
+
+    History: 2026-05-27 fix — `denoise_loop` is imported by name into
+    EIGHT separate pipeline modules in upstream ltx_pipelines_mlx, each
+    captures its own module-level binding at import time. Patching only
+    `samplers.denoise_loop` doesn't reach the active T2V path because
+    `_base.py:BasePipeline.generate` calls the binding it captured. Same
+    for HQ (`ti2vid_two_stages_hq`), FFLF (`keyframe_interpolation`),
+    A2V (`a2vid_two_stage`), Extend (`retake` — though that uses
+    `guided_denoise_loop`), IC-LoRA, lipdub, and TI2V two-stage. We
+    enumerate every site and patch the binding directly. Without this
+    the accel modes were silent no-ops on every pipeline EXCEPT the
+    `distilled.py` two-stage path — which itself only fires when the
+    new PHOSPHENE_T2V_TWO_STAGE env gate is on. Hence the historical
+    300-380s Boost/Turbo numbers stopped reproducing after the
+    upstream class rename (TextToVideoPipeline → DistilledPipeline)
+    around 2026-05-09. Resolved by patching `_base.denoise_loop` +
+    every other import site.
     """
     global _ORIGINAL_DENOISE_LOOP, _CURRENT_ACCEL_MODE, _LAST_ACCEL_STATS
 
@@ -1584,9 +1622,31 @@ def configure_acceleration(mode: str) -> str:
     if requested not in {"off", "boost", "turbo"}:
         requested = "off"
 
-    import ltx_pipelines_mlx.ti2vid_one_stage as ti2vid
+    # Modules in upstream ltx_pipelines_mlx that do
+    #   `from ...samplers import denoise_loop`
+    # at module-load time. Patching the source module is necessary but
+    # not sufficient because every caller already has its own binding.
+    # Enumerate explicitly; importing also forces module load if not
+    # already imported (so the next pipeline build can pick up the
+    # patched binding before its own first call).
     import ltx_pipelines_mlx.utils.samplers as samplers
+    import ltx_pipelines_mlx._base as _base_mod
     import ltx_pipelines_mlx.distilled as distilled_mod
+    _patch_targets = [samplers, _base_mod, distilled_mod]
+    for _name in (
+        "ti2vid_two_stages",
+        "ti2vid_two_stages_hq",
+        "keyframe_interpolation",
+        "a2vid_two_stage",
+        "lipdub",
+        "ic_lora",
+    ):
+        try:
+            _mod = __import__(f"ltx_pipelines_mlx.{_name}", fromlist=[_name])
+            _patch_targets.append(_mod)
+        except Exception:
+            # Module may not exist in older upstream — best-effort.
+            pass
 
     if _ORIGINAL_DENOISE_LOOP is None:
         _ORIGINAL_DENOISE_LOOP = samplers.denoise_loop
@@ -1598,22 +1658,21 @@ def configure_acceleration(mode: str) -> str:
 
     _LAST_ACCEL_STATS = None
     if requested == "off":
-        samplers.denoise_loop = _ORIGINAL_DENOISE_LOOP
-        ti2vid.denoise_loop = _ORIGINAL_DENOISE_LOOP
-        distilled_mod.denoise_loop = _ORIGINAL_DENOISE_LOOP
+        target = _ORIGINAL_DENOISE_LOOP
     elif requested == "boost":
-        loop = _build_adaptive_x0_loop("boost", max_skips=2, video_thresh=0.02, audio_thresh=0.02)
-        samplers.denoise_loop = loop
-        ti2vid.denoise_loop = loop
-        distilled_mod.denoise_loop = loop
+        target = _build_adaptive_x0_loop("boost", max_skips=2, video_thresh=0.02, audio_thresh=0.02)
     else:
-        loop = _build_adaptive_x0_loop("turbo", max_skips=3, video_thresh=0.03, audio_thresh=0.03)
-        samplers.denoise_loop = loop
-        ti2vid.denoise_loop = loop
-        distilled_mod.denoise_loop = loop
+        target = _build_adaptive_x0_loop("turbo", max_skips=3, video_thresh=0.03, audio_thresh=0.03)
+
+    _patched = []
+    for _mod in _patch_targets:
+        if hasattr(_mod, "denoise_loop"):
+            setattr(_mod, "denoise_loop", target)
+            _patched.append(_mod.__name__.split(".")[-1])
 
     _CURRENT_ACCEL_MODE = requested
-    emit({"event": "log", "line": f"accel:mode {requested}"})
+    emit({"event": "log",
+          "line": f"accel:mode {requested} patched={','.join(_patched)}"})
     return requested
 
 
