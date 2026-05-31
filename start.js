@@ -28,7 +28,18 @@ module.exports = {
         // ENVIRONMENT file already sets HF_HOME=./cache/HF_HOME, but
         // shell.run replaces the env wholesale — we have to declare
         // it here for the panel to inherit it.
-        HF_HOME: "{{cwd}}/cache/HF_HOME"
+        HF_HOME: "{{cwd}}/cache/HF_HOME",
+        // 2026-05-28 — SSL cert chain for the uv-installed Python (issue #15).
+        // Pinokio installs Python via uv into its own cache. That Python
+        // does NOT inherit macOS system certificates, so urllib's default
+        // SSL context fails with `CERTIFICATE_VERIFY_FAILED` the first time
+        // any code path hits HTTPS through stdlib — e.g. the CivitAI LoRA
+        // browser in the Image LoRA panel. `certifi` is installed and
+        // current in the venv, but stdlib only consults it when these env
+        // vars point it at certifi's bundle. Diagnosis + fix by
+        // @PiotrAstroCamp in #15 — thanks.
+        SSL_CERT_FILE:      "{{cwd}}/ltx-2-mlx/env/lib/python3.11/site-packages/certifi/cacert.pem",
+        REQUESTS_CA_BUNDLE: "{{cwd}}/ltx-2-mlx/env/lib/python3.11/site-packages/certifi/cacert.pem"
       },
       message: ["python mlx_ltx_panel.py"],
       // SHIP-BLOCKER history: we used to have extra `/errno/i` and `/error:/i`
