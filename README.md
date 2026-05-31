@@ -13,15 +13,13 @@
 
 </p>
 
-> ### Updating from v2.x to v3.0? Click Update TWICE.
->
-> Pinokio runs your existing v2 `update.js` on the first click — it pulls the new code but doesn't install 3.0's new Python deps (ltx-trainer, mlx-vlm for Gemma auto-caption, mflux 0.17.5, pyyaml/pydantic/tqdm/rich). The panel will boot to errors on first launch. **Click Update again** and Pinokio runs the new 3.0 script, installs everything, and the panel boots clean. Fresh installs are unaffected — this only hits v2.x → v3.0 upgrades.
+> **Current release: v3.0.6.** Latest on the v3.0 line — character training, Audio-to-Video, the Image Studio tab, hardware capability tiering, and a run of stabilization fixes since launch.
 
 ## Overview
 
-Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) and an MLX port of [HiDream-O1-Image-Dev](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys, no telemetry.
+Phosphene is a local generative-media panel for Apple Silicon. It runs [LTX-Video 2.3](https://github.com/Lightricks/LTX-Video) (MLX port) for joint audio-and-video synthesis, [Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) (with a Lightning 4-step fast tier) for stills, and ships an in-panel LoRA training pipeline for character identity (face + optional voice from a single dataset). Everything runs on-device. No cloud, no API keys, no telemetry.
 
-3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab with two MLX-native engines, hardware capability tiering, and an agentic prompt enhancer / shot planner driven by the same local Gemma 3 12B used for auto-captioning.
+3.0 introduces in-panel character training (face + voice LoRA from one dataset), the Audio-to-Video workflow, the Image Studio tab, hardware capability tiering, and an agentic prompt enhancer driven by the same local Gemma 3 12B used for auto-captioning.
 
 A 7-second character clip with synced audio renders in roughly 6 minutes on an M4 Max 64 GB. The delivered file is **1280×720 HD** after the built-in 2× upscale; clips are generated at 1024×576 internally and upscaled before mux. Voice + face LoRAs from a 50-image dataset finish in ~3 hours on the same hardware.
 
@@ -39,7 +37,7 @@ Text-to-video, image-to-video, and audio-to-video, all delivered as MP4 with joi
 <img width="1920" height="843" alt="image" src="https://github.com/user-attachments/assets/8e2f52de-b34c-44cf-9283-df30c4079607" />
 
 
-Two MLX-native engines share the same tab and the same GPU memory pool. Qwen-Image-Edit-2511 handles instruction edits ("change the white jacket to red") and multi-subject composition with up to three reference images. HiDream-O1-Image-Dev handles photoreal at HD — the MLX port of HiDream-O1 ships with Phosphene (8B Qwen3-VL backbone, unified pixel-patch transformer, MIT-licensed; weights at `mlx-community/HiDream-O1-Image-Dev-mlx-bf16`). It lives in a sibling clone, loaded on demand. Both engines drop cards into a unified gallery, each with an Animate button that pre-fills the I2V form with the source still.
+Qwen-Image-Edit (Lightning 4-step) is the default image engine. It handles instruction edits ("change the white jacket to red") and multi-subject composition with up to three reference images, generating four candidates per shot in seconds with the Lightning LoRA baked in. It's an optional one-click install (the panel falls back to a lighter mflux model if Qwen isn't installed). Results drop cards into a unified gallery, each with an Animate button that pre-fills the I2V form with the source still.
 
 ### Train Character
 
@@ -64,11 +62,11 @@ Drop `.safetensors` into `mlx_models/loras/` for immediate use, or browse and in
 
 ### HTTP API
 
-Everything the panel does is reachable over plain HTTP on `127.0.0.1:8199`. Queue video jobs, generate images, train characters, manage LoRAs, poll status, fetch outputs — all from `curl`, a Python script, or an external agent like Claude Code or Codex. The panel UI is just one client; nothing about the feature set is exclusive to it.
+Everything the panel does is reachable over plain HTTP on `127.0.0.1:8198`. Queue video jobs, generate images, train characters, manage LoRAs, poll status, fetch outputs — all from `curl`, a Python script, or an external agent like Claude Code or Codex. The panel UI is just one client; nothing about the feature set is exclusive to it.
 
 ```bash
 # Queue a text-to-video render with a character LoRA stacked on a style LoRA.
-curl -s -X POST http://127.0.0.1:8199/queue/add \
+curl -s -X POST http://127.0.0.1:8198/queue/add \
   --data-urlencode "mode=t2v" \
   --data-urlencode "prompt=Cinematic close-up of bizarrotrn man in a wood-paneled study, golden hour" \
   --data-urlencode "width=1024" --data-urlencode "height=576" \
@@ -173,7 +171,7 @@ Four workflow tabs at the top of the panel: Video, Images, Audio, Train Characte
 </tr>
 <tr>
 <td align="center"><sub><b>Video / Character mode</b> · round-avatar picker, voice indicator, manage modal</sub></td>
-<td align="center"><sub><b>Images</b> · Qwen Edit, HiDream-O1, multi-ref composition</sub></td>
+<td align="center"><sub><b>Images</b> · Qwen-Image-Edit, multi-ref composition</sub></td>
 </tr>
 <tr>
 <td width="50%"><img src="assets/screenshots/phos_03_audio_tab.png" alt="Audio tab — audio drives the generation"></td>
@@ -197,7 +195,7 @@ Prompting notes:
 
 Quit Pinokio (or the panel terminal), then click Update, then Start. Renders, settings, queue, models, and LoRAs all persist across the upgrade via Pinokio's `fs.link` persistent drive. The first update takes a few minutes.
 
-> **Click Update twice on the first v2 → v3 upgrade.** Pinokio loads the user's existing on-disk `update.js` before pulling the new one, which means the v2.x script runs first and doesn't install the new dependencies (ltx-trainer package, mlx-vlm, the trainer's transitive deps). The second Update click runs the new 3.0 script and installs everything. This only applies to the very first migration from a v2.x install.
+> Stragglers note: a few very old v2.x installs once had to click Update twice (Pinokio ran the stale on-disk `update.js` before pulling the new one). The update script now force-reinstalls the changed packages, so a single Update is enough. If a v2.x install still boots to dependency errors, click Update once more.
 
 Behavioral changes worth noting in 3.0:
 
@@ -216,7 +214,7 @@ Behavioral changes worth noting in 3.0:
 - `lora_lab/` is vendored from the [`lora-lab`](https://github.com/mrbizarro/lora-lab) authoring tree. Training works out of the box; set `LTX_LORA_LAB_ROOT` to iterate against an external clone.
 - `mlx_models/` and `mlx_outputs/` both persist across Pinokio Reset via fs.link.
 
-An MLX port of [HiDream-O1-Image-Dev BF16](https://huggingface.co/mlx-community/HiDream-O1-Image-Dev-mlx-bf16) (8B Qwen3-VL backbone, unified pixel-patch transformer, MIT) is included for the Image tab. HiDream lives in a sibling clone (see Setup).
+`image_engine.py` also carries a `hidream` backend (8B Qwen3-VL backbone, unified pixel-patch transformer) for photoreal stills. It is **hidden in the UI since v3.0.3** ([#15](https://github.com/mrbizarro/phosphene/issues/15)) and not installed by default — it lives in a separate lab repo you clone manually into `$HIDREAM_LAB_DIR` (see Manual install, step 7) and is loaded on demand.
 
 ## License and credits
 
@@ -233,7 +231,7 @@ Phosphene depends on the following projects:
 - [ModelPiper / PiperSR](https://github.com/ModelPiper/PiperSR) — optional 2× upscale on the Apple Neural Engine
 - [@cocktailpeanut](https://twitter.com/cocktailpeanut) — Pinokio
 
-What Phosphene adds on top of those: a persistent batch queue, a warm helper subprocess with capability-tier feature gating, lossless H.264 output with JSON sidecars, the in-panel character + voice LoRA training pipeline, the Image tab dispatch layer with adaptive wall-time estimates, the agentic prompt-enhancer / shot planner, and the Pinokio install + update lifecycle scripts.
+What Phosphene adds on top of those: a persistent batch queue, a warm helper subprocess with capability-tier feature gating, lossless H.264 output with JSON sidecars, the in-panel character + voice LoRA training pipeline, the Image tab dispatch layer with adaptive wall-time estimates, the local Gemma 3 prompt-enhancer, and the Pinokio install + update lifecycle scripts.
 
 ## Roadmap
 

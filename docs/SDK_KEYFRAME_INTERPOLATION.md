@@ -1,6 +1,6 @@
 # Multi-keyframe interpolation — the SDK shot-composition primitive
 
-Status: **Layer 1 shipped 2026-05-06** — helper now accepts arbitrary keyframe lists. Layer 2 (panel HTTP form-parsing) and Layer 3 (UI) not yet. Engine has supported this all along; we just exposed it. See [Agent API contract](#agent-api-contract-layer-1-2026-05-06) for the call shape.
+Status: **Layers 1 + 2 shipped** — helper accepts arbitrary keyframe lists (Layer 1, 2026-05-06) and the panel HTTP route now parses a `keyframes_json` list and builds the full `keyframe_images`/`keyframe_indices` arrays (Layer 2). Layer 3 (UI with >2 drop-zones) not yet. Engine has supported this all along; we just exposed it. See [Agent API contract](#agent-api-contract-layer-1-2026-05-06) for the call shape.
 
 ## TL;DR
 
@@ -65,7 +65,7 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
 
 `keyframe_images` and `keyframe_indices` are both **lists**. The function loops over them, encodes each at the appropriate stage resolution, and threads them through stage 1 (half-res guided denoise) and stage 2 (full-res refinement). Multi-keyframe is the native shape of the API.
 
-Today's restriction is one layer up — in the panel's worker:
+The original restriction lived one layer up — in the panel's worker:
 
 ```
 mlx_warm_helper.py:
@@ -73,9 +73,7 @@ mlx_warm_helper.py:
     keyframe_indices=[0, num_frames - 1],
 ```
 
-Two keyframes, hardcoded to first and last. The panel's `mode == "keyframe"` only accepts `start_image` and `end_image` form fields. UI offers two image drop-zones.
-
-Net: every other keyframe slot the engine could use is silently discarded.
+Two keyframes, hardcoded to first and last. **This restriction has since been lifted at the HTTP layer (Layer 2, shipped):** the panel's `mode == "keyframe"` branch now parses a `keyframes_json` list (≥2 items, strictly-ascending range-checked indices) and threads the full `keyframe_images`/`keyframe_indices` arrays to the helper (`mlx_ltx_panel.py` ~6448-6526); `start_image`/`end_image` are kept as a backward-compat fallback. The remaining gap is the **UI**, which still offers only two image drop-zones (Layer 3).
 
 ## Why this matters for the SDK
 
@@ -129,13 +127,13 @@ Helper `generate_keyframe` action now accepts arbitrary `keyframe_images` + `key
 
 Full agent contract below.
 
-### Layer 2 — panel HTTP form parsing — NOT YET
+### Layer 2 — panel HTTP form parsing — DONE
 
-`mlx_ltx_panel.py` `mode == "keyframe"` branch. Currently parses `start_image` + `end_image` form fields and constructs the helper job spec. Change to parse a **list of keyframes** from the form (e.g. `keyframe_image_0`, `keyframe_image_1`, ... or a JSON-encoded list field). Build the lists for the helper.
+`mlx_ltx_panel.py` `mode == "keyframe"` branch (~6448-6526). Parses a JSON-encoded **`keyframes_json`** list field: each entry is `{image_path, frame_index}`, the list must have ≥2 items, `frame_index` values must strictly increase, each image must exist, and every index is range-checked against the clip length `[0, frames-1]`. From that list it builds the full `keyframe_images` + `keyframe_indices` arrays and hands them to the helper's Layer-1 contract; it also syncs `start_image`/`end_image` to the first/last entries so the sidecar + gallery preview stay sensible.
 
-Backward compat: if the form has `start_image` + `end_image` only, behave as today.
+Backward compat: if `keyframes_json` is empty/absent, it falls back to the legacy `start_image` + `end_image` two-keyframe shape exactly as before.
 
-This is the layer the agent will use if it goes through the panel's HTTP queue endpoint instead of talking to the helper directly.
+This is the layer the agent uses when it goes through the panel's HTTP queue endpoint instead of talking to the helper directly.
 
 ### Layer 3 — UI (the user-visible surface) — NOT YET
 
@@ -305,7 +303,7 @@ result = submit({
 ### What's NOT in this layer
 
 - **Per-keyframe strength.** All keyframes are pinned at strength 1.0 (pure anchor). The model cannot "lightly suggest" a keyframe yet — it's all-or-nothing. Strength control requires an upstream patch in `ltx-pipelines-mlx`.
-- **Panel HTTP route.** Layer 2 is needed to reach this from the panel's queue (HTTP form-data). Today the only path is the helper's stdin.
+- **Panel HTTP route.** *(Update: Layer 2 has since shipped — the panel's queue now reaches multi-keyframe via the `keyframes_json` form field. At Layer-1 authoring time the only path was the helper's stdin.)*
 - **Panel UI.** Today's panel still has 2 image drop-zones. Adding more rows is Layer 3.
 - **Audio across keyframe boundaries between shots.** Each clip is its own audio render — boundaries are hard cuts. See "What this doesn't solve" below.
 

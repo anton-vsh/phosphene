@@ -8,14 +8,27 @@ section overrides it where they conflict.
 
 ---
 
-## 0. Current state — Phosphene 2.0 (released 2026-05-04)
+## 0. Current state — Phosphene v3.0.6 (current public release, 2026-05-31)
 
-VERSION file is now `2.0.0`. Git tag `v2.0.0` points at commit `fca78bb`
-on `main`. Going forward: `2.0.x` for patches, `2.1.0` for features,
-`3.0.0` only for another major story like this one. Pre-2.0 commit
-messages and inline comments still reference the `Y1.NNN` sequential
-counter (Y1.001 → Y1.039). Treat those as historical; do not introduce
-new `Y` labels.
+Public release is **v3.0.6**. The v3.0 line launched 2026-05-23 and has
+shipped six patch releases: v3.0.0 (Characters/Voice/Image Studio/A2V) →
+v3.0.1 (FFLF crash fix) → v3.0.2 (Boost/Turbo accel restored after a
+2-month silent regression) → v3.0.3 (HiDream hidden, issue #15) → v3.0.4
+(CivitAI SSL cert) → v3.0.5 (A2V kwarg signature shim, #5) → v3.0.6
+(deep-review hardening: CivitAI token-leak fix, dead-HDR revival,
+GPU-contention guard, boot version-gate). Published git tags: `v2.0.0`–
+`v2.0.5` then `v3.0.0`–`v3.0.6` — there is **no `v2.0.6` tag** (that was
+the dev codename that became v3.0.0). The `VERSION` file should read
+`3.0.6`. Versioning: `3.0.x` for patches. Pre-2.0 commit messages /
+comments still use the `Y1.NNN` counter (Y1.001 → Y1.039) — historical;
+do not introduce new `Y` labels.
+
+The authoritative current engineering snapshot is
+`~/AI/projects/phosphene/notes/DEEP_REVIEW_2026-05.md` (verified risk
+register + 5-phase stabilization plan). The `## 2.0` capability list
+below is retained as historical baseline — everything in it shipped; the
+v3.0 additions (Characters, voice LoRA, Image Studio, A2V, Train tab,
+capability tiers) are now baseline too.
 
 ### What ships in 2.0 (capabilities checklist)
 
@@ -285,33 +298,37 @@ new patch versions without a venv rebuild — used when we added
 
 **TL;DR for agents — non-negotiable:**
 
-> **Push every commit to `dev`. Never push to `main` unless Mr Bizarro
-> explicitly says "push to main" / "ship to production" / "merge to
-> main".** "It works on my machine" is not permission. "The tests
-> pass" is not permission. Mr Bizarro has a Phosphene Dev panel in his
-> Pinokio that pulls from `dev`; he tests there, then tells you when
-> to promote.
+> **REPO SPLIT (2026-05-22) — read this carefully, the old "push to
+> origin/dev" instruction is now WRONG.** There are two repos:
+> `mrbizarro/phosphene` (PUBLIC, `main`-only — what users install) and
+> `mrbizarro/phosphene-beta` (PRIVATE — daily dev). The public `dev`
+> branch was **DELETED**. The local working branch is still named `dev`
+> but it **tracks `beta/main`** (the private repo). So: **push daily work
+> to `beta` (private). Never push to a public `origin/dev` — it does not
+> exist.** Promotion to PUBLIC `main` is the gated step that needs Mr
+> Bizarro's explicit "push to main" / "ship to production". "It works on
+> my machine" / "tests pass" is not permission.
 
 The why:
 
-- **`main`** is what real users get. Pinokio's Discover URL points
-  here; every commit pushed to `main` is shipped to every user the
-  next time they click Update. Treat it as production.
-- **`dev`** is the staging branch. Push WIP commits here freely. The
-  local "Phosphene Dev" Pinokio panel (set up via
-  `scripts/setup_dev_panel.sh`) tracks this branch on port 8199 and
-  shows an amber DEV badge in the header.
+- **public `origin/main`** is what real users get. Pinokio's Discover URL
+  points here; every commit promoted to public `main` ships to every user
+  on their next Update. Production.
+- **private `beta/main`** is the staging line. The local `dev` branch
+  tracks it; push WIP here freely (`git push beta dev:main`). The local
+  "Phosphene Dev" panel tracks `dev` on port 8199 with an amber DEV badge.
 - **Workflow**:
-  1. Default to working on `dev`. `git checkout dev` at the start of
-     any session that touches Phosphene; if you're on `main`, switch.
-  2. Commit + push to `origin/dev` whenever a logical change is done.
-  3. **Stop there.** Tell Mr Bizarro it's on dev. Wait for explicit
-     instruction to promote.
-  4. When Mr Bizarro says push to main: `git checkout main && git merge dev
-     --ff-only && git push origin main`. Then `git checkout dev` so
-     subsequent work continues on dev.
-  5. If a fast-forward isn't possible (rare — usually a hotfix landed
-     on main directly), say so and ask before doing anything destructive.
+  1. `git checkout dev` at the start of any Phosphene session. `git fetch
+     beta && git fetch origin` to surface drift on both remotes.
+  2. Commit, then `git push beta dev:main` whenever a logical change is
+     done (lands on the PRIVATE beta).
+  3. **Stop there.** Tell Mr Bizarro it's on beta. Wait for explicit
+     instruction to promote to public.
+  4. When Mr Bizarro says ship/push to main: `git push origin dev:main`,
+     then tag + `gh release create` (see the release workflow in memory
+     `phosphene_repo_split.md`).
+  5. Never force-push or rewrite public `main`. If histories have
+     diverged, say so and ask before anything destructive.
 - The panel auto-detects which profile it is from `git rev-parse
   --abbrev-ref HEAD`: branch == `dev` → port 8199 + DEV badge; anything
   else → port 8198 + normal header. No config files to edit per panel.
@@ -489,10 +506,13 @@ prompts. Below -25 dB peak suggests a regression.
 - Anything inside `panel_uploads/` — user uploads
 - `panel_queue.json`, `panel_hidden.json` — runtime state
 - `logs/`, `cache/`, `__pycache__/` — runtime caches
-- The `.clinerules`, `.cursorrules`, `.windsurfrules`, `.geminiignore`,
-  `GEMINI.md`, `QWEN.md`, `AGENTS.md` files — these are generic Pinokio
-  scaffolding mirroring this `CLAUDE.md`. Edit `CLAUDE.md` first if a
-  project-wide change is needed; the rest are autogenerated mirrors.
+- `GEMINI.md`, `QWEN.md`, `AGENTS.md` are **symlinks to this `CLAUDE.md`**
+  (consolidated 2026-05-31 — they used to be hand-maintained near-duplicate
+  copies that silently drifted). `CLAUDE.md` is the single source of truth;
+  the other three exist only so Gemini / Qwen / Codex(AGENTS) load the same
+  guide. Edit `CLAUDE.md`; never edit the symlinks. If a tool ever refuses a
+  symlinked instruction file, replace that one with a 5-line stub pointing
+  here — do not fork the full content back out.
 
 ## 11. HTTP API reference (panel)
 

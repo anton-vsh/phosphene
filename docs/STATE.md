@@ -1,25 +1,37 @@
 # Phosphene — project state, history, open work
 
-Current `dev` head: see `git log -1` for the live SHA. The arc landed on May 17 2026 — Codex C+ 7-pass UI restructure (capability tiers, Q4 surface, Character as 5th mode pill, accel kill, HQ-speed move) + Train tab polish (Gemma 3 auto-caption, voice-on default, letterbox crop) + LoRA picker chrome (rename, download, companion-aware delete) + vendored `lora_lab/` for installer-only users + Codex 12.6% skip-step optimization on Q8 HQ.
+**Public release: `v3.0.6`.** The entire v3.0 line shipped — v3.0.0 (Characters / Voice / Image Studio / A2V, May 23) → v3.0.1 (FFLF crash fix) → v3.0.2 (Boost/Turbo accel restored after a 2-month silent regression) → v3.0.3 (HiDream hidden, #15) → v3.0.4 (CivitAI SSL) → v3.0.5 (A2V kwarg signature shim, #5) → v3.0.6 (deep-review hardening). See §4 for the full version history. The May-17 Codex C+ UI restructure (capability tiers, Q4 surface, Character as 5th mode pill, accel kill, HQ-speed move) and the Train-tab / LoRA-chrome work that followed are all baseline now, folded into v3.0.x. There is no `v2.0.6` tag.
 
-Latest `main`: still `v2.0.6` — `dev` carries ~30 commits ahead awaiting Mr Bizarro's ship verdict.
+Current `dev` head: see `git log -1` for the live SHA. `dev` tracks `beta/main` (private repo — see §1).
 
 Live URL: `https://github.com/mrbizarro/phosphene` · Linear project: `https://linear.app/hairstylemojo/project/phosphene-9c11240704bb`
 
 This doc is the **session-start handoff**. A new Claude window entering this project should read this first, then `CLAUDE.md` (architecture), then the relevant Linear issues.
 
+> **Authoritative engineering snapshot:** `/Users/salo/AI/projects/phosphene/notes/DEEP_REVIEW_2026-05.md` (2026-05-31) — the deep stabilization review: risk register + phased stabilization plan. It is the source of truth for current bug state and supersedes the historical log in §7 below.
+
 ---
 
 ## 1. Where the code lives
+
+**Repo split (2026-05-22):** there are now two GitHub repos:
+
+- **Public `mrbizarro/phosphene`** — `main`-only, stable releases. The public `dev` branch was **DELETED**. Anyone with a hand-configured public-`dev` install must reinstall from `main`.
+- **Private `mrbizarro/phosphene-beta`** — daily development. Holds `main` (daily dev) plus `archive/*` experimental branches.
 
 Two clones on Mr Bizarro's Mac, both managed by Pinokio:
 
 | Path | Branch tracked | Port | Role |
 |---|---|---|---|
-| `~/pinokio/api/phosphene-dev.git/` | `dev` | 8199 | Active development. Most edits land here first. |
-| `~/pinokio/api/phosphene.git/` | `main` | 8198 | Production / daily driver. Mr Bizarro's actual usage. |
+| `~/pinokio/api/phosphene-dev.git/` | local `dev` → `beta/main` (private) | 8199 | Active development. Most edits land here first. |
+| `~/pinokio/api/phosphene.git/` | `main` → public `origin` | 8198 | Production / daily driver. Mr Bizarro's actual usage. |
 
-GitHub is the source of truth (memory: `feedback_github_source_of_truth.md`). Branch policy is strict: **NEVER push to `main` without Mr Bizarro's explicit OK** (memory: `phosphene_dev_workflow.md`). When ready to promote, fast-forward only — `git merge --ff-only dev` from main, never a merge commit.
+The local branch is still named `dev`, but it tracks **`beta/main`** (private), NOT the deleted public `dev`. `update.js` auto-detects upstream (`@{upstream}`), so the dev clone pulls from `beta` and the prod clone pulls from public `main`.
+
+GitHub is the source of truth (memory: `feedback_github_source_of_truth.md`). Branch policy is strict:
+
+- Push daily work to **`beta`**, never to a public `dev` (it no longer exists).
+- **Promotion to PUBLIC `main` is the gated step — NEVER push public `main` without Mr Bizarro's explicit OK** (memory: `phosphene_dev_workflow.md`).
 
 State directories that live OUTSIDE the repo via Pinokio's `fs.link`:
 
@@ -30,21 +42,23 @@ State directories that live OUTSIDE the repo via Pinokio's `fs.link`:
 
 A Pinokio Reset wipes the install dir but preserves all four — Mr Bizarro can Reset → Install without losing renders or settings.
 
-## 2. Current capabilities (dev head — pending v2.1 promotion)
+## 2. Current capabilities (shipped in v3.0.6)
+
+The May-17 Codex C+ items (Studio/Train tabs, Character 5th mode, capability tiers) are baseline now — they shipped as part of the v3.0 line.
 
 **Workflow tabs (top nav)**
 - Manual — video composer (T2V / Character / I2V / FFLF / Extend)
-- Studio (NEW) — image generation (was a mode chip inside Manual until 2026-05-17, commit `37c9d21`)
-- Train Character (NEW) — dataset → LoRA training, with Gemma 3 auto-caption + letterbox crop
+- Studio — image generation (was a mode chip inside Manual until 2026-05-17, commit `37c9d21`)
+- Train Character — dataset → LoRA training, with Gemma 3 auto-caption + letterbox crop
 
 **Modes (inside Manual)**
 - Text — pure text→video
-- Character (NEW, 2026-05-17 commit `e420e3a`) — first-class mode for trained character LoRAs. Submits `mode=t2v` server-side; backend dispatches on `character_id`. Auto-stacks face + audio LoRAs, swaps the quality strip to Q8-only.
+- Character (2026-05-17 commit `e420e3a`) — first-class mode for trained character LoRAs. Submits `mode=t2v` server-side; backend dispatches on `character_id`. Auto-stacks face + audio LoRAs, swaps the quality strip to Q8-only.
 - Image — image→video (I2V)
 - FFLF — first/last frame keyframe interpolation
 - Extend — append seconds onto an existing clip
 
-**Capability tier system (NEW, 2026-05-17 commit `64dad87`)**
+**Capability tier system (2026-05-17 commit `64dad87`)**
 - `body[data-cap-tier="q4|q8"]` set at request time from `SYSTEM_CAPS.allows_q8`.
 - `q4` (sub-48GB Macs): FFLF / Extend / Character mode pills hidden; chip strip hidden; Q8-Draft/Q8-Pro chips hidden; "High" chip in default strip hidden; skip-step toggle hidden. Manual collapses cleanly to Text/Image.
 - `q8` (48GB+): full surface, Q4 still reachable via the default Quality strip for plain T2V/I2V.
@@ -149,17 +163,21 @@ A Pinokio Reset wipes the install dir but preserves all four — Mr Bizarro can 
   Settings)
 - Plan/Interactive mode pill toggle in agent header
 
-**Image Studio (dev head — Klein retired 2026-05-13)**
-- Two engine families in the dropdown. Six tiers total:
-  - **Qwen-Image-Edit-2511** — Fast (Lightning, 4-step Q6 + FBCache,
+**Image Studio (Klein/FLUX retired 2026-05-13; HiDream hidden since v3.0.3)**
+- **Shipped default: Qwen-Image-Edit-2509** with a Lightning 4-step fast tier. Three tiers:
+  - **Qwen-Image-Edit-2509** — Fast (Lightning, 4-step Q6 + FBCache,
     ~1:20 / image, multi-ref), Medium (8-step Q6 + FBCache, ~2:05 /
     image, multi-ref), Quality (40-step Q8 + CFG 4.0 + FBCache, ~3:50
-    / image, multi-ref).
-  - **HiDream-O1-Image-Dev** — Fast (3-step, ~3:45 / 4-img batch,
-    slight bg softness), Medium (6-step + FBCache, ~6 min / 4-img
-    batch, character-preserving), Quality (12-step + light FBCache,
-    ~9 min / 4-img batch, best detail).
-- HiDream is a separate one-time clone (`HIDREAM_LAB_DIR` env var or
+    / image, multi-ref). (The `2511` string in the codebase is the
+    Lightning **LoRA** path `lightx2v/Qwen-Image-Edit-2511-Lightning`,
+    not the base model.)
+- **HiDream-O1-Image-Dev is HIDDEN** since v3.0.3 (issue #15 — held
+  pending its lab repo going public). The code is present and still
+  reachable via a saved config or `engine_override`, just not in the
+  visible dropdown. When exposed it offers Fast (3-step, ~3:45 / 4-img
+  batch), Medium (6-step + FBCache, ~6 min, character-preserving),
+  Quality (12-step + light FBCache, ~9 min, best detail), and lives in
+  a separate one-time clone (`HIDREAM_LAB_DIR` env var or
   `~/HIDREAM-O1-MLX-LAB-active`); resolved in `image_engine.py`.
 - Q6 default quantization for mflux Qwen tiers — Apple-Silicon
   community sweet spot, ~4-6% quality loss vs full precision (Q4 was
@@ -186,18 +204,21 @@ A Pinokio Reset wipes the install dir but preserves all four — Mr Bizarro can 
   labels=bug, optionally bundles the latest 5 .ips crash files into
   /tmp/phosphene-bug-TS.zip.
 - FLUX / Klein-Edit / Klein-Base-Edit were retired 2026-05-13 — the
-  flux2_edit family stopped being competitive with Qwen-Edit-2511 +
-  HiDream at the same step counts, and dropping it freed UI vocabulary
-  for the new Qwen Fast/Medium/Quality + HiDream Fast/Medium/Quality
-  six-tier grid above.
+  flux2_edit family stopped being competitive with Qwen-Edit at the
+  same step counts, and dropping it freed UI vocabulary for the Qwen
+  Fast/Medium/Quality tiers above. (HiDream was later hidden in v3.0.3,
+  so the visible dropdown today is Qwen-only.)
 
-**Frontend extraction (parked on `frontend-extraction` branch)**
+**Frontend extraction (parked on `archive/frontend-extraction`, private beta)**
 - `webapp/` directory: index.html, style/all.css, js/main.js,
   vendor/marked.min.js + dompurify.min.js (MIT/Apache licenses)
 - Panel slimmed from 16,223 → 5,866 lines (-10,357)
 - New `/webapp/*` static route, `/api/page-config` endpoint
 - Markdown rendering swapped to `marked.parse + DOMPurify.sanitize`
-- Validated end-to-end on port 8210; merge to dev when reviewed
+- Validated end-to-end on port 8210. Post-split this is an `archive/*`
+  experimental branch on private `phosphene-beta`, not a merge-to-`dev`
+  candidate. Note: a separate `cuda-port` branch (Phase 0 spike only)
+  also lives on private beta — **not shipped, not on the Mac product.**
 
 ## 3. Marquee benchmarks (M4 Max 64 GB, sidecar-measured)
 
@@ -233,10 +254,10 @@ Pre-2.0 was the `Y1.NNN` sequential counter. v2.0.0 cut over to semver on May 3 
 **v2.0.4** (May 5) — Strip em-dash from install.js sanity check. Was breaking install on some Pinokio shells (KTDS + second user hit identical SyntaxError). Pure ASCII now.
 **v2.0.5** (May 6) — Drop the `print('venv OK: ...')` decoration from the sanity-import step. KTDS reproduced the SyntaxError on v2.0.4 — turns out something in their environment (Pinokio's command preprocessor or a user-side rewriter) was cutting the literal `OK:` out of the Python string AND appending `OK` after the closing shell quote, so Python received `...importable')OK` and bailed. Removing the print sidesteps the rewriter entirely. The exit code from a successful `import` is the only success signal `shell.run` needs anyway.
 
-**v2.0.6** (May 8 2026) — Image Studio overhaul + agent quality pass + security review. Headline ships:
+**"v2.0.6" dev codename** (May 8 2026; shipped as part of v3.0.0) — Image Studio overhaul + agent quality pass + security review. Headline ships:
 - Image jobs flow through the unified queue worker (Now / Queue / Recent / Logs); the in-Studio gallery is gone, the unified Recent tab covers it.
 - Mode-aware right-pane viewer + OUTPUTS gallery (All / Videos / Photos chips, auto-flip on mode change, "Animate" button on photo cells pre-fills i2v).
-- Q6 default quantization for mflux + non-distilled photoreal presets (`flux2_edit_high`, `qwen_edit_high`, `kontext_high`); klein-4B prompt structure taught to the agent (subject → environment → style → technical hierarchy); Qwen-Edit defaults bumped from 2509 → 2511.
+- Q6 default quantization for mflux + non-distilled photoreal presets (`flux2_edit_high`, `qwen_edit_high`, `kontext_high`); klein-4B prompt structure taught to the agent (subject → environment → style → technical hierarchy). *(This session bumped the Qwen-Edit default toward 2511, but the **shipped base model is 2509** — see §2; `2511` is the Lightning LoRA path only.)*
 - `submit_shots` plural tool — agent batches a multi-shot plan in one dispatch + finishes the turn before auto-pause kills the engine (used to crash mid-batch).
 - Phase C i2v prompt-writing rules in `prompts.py` (forbid still-prompt reuse, require explicit motion beats, ~1 beat / 2-3 sec); production recipe taught as Balanced + Sharp 720p.
 - Pre-flight RAM/disk check + Metal/MLX SIGABRT detection with actionable OOM hint (no more silent exit -6).
@@ -247,7 +268,17 @@ Pre-2.0 was the `Y1.NNN` sequential counter. v2.0.0 cut over to semver on May 3 
 - Agent now switches engines via `engine_override` arg on `generate_shot_images`.
 - Security review pass: 0 CRITICAL, 4 HIGH, 6 MEDIUM identified — all 10 shipped this session. (See Known bugs section for details.)
 
-Full git log on `main`. Tags `v2.0.0` through `v2.0.4` published. v2.0.5 + v2.0.6 awaiting promotion on dev.
+> Note: "v2.0.6" was the dev codename for the work that ultimately shipped as **v3.0.0**. There is **no `v2.0.6` tag** — the published 2.x tags stop at v2.0.5.
+
+**v3.0.0** (May 23 2026) — Marquee release. Folded in the full Characters workflow (Train Character tab + first-class Character mode), Voice/audio LoRAs, the standalone Image Studio (Qwen-Image-Edit-2509 default + Lightning 4-step), A2V, the Codex C+ capability-tier UI restructure, and the Image Studio overhaul above. The in-panel agentic-flows chat was retired in this release.
+**v3.0.1** — FFLF crash fix.
+**v3.0.2** — Boost/Turbo accel restored after a 2-month silent regression (git-archaeology'd the per-mode tail + re-anchored the accel patch across all `denoise_loop` import sites).
+**v3.0.3** — HiDream hidden from the visible dropdown until its lab repo is public (issue #15). Code stays, reachable via saved config / `engine_override`.
+**v3.0.4** — CivitAI SSL fix.
+**v3.0.5** — A2V `frame_rate` kwarg signature shim (issue #5).
+**v3.0.6** — Deep-review hardening: CivitAI token-leak fix, dead-HDR revival (`HELPER_LOW_MEMORY` → `LOW_MEMORY` NameError), GPU-contention guard (inline image vs in-flight video render), boot-time version-gate against the ltx-2-mlx pin.
+
+**Published tags (verified `git tag`): `v2.0.0`–`v2.0.5` and `v3.0.0`–`v3.0.6`.** Current public release is **v3.0.6**. (The `VERSION` file in-repo may lag the tag — read the tag, not the file, for "what release is this.")
 
 ## 5. The folder layout
 
@@ -291,7 +322,7 @@ phosphene-dev.git/
 │   └── SDK_KEYFRAME_INTERPOLATION.md  ← multi-keyframe interpolation design + plan
 ├── launch/                            ← marketing copy (Pinokio article, X thread, Reddit, etc.)
 │
-├── ltx-2-mlx/                         ← upstream MLX port (separate clone of dgrauet/ltx-2-mlx)
+├── ltx-2-mlx/                         ← upstream MLX port, PINNED v0.14.0 (clone of dgrauet/ltx-2-mlx; SHA b35254a)
 │   └── env/                           ← Python 3.11 venv (uv-managed)
 ├── mlx_models/                        ← weights (~63 GB, fs.link symlink)
 ├── mlx_outputs/                       ← rendered mp4s + sidecars (fs.link symlink)
@@ -301,7 +332,9 @@ phosphene-dev.git/
 └── logs/                              ← Pinokio's own command-execution logs
 ```
 
-`mlx_ltx_panel.py` is the heart of it — almost all panel behavior lives there. `mlx_warm_helper.py` is the long-running inference subprocess. `patch_ltx_codec.py` is a 500-line runtime modifier that fixes upstream code without forking it.
+`mlx_ltx_panel.py` is the heart of it — almost all panel behavior lives there. `mlx_warm_helper.py` is the long-running inference subprocess. `patch_ltx_codec.py` is a runtime modifier that fixes upstream code without forking it.
+
+> The vendored `ltx-2-mlx` is pinned at **v0.14.0** (SHA `b35254a`). The deep review (`notes/DEEP_REVIEW_2026-05.md`) flags the **runtime-monkey-patch + version-skew axis as the single top fragility** — the panel/helper patch a moving upstream at runtime, and (pre-Phase-0) nothing asserted the imported `ltx_pipelines_mlx` was actually v0.14.0. The stabilization plan there (Phase 0 loud version gate, Phase 3 retire the runtime-patch class) addresses it.
 
 ## 6. What worked / didn't this session (May 3–5 2026)
 
@@ -336,309 +369,112 @@ phosphene-dev.git/
 - **E-ANCHOR** (May 4): I2V from M1 frame to test character anchoring. Result was inconclusive in the session; final clip is at `mlx_outputs/` if needed for review.
 - **20-sec single-clip viability** (May 4): confirmed at Balanced 1024×576 + Turbo + Sharp. ~21 min wall, audio synced, characters stable.
 
-## 7. Known bugs / fixed bugs
+## 7. Known bugs
 
-### 2026-05-22 (later) — stats dashboard moves INSIDE the panel (private)
+> **Source of truth for bug state: `/Users/salo/AI/projects/phosphene/notes/DEEP_REVIEW_2026-05.md`** (the deep stabilization review — full verified risk register + phased plan). The list below is the short reconciliation; the review has the complete severity-ranked register and the fix directions. The CHANGELOG further down is the historical record of what was fixed when — not a list of live bugs.
 
-Mr Bizarro: "don't put it in the public repo." Pivoted the architecture
-from GitHub Pages + committed JSONL to entirely panel-internal:
+### Currently open
 
-- **Dashboard URL is now `http://127.0.0.1:8199/stats`** (panel-served,
-  127.0.0.1-only). Bookmark this; the panel must be running to view.
-- **Data lives at `state/stats-data.jsonl`** — gitignored, on the user's
-  Mac only, never on the public repo.
-- **`panel_assets/stats.html`** holds the dashboard template (still public
-  code — only the data is private).
-- **Panel background thread `stats_fetch_loop`** runs `scripts/fetch_repo_stats.py`
-  once at startup (if data file is missing/stale ≥ 6h) and daily thereafter.
-- **GitHub Action deleted** — no public cron, no GitHub Pages, no GitHub
-  push needed at all to keep the dashboard working.
-- **Token resolution** (first hit wins): `PHOSPHENE_REPO_STATS_TOKEN` →
-  `GH_STATS_TOKEN` → `GH_TOKEN` / `GITHUB_TOKEN` → `gh auth token`. Skipped
-  silently if none works (panel logs one warning + carries on).
-- The brief window where the data was on the public repo
-  (`151d0d2`..`827c5d8`) only contained one snapshot of public aggregate
-  counts — nothing private leaked. Door closed before it became a habit.
+Reconciled against the deep review (2026-05-31). Everything that was a recent fire — the I2V/Extend post-decode hang (`94bd696`), FFLF crash (v3.0.1), Boost/Turbo regression (v3.0.2), A2V `frame_rate` kwarg (v3.0.5), the HDR NameError / CivitAI token leak / GPU contention (v3.0.6) — is **fixed**. The HiDream no-deadline reader now has a panel-side watchdog too (v3.0.6). What genuinely remains:
 
-Setup is now ZERO steps for the user (panel + token both already there);
-just open `/stats`. See `scripts/STATS_DASHBOARD.md` for the full guide.
+**Root-cause fragility (deep review §2, top of the register)**
+- **Runtime-monkey-patch / version-skew axis** — the panel + helper patch a moving upstream (`ltx-2-mlx`) at runtime. v3.0.6 added a boot-time version gate (Phase 0); the structural fix (retire the runtime-patch class, re-pin to a SHA-pinned submodule) is Phase 3 of the plan, not yet done.
+- **No test seam** — `mlx_ltx_panel.py` is ~28k lines, all 69 routes dispatched via a flat `if path==` chain with zero unit-testable surface. This is *why* regressions reach users. Phase 2 carves the first seams.
 
-### 2026-05-22 — ship-prep pass: GitHub-data dashboard + analytics ROLLED BACK
+**Confirmed correctness / robustness items still open**
+- **Recipe-override guardrails** — advanced LoRA-training overrides (rank/lr/steps) bypass the validated-recipe clamps (`train_character.py:135-144`, panel `:4807-4821`). Needs whitelist + a "non-standard recipe" warning.
+- **`/status` polling cost** — every poll, per open tab, does a pgrep subprocess + filesystem scans (`mlx_ltx_panel.py:7845-7919`). Split fast fields from slow install-state probes / cache the slow group.
+- **154 silent `except: pass` sites**, including persistence + chmod paths (`mlx_ltx_panel.py`). Tier them (best-effort vs state/security vs control-flow) behind a greppable `_swallow(label)` helper.
+- Plus a tail of Med/Low items in the review (HiDream preflight exemption, `/prompt/enhance` shares the render lock, stats JSONL unbounded/growth, `character_runtime.py` dead/divergent, BFL URL host-validation, voice-silence trim). See the review's §2 table for the full set + fix directions.
 
-Mr Bizarro decision: opt-in telemetry won't be well-received in the OSS
-world. Replaced with a GitHub-Traffic-API-only dashboard that gives the
-"how is the app doing" signal without putting any privacy weight on
-users. Three additional commits to dev:
+**Model-capability limits (not bugs — won't be "fixed", design around them)**
+- **Multi-shot character continuity is naive-failure** — same prompt + different seed = different person. IC-LoRA (deep review §6) is the proposed lever.
+- **Faces below ~80 px in-frame** identity-break; **hands / held objects** and **high-motion physics** are out of distribution. See §6.
 
-- **`da1d6f5` — analytics fully removed.** -871 lines. `analytics.py`
-  and `TELEMETRY.md` deleted. `mlx_ltx_panel.py` stripped of the
-  default-settings entries, validator branches, public-safe view
-  fields, `/settings` opt-in/opt-out/forget-me lifecycle,
-  `__main__` install + `panel_boot` emit, serve_forever-finally
-  shutdown, worker `render_start` / `render_done` / `render_failed`
-  / `render_cancelled` emits + error_category bucketing, the
-  Settings → Anonymous analytics HTML section, and the three JS
-  functions + modal-open hook. README reverted to "no telemetry".
-  Existing `panel_settings.json` files may still carry the old keys;
-  the loader ignores them silently — no migration script needed.
+**Agent caveat (carried over)**
+- **Qwen 3.6 reasoning loops** when planning large multi-shot batches — recursive chain-of-thought can exhaust any token budget. Workarounds: prefer Gemma 12B (`mlx_models/gemma-3-12b-it-4bit`, no reasoning blocks, 7.5 GB) or the Anthropic API for 20+ shot batches; trigger 5 shots at a time in plain text. (Note: the in-panel agentic-flows chat was retired in v3.0.0; this applies to the remaining `/prompt/enhance` + any external-engine use.)
+- **KTDS install case** (Linear HAI-156): `ModuleNotFoundError: ltx_pipelines_mlx` after a "green" install. Likely the old v2.0.2/v2.0.3 em-dash sanity-check bug (install went green for the wrong reason); fixed in v2.0.4. The v3.0.6 boot version-gate + `--force-reinstall` install determinism should close this class. Pending the user's log tail to confirm.
 
-- **`151d0d2` — solo-maintainer GitHub stats dashboard.** Three
-  files: `scripts/fetch_repo_stats.py` (stdlib-only Python fetches
-  repo + traffic + referrers + paths + releases; appends one JSON
-  line per UTC day to `docs/stats-data.jsonl`; idempotent),
-  `docs/stats.html` (vanilla-JS + Chart.js dashboard with cards,
-  time-series, referrer/path tables), and the seed snapshot.
-  `.github/workflows/repo-stats.yml` is staged locally — Mr Bizarro
-  must run `gh auth refresh -s workflow` + push it from a local
-  clone (the in-session OAuth token doesn't have `workflow` scope).
+---
 
-- **Polish pass (next commit, batched with this STATE update).**
-  Three parallel research/improvement agents:
-    - **Dashboard polish**: period selector (7d/30d/90d/all),
-      week-over-week + yesterday delta per card, sparklines per
-      card, "Growth" daily + weekly card, stars-timeline section
-      (feature-detected), 15-day rolling window from
-      `clones_window`/`views_window` when present, loading
-      skeleton + error card, raw-JSONL header link, theme
-      toggle (light/dark, persists), keyboard focus rings,
-      sticky table headers + internal scroll, K/M number
-      shortening, clickable referrer domains, lazy chart init
-      via IntersectionObserver, mobile stacking, `aria-label`
-      everywhere. 1117 lines total, still single file + one CDN.
-    - **Fetcher enrichment**: full 15-day `clones_window` +
-      `views_window` arrays; `stars_timeline` (cumulative, login
-      DROPPED for privacy, capped at 5000); rate-limit handling
-      (sleep until reset when remaining < 100); 3-retry backoff
-      on 5xx/network; `--dry-run` + `--repo OWNER/NAME` flags;
-      one-line summary at exit for `$GITHUB_STEP_SUMMARY`.
-    - **Workflow hardening + maintainer README**: SHA-pinned
-      `actions/checkout@v4.3.1` + `actions/setup-python@v5.6.0`;
-      concurrency group; `dry_run` + `repo` inputs on
-      workflow_dispatch; `$GITHUB_STEP_SUMMARY` + commit-body
-      summary; failure-issue creation that DE-DUPES across
-      consecutive outage days; minimized `permissions:`
-      (contents:write + issues:write only); pip cache enabled.
-      Plus a new `docs/stats-README.md` explaining the whole
-      stack for future maintainers (running locally, enabling
-      Pages, adding metrics, what GitHub data CAN'T tell you,
-      FAQ, troubleshooting).
+### CHANGELOG (historical — what was fixed, newest first)
 
-Today's seed data lands on the dashboard the moment Pages comes
-online: 57 stars, 5 forks, 8 open issues, 1 PR, 3954 clones in the
-last 14 days (148 unique today), 1601 views, with Google / GitHub
-/ Huggingface / Twitter / Reddit as the top funnels. W/w delta:
-clones -1130 (last week was a spike — likely a Reddit/HN bump).
+#### v3.0.6 — deep-review hardening
+- **HDR action un-deaded** — `generate_hdr` referenced undefined `HELPER_LOW_MEMORY` → NameError killed every HDR job. One-token rename to `LOW_MEMORY` (`mlx_warm_helper.py`).
+- **CivitAI token-leak fix** — downloader leaked the API token on redirect + used a weak `endswith("civitai.com")` host check. Exact-host allowlist + redirect handler that strips `Authorization`; prefer header over `?token=`.
+- **GPU-contention guard** — inline `/image/generate` and the video worker shared no GPU lock; a concurrent mflux + LTX render could OOM the Mac. Now mutually exclusive.
+- **Boot version-gate** — helper reads `ltx_pipelines_mlx` version at boot, compares to the expected v0.14.0 pin, and surfaces a loud panel-log banner on mismatch (Phase 0 of the stabilization plan).
+- **HiDream `select()`+deadline reader** — the HiDream subprocess reader had no deadline (a hung render blocked the queue forever); now reuses the mflux deadline+`killpg` loop. (HiDream is dropdown-hidden but reachable via saved config / `engine_override`.)
 
-### Fixed 2026-05-21 EVENING (overnight push — read this first)
+#### v3.0.5 — A2V kwarg signature shim (issue #5)
+- **A2V died ~10 s into every render with a reference image** (`combined_image_conditionings() missing 1 required keyword-only argument: 'frame_rate'`). Upstream v0.14.0 made `frame_rate=` mandatory, but `a2vid_two_stage.py` / `lipdub.py` don't forward it. Fixed via runtime monkey-patch `_install_a2v_frame_rate_patch()` (`frame_rate=24.0` default, idempotent). Commit `681f429`. (The shim is still required at v0.14.8 — the upstream bug is live; deep review flags hardcoding 24.0 vs the real fps as a Med item.)
 
-Late-evening continuation after Mr Bizarro called out the still-broken
-hang ("fix it. What do you mean 'deferred to roadmap'?") and the
-gallery glitch ("the '21:19' label that looks like a render duration").
-Five additional commits to `dev`:
+#### v3.0.4 — CivitAI SSL fix
 
-- **The post-decode hang is FIXED** (commit `94bd696`, the second
-  attempt — the first one in `adc1cd2` did not work, see below).
+#### v3.0.3 — HiDream hidden (issue #15)
+- HiDream removed from the visible Image Studio dropdown until its lab repo is public. Code stays; reachable via saved config / `engine_override`.
 
-  First attempt: an in-helper daemon-thread watchdog that would emit
-  done + os._exit(0) past a 30s grace. It was correct in concept but
-  doesn't fire in practice — **Metal's command-buffer completion
-  handlers block every Python thread's GIL access during the
-  deallocator chain**, so the watchdog thread is starved by the very
-  thing it was meant to escape. Observed live: helper hung 5+ min
-  after the watchdog should have rescued at 30s; ps showed all 16
-  helper threads at 0% CPU.
+#### v3.0.2 — Boost/Turbo accel restored (2-month silent regression)
+- Git-archaeology'd a regression where the Boost/Turbo accel path silently stopped firing. Re-anchored the accel `denoise_loop` replacement across all import sites + restored the per-mode tail. (Commit `2694f9f` shipped the issue-#12 install gate earlier; accel fix is the v3.0.2 headline.)
 
-  Working fix: rescue from THE PANEL (a separate process — GIL inside
-  the helper is irrelevant from out here). `WarmHelper.
-  _build_post_decode_panic` returns a `(log_hook, panic_check)` pair
-  that `_read_until` honors. `log_hook` spots upstream's
-  "[Decoding ... done in X.Xs]" line and arms a 45s grace clock.
-  `panic_check` runs every 500ms in the select loop; if grace
-  expired + output file is on disk > 8KB, it SIGKILLs the helper
-  (from a daemon thread to not block the tick) and returns a
-  synthetic done event pointing at the known output_path. Helper
-  respawns on the next job (~30s spawn cost).
+#### v3.0.1 — FFLF crash fix
+- **Extend downscale crash** — `_ensure_downscaled` wrote to `<name>.mp4.partial`; ffmpeg can't infer mp4 from `.partial`. Added `-f mp4`. Commit `736ca0d`.
+- **Image Studio submitted Qwen-Image-Edit jobs when the add-on wasn't installed** (issue #12). `/image/engine_status` now returns `family_installed` per engine; the engine pill turns red with an install tooltip; Generate refuses upfront. Commit `2694f9f`.
+- **Silent panel boot when helper venv missing** (issue #5 footnote) — now logs a single stderr warning naming both probed paths + the `LTX_HELPER_PYTHON` override. Commit `fa17c61`.
 
-  Validated end-to-end on the same 768×416 +6f Extend that hung
-  5+ min the first time and 13+ min the time before. Log shows the
-  exact rescue sequence Mr Bizarro can audit:
+#### v3.0.0 (May 23) — marquee release
+The Characters / Voice / Image Studio / A2V release. Folded in the May-17 Codex C+ UI restructure, the Train-tab + LoRA-chrome work, the Image Studio overhaul, and the post-decode-hang fix. The in-panel agentic-flows chat was retired here.
 
-      [22:01:07] [Decoding video + audio + muxing] done in 16.9s
-      [22:01:07] [panel-watchdog] extend …: decode-done signal
-                 seen, grace clock armed (45s).
-      [22:01:52] [panel-watchdog] extend …: post-decode hang
-                 detected — file on disk (802615 bytes) but helper
-                 silent for 45s after decode-done. SIGKILLing
-                 helper; render counted as done.
-      [22:01:52] Extend done in 533.98s → …mp4
+**Stats dashboard — panel-internal (private).** The dashboard is served by the panel at **`http://127.0.0.1:8199/stats`** (127.0.0.1-only; panel must be running). Data lives at **`state/stats-data.jsonl`** — gitignored, on the user's Mac only, never on the public repo. `panel_assets/stats.html` holds the template (public code; only the data is private). Panel background thread `stats_fetch_loop` runs `scripts/fetch_repo_stats.py` once at startup (if data is missing/stale ≥ 6h) and daily thereafter. Token resolution (first hit wins): `PHOSPHENE_REPO_STATS_TOKEN` → `GH_STATS_TOKEN` → `GH_TOKEN` / `GITHUB_TOKEN` → `gh auth token`; skipped silently if none. Zero setup for the user — just open `/stats`. See `scripts/STATS_DASHBOARD.md`. *(An earlier GitHub-Pages + committed-JSONL dashboard and an opt-in analytics module were both rolled back before launch; analytics removed entirely in `da1d6f5`. The brief window where stats data touched the public repo (`151d0d2`..`827c5d8`) held one snapshot of public aggregate counts only — nothing private leaked.)*
 
-  Armed for `generate` (T2V/I2V Balanced) + `extend` only. A2V,
-  FFLF, T2V Character HQ, image, train all return cleanly and
-  don't need it.
+**Post-decode hang FIXED** (commit `94bd696`). A first attempt at an in-helper daemon-thread watchdog (`adc1cd2`) did not fire in practice — Metal's command-buffer completion handlers block every Python thread's GIL during the deallocator chain, so the watchdog was starved by the very thing it was meant to escape. Working fix rescues from **the panel** (separate process, GIL irrelevant): `WarmHelper._build_post_decode_panic` returns a `(log_hook, panic_check)` pair; `log_hook` spots upstream's `[Decoding ... done in X.Xs]` and arms a 45s grace clock; `panic_check` runs every 500ms and, if grace expired + output file on disk > 8KB, SIGKILLs the helper and returns a synthetic done event. Helper respawns on the next job (~30s). Armed for `generate` (T2V/I2V Balanced) + `extend` only. Validated on the 768×416 +6f Extend that previously hung 5-13 min. Bundled: Extend default steps 12→8 + TeaCache threshold 0.5→0.7 (~6 min wall); gallery `_dnWxH` dn-cache leak fix (the spurious "21:19" duration label).
 
-- **Extend speed defaults cut** ("is that not too slow?"). Bundled
-  in `94bd696`. Default steps 12 → 8 (cfg=1.0 doesn't need 12) and
-  Extend TeaCache threshold 0.5 → 0.7 (more aggressive block-skip).
-  Measured ~6 min wall on the same +6f case that was 11 min the
-  same morning. Quality holds at cfg=1.0 single-branch.
+**Codex C+ UI restructure (2026-05-17, 30+ commits).** Driven by Codex's C+ recommendation (Q4 vs Q8 as separate surfaces). Per-bug:
+- Player aspect-ratio cropped vertical clips (`.player-surface` hardcoded 16:9 + `object-fit:cover`) → read natural dims on `loadedmetadata` into `--media-aspect`, height-driven sizing for verticals, `object-fit:contain`. Commit `4987022`.
+- Expand button was inline-positioned, not a modal (`.expand-lightbox` had no CSS) → real fullscreen modal. Commit `4987022`.
+- `/output/delete` orphaned the raw mp4 after upscale → collects every companion via sidecar fields + `UPSCALE_TAGS` heuristic. Commit `0dba2dc`.
+- `/sidecar` 404'd on a raw card after upscale → now walks the `UPSCALE_TAGS` family. Commit `331795a`.
+- `/stop` didn't kill the training subprocess (trainer Popens inherited the panel's process group) → `start_new_session=True`, `STATE["train_pgid"]` tracked, SIGTERM via killpg + 8s SIGKILL fallback. Commit `b6d1222`.
+- `/queue/batch` rendered 5s clips when curl sent `duration=10` (client-side duration→frames math skipped) → derive frames via `_duration_to_8k_frames`. Commit `038a0a1`.
+- Train Character High preset subtitle skew (`~4 h · 768px` vs canonical `5000 steps · 512px · ~2h50m`). Commit `4255f12`.
+- Dual quality strip rendered on top of each other (`.quality-strip{display:grid}` outranked UA `[hidden]`) → `.quality-strip[hidden]{display:none!important}`. Commit `7bd5057`.
+- Train voice toggle defaulted OFF even with a clip uploaded → defaults ON. Commit `ea2cf02`.
+- `caption_strategy="user_provided"` rejected by the trainer → alias map in lora-lab (`b04eaab`); panel-side defense-in-depth `8b5a3cf`.
+- Q4-distilled inference of dev-trained character LoRAs gave generic output (wrong base) → UI forces Q8 chips for characters; backend rejects `character_id + quality != high`. Commits `1d7983a`, `8b5a3cf`.
+- HQ-speed Fast pill inactive at boot (boot cascade cleared `.active`) → commits `1056c99`, `04d2ffd`; the HQ-speed pill in Customize is now the single source of truth.
 
-- **Gallery dn-cache leak** (commit `94bd696`). The "21:19" label
-  Mr Bizarro pointed at was Extend's pre-downscale cache file
-  (`<base>_dnWxH.mp4`) appearing in the carousel without a sidecar
-  — the duration formatter fell back to mtime HH:MM. Two fixes:
-  `list_outputs` filters stems ending in `_dn\d+x\d+` when no
-  sidecar exists; `_outputDurationLabel` no longer falls back to
-  HH:MM (uses `_relTimeFromMtime` instead).
+**Image Studio + agent quality pass (the "v2.0.6" codename work, ~18 commits).** Per-bug:
+- klein-4B prompt-structure mismatch + Q4 default → taught the subject→environment→style→technical hierarchy in `agent/prompts.py`; Q6 default in `ImageEngineConfig.mflux_quantize`.
+- Image jobs invisible in Now/Queue/Recent/Logs (`/image/generate` bypassed the queue) → routed `mode='image'` through `make_job` + `run_image_job_inner`; `_IMG_STUDIO_LOCK` arbitrates the sync agent path.
+- Redundant in-pane Image Studio gallery deleted (unified Recent tab covers it).
+- i2v "barely moves, just a zoom out" (agent reused the still prompt) → "Phase C — writing prompts FOR i2v" rules in `agent/prompts.py` (forbid still-prompt reuse, require explicit motion beats).
+- 400×400 still-output mystery (`flux2_edit` referenced in saved configs but never wired) → added to `MFLUX_FAMILY_BIN`/`MFLUX_FAMILY_DEFAULTS`, refs routed to `--image-paths`; added non-distilled photoreal presets. *(FLUX/Klein later removed 2026-05-13.)*
+- Issue #2 (Metal abort crash) — mflux SIGABRTs (exit -6, uncatchable) when 24 GB Qwen-Edit runs with 8 GB free → pre-flight RAM/disk check + SIGABRT detector with an OOM hint + Report-bug button.
+- `auto_pause_during_renders` killed mid-batch agent calls → `submit_shots` plural tool batches the whole plan + a `_finish_after_turn` flag.
+- `submit_shot` coerced invalid accel values silently → strict validation; "exact" accepted as a friendly alias for "off".
+- Agent obeyed broken user instructions (e.g. `aspect="1:1"` on a 16:9 i2v) → "push back when instructions produce broken output" rule.
+- AF pane stayed visible in Manual mode (`[hidden]` overridden by `display:flex`) → explicit `style.display` toggling.
 
-- **Elon v3 retrain kicked off** (~22:02, ETA ~4h28m, finishes
-  around 02:30). Per the validated v2 recipe Mr Bizarro asked for:
-  rank 32 · 100 epochs (7900 steps for 79 imgs) · lr 1e-4 ·
-  **512×512 square** · center crop · `user_provided` captions
-  (the existing [VISUAL]:-format captions already in the dataset).
-  Identity-only (train_audio=false) so the existing
-  elontrn.audio.safetensors stays in place. Prior `elontrn_v2`
-  bundle backed up to `mlx_models/loras/_backups/20260521_v2_pre_v3/`
-  before kicking off. Output overwrites `elontrn_v2.safetensors`.
-  Test render queued for after training completes — sample lands
-  in `mlx_outputs/` for Mr Bizarro's wake-up review.
+**Security review pass — 0 CRITICAL · 4 HIGH · 6 MEDIUM, all 10 shipped.**
+- HIGH — reject `Origin: null` in `_is_local_request`; validate `mflux_python_path` at save; validate `model_path` at `/agent/local/start` (HF `<owner>/<name>` against an owner allow-list; local paths must resolve under `mlx_models/` or HF cache); cap `submit_shot`/`submit_shots` calls per turn.
+- MEDIUM — `/sidecar?path=` requires a media file before serving the `.json`; `/agent/models/install` reuses the owner allow-list; `_save_settings` writes with O_EXCL + fsync + os.replace + chmod 0600; `inspect_clip` prompt fields wrapped + truncated (prompt-injection defang); `read_document` PDF branch rejects > 50 MB + 30 s watchdog; `/output/hide` containment check.
 
-### Fixed 2026-05-21 (autonomous modality-matrix session)
+**Agentic-flows polish (the "v2.0.5" codename work).** Stage stuck at 0% (progress schema changed flat-float → object); offline banner restyled; typing indicator now refreshes every 1.5s with elapsed seconds; auto-scroll switched to scroll-pinning + "↓ New messages" pill; abort on long turns via AbortController; tool cards de-emphasized; anchor un-pick on re-click; "Queue them" batch pill; multi-take `append:true`; OOM memory guard (refuse engine auto-spawn >92% pressure / >8 GB swap); **reasoning-model empty-content fix** (Qwen 3.6 splits `reasoning`/`content`; bumped `max_tokens` 3072→8192, engine.chat() reads reasoning, raises on length truncation); Phosphene-branded assistant avatar. Also three Phase 0 agentic items: engine-readiness banner (`7334836`), turn-summary chip (`134b5b1`), inline wall-time predictor (`43a7c3b`).
 
-Mr Bizarro asked for "continue testing and fixing issues as they arise · check all the other modalities · I will be back in a few hours work continuously". Full modality test pass + analytics scaffold + two real bug fixes + one issue-#12 UX gate. 5 commits to `dev`:
+#### Semver 2.x line (May 3–6)
+- **v2.0.0** (May 3) — marquee release; semver versioning starts.
+- **v2.0.1** — Spicy mode toggle gates NSFW LoRA visibility.
+- **v2.0.2** — install fails loud when pipeline packages are missing.
+- **v2.0.3** — install log self-documents the Python toolchain.
+- **v2.0.4** (May 5) — strip em-dash from the install.js sanity check (Pinokio shells mangled the unicode em-dash → false SyntaxError → every install failed). Pure ASCII now.
+- **v2.0.5** (May 6) — drop the `print('venv OK: ...')` decoration from the sanity-import step (a user-side rewriter was cutting `OK:` out of the string and appending `OK` after the shell quote). The import exit code is the only success signal needed.
 
-- **A2V died at ~10 s every render with a reference image** (`combined_image_conditionings() missing 1 required keyword-only argument: 'frame_rate'`). Upstream `ltx-pipelines-mlx` v0.14.0 made `frame_rate=` mandatory on `utils._orchestration.combined_image_conditionings`, but `a2vid_two_stage.py` and `lipdub.py` still call it without forwarding the kwarg. Fixed via runtime monkey-patch in `mlx_warm_helper.py::_install_a2v_frame_rate_patch()` — wraps the function with `frame_rate=24.0` default, idempotent, parallel to the existing `_install_video_decoder_patch` pattern. Validated: A2V 1024×576 121f + ref now succeeds in 395 s, output valid h264+AAC. Commit `681f429`.
-- **Extend died at the downscale step** (`Unable to choose an output format for '<name>.mp4.partial'; use a standard extension or specify the format manually`). `_ensure_downscaled` writes to `<name>.mp4.partial` for atomic rename, but ffmpeg can't infer mp4 from `.partial`. Added `-f mp4`. Was silent for a while because Extend wasn't being exercised after the .partial pattern was introduced. Commit `736ca0d`.
-- **Image Studio let users submit Qwen-Image-Edit jobs when the add-on wasn't installed** (issue #12, sureshkpiitk). Job died deep in the helper with "pip install -U mflux>=0.17" buried in the log. Closes the UX hole Mr Bizarro publicly promised on the issue: `/image/engine_status` now returns `family_installed` per engine; the engine pill turns red with "install Qwen-Image-Edit" + Pinokio-sidebar-button tooltip when missing; Generate button refuses upfront. HiDream engines unaffected. Commit `2694f9f`.
-- **Panel boot was silent when helper venv was missing** (issue #5 footnote, claude3d hit this from terminal on M5). Now logs a single stderr warning naming both probed paths (`.venv/bin/python3.11` and `env/bin/python3.11` under `ltx-2-mlx/`) plus the `LTX_HELPER_PYTHON` override. No behavior change otherwise. Commit `fa17c61`.
-- **Anonymous opt-in telemetry shipped end-to-end** (commit `d94c72f`). `analytics.py` module + Settings UI toggle + `TELEMETRY.md` field-by-field doc + README mention. Default OFF. Schema covers panel_boot / render_start / render_done / render_failed / render_cancelled / helper_crash / settings_opt_in / settings_opt_out. Strictly sanitized — never sends prompts, paths, hostnames, LoRA filenames. 32-char hex install_id with rotate ("forget me") button. Endpoint via `PHOSPHENE_ANALYTICS_ENDPOINT` env var or default. 4 KB payload cap, 4 s socket timeout, 512-event queue with oldest-drop-on-full, daemon thread, fail-safe when endpoint dead. Privacy-validated end-to-end with a local catcher: zero traffic when toggle OFF (multiple /status hits + boot), expected JSON when ON.
-
-### Modality test results (2026-05-21)
-
-Per the "use real prompts that match the inputs" rule (memory `feedback_phosphene_test_prompts.md`). All tests used a bizarrotrn wood-paneled-room reference frame + matching prompts.
-
-| Modality | Result | Wall | Notes |
-|---|---|---|---|
-| T2V Character HQ | ✅ | 306 s | `TI2VidTwoStagesHQPipeline`, 1024×576 121f, no hang |
-| A2V (after fix) | ✅ | 395 s | 1024×576 121f + ref + voice clip; output h264+AAC 5.01 s |
-| FFLF | ✅ | 265 s | Cover-cropped to 768×448 (tier_max_dim); output h264+AAC 5.01 s |
-| Extend (after fix) | ⚠️ output OK | denoise 10:23 → decode 16 s → **hangs** | Same post-decode hang as I2V Balanced. Output IS written before hang; killed helper to recover. Documented in ROADMAP. |
-| Qwen Edit | ✅ | 1477 s (includes 16-file model download on first run) | 2× 1280×720 PNGs, valid |
-| HiDream Medium | ✅ | 239 s | 2× 2560×1440 PNGs, snapped to trained dim |
-| I2V Balanced | ❌ (deferred) | — | Known hang, see ROADMAP §post-decode hang |
-
-### Fixed this week
-- **Y1.034 silent regression**: VAE temporal-streaming patch tiled even on short clips, adding ~30 s decode tax. Fixed in Y1.037 with auto-mode threshold.
-- **Y1.024 Extend regression**: my own download-filter pruned `transformer-dev.safetensors` from Q4 dir, breaking Extend mode for Q4-only installs. Fixed in Y1.036 by routing Extend to Q8.
-- **I2V tail stall**: 60+ s frozen final-step on long I2V renders. Fixed in Y1.034 (free DiT before VAE decode).
-- **Now-card progress bar mis-paced**: Quick crawled, High blasted past 99%. Fixed in Y1.039 with phase-aware + denoise-step-aware computation.
-- **New clips appeared black for 2–3 minutes**: gallery race + browser cache holding incomplete bytes. Fixed in Y1.039 with in-flight skip + mtime cache-bust + `Cache-Control: no-cache`.
-- **S2 noir dialogue attribution swap**: "Same thing, honey" delivered by wrong character. Root cause: prompt format diverged from LTX docs. Documented in Linear HAI-152.
-- **v2.0.2 install sanity check broken by em-dash**: Pinokio shells mangled the unicode em-dash, triggering Python SyntaxError, falsely failing every install. Fixed in v2.0.4 (ASCII colon).
-
-### Fixed 2026-05-17 (Codex C+ UI restructure + Train Character + LoRA chrome session)
-
-The biggest single-day refactor since v2.0.6. Driven by Codex's C+ recommendation (Q4 panel as separate surface from Q8 panel — see `lora-lab/PHOSPHENE_UX_Q4_VS_Q8_BRIEF.md`). 30+ commits today. Root cause + fix per bug:
-
-- **Player aspect-ratio cropped vertical clips** — `.player-surface` was hardcoded `aspect-ratio: 16/9` + `object-fit: cover`. A 9:16 / 576×1024 clip got head-to-toe cropped. Fixed by reading natural dims on `loadedmetadata` into a `--media-aspect` CSS prop + flipping to height-driven sizing for verticals. Object-fit also switched to `contain` as a safety net. Commit `4987022`.
-- **Expand button was inline-positioned (not a modal)** — `.expand-lightbox` had no CSS rules at all. Clicking Expand dropped the `<video>` at native dims inline somewhere on the page. Now styled as a real fullscreen modal (position fixed, dark backdrop, z 200, close button, Esc + backdrop-click already worked). Commit `4987022`.
-- **`/output/delete` orphaned the raw mp4** — after an upscale pass, only the clicked file + its sidecar moved to Trash. The hidden native `<base>.mp4` (kept on disk for restore-from-source) stayed. Now collects every companion via sidecar fields + filename heuristic (`UPSCALE_TAGS = (720p, v720p, up2x)`). Commit `0dba2dc`.
-- **`/sidecar` 404'd on raw card** — after an upscale, the sidecar lives next to `<base>_720p.mp4`, not `<base>.mp4`. Clicking Load Params on a raw card → 404 → loadParams() bails silently. `/sidecar` now walks the same `UPSCALE_TAGS` family. Commit `331795a`.
-- **`/stop` didn't kill training subprocess** — face + audio trainer Popens were inherited into the panel's process group. `/stop` killed HELPER + mux ffmpeg but the trainer ran for hours. Both Popens now use `start_new_session=True`; `STATE["train_pgid"]` tracked; `stop_current_job()` SIGTERMs via killpg with 8s SIGKILL fallback. Commit `b6d1222`.
-- **`/queue/batch` silently rendered 5s clips when caller sent `duration=10`** — `make_job` reads `frames` directly from form (default 121 = 5s). The UI JS does duration→frames math client-side, but `/queue/batch` from curl skips that. Now: if `duration` is set + `frames` isn't, derive frames via `_duration_to_8k_frames`. Commit `038a0a1`.
-- **Train Character High preset subtitle skew** — UI said `~4 h · rank 32 · 768px` while canonical Python preset is `rank 32 · 5000 steps · 512px · ~2h50m`. Fixed HTML + JS copy. Commit `4255f12`.
-- **Dual quality strip rendered on top of each other** — `_applyCharacterQualityStripVisibility()` set `hidden` on the unwanted strip, but `.quality-strip { display: grid }` outranked the user-agent `[hidden] { display: none }` at CSS specificity (0,0,1,0) vs (0,0,0,0). Both strips visible at once. Fixed with `.quality-strip[hidden] { display: none !important }`. Commit `7bd5057`.
-- **Train tab voice toggle defaulted OFF** — even when a voice clip was uploaded, users had to manually click the toggle to enable audio training. Now defaults ON; the disabled state until upload still prevents submission without a clip. Commit `ea2cf02`.
-- **caption_strategy="user_provided" rejected by trainer** — panel auto-fills missing captions then sets `caption_strategy=user_provided`. lora_lab rejected the value ("unknown caption_strategy") and exited code 1 immediately. Mr Bizarro's Eltrumpo run was the first to hit this (auto-caption produced 37 user .txt files). Fixed in lora-lab (commit `b04eaab` on `feat/train-character-cli`): alias map `'user_provided' → 'class_word'` + `'trigger_simple' → 'class_word'`. Commits in this repo: `8b5a3cf` (the eventual panel-side defense-in-depth).
-- **Q4-distilled inference of dev-trained character LoRAs gave generic-Trump output** — character LoRAs were silently routed through the Q4 pipeline when `quality=balanced`, but their training base is the Q8 dev transformer with full sigma schedule + CFG. Fused into distilled = wrong base = identity barely locks. UI now forces Q8 chips when a character is selected; backend rejects `character_id + quality != high`. Commits `1d7983a`, `8b5a3cf`.
-- **HQ-speed Fast pill was inactive at boot** — the boot cascade ran `_applyCharacterQualityStripVisibility()` with no character selected → else branch fired `_setSkipStepEnabled(false)` → removed `.active` from the HTML-default Fast pill → first character render missed the Codex 12% optimization. Fixed in two commits: `1056c99` (stopped the row-visibility helper from touching skip-step) and `04d2ffd` (stopped the character cascade else branch from touching skip-step too; HQ-speed pill in Customize is now the single source of truth).
-
-### Fixed in v2.0.6 (May 8 2026)
-
-Image Studio + agent quality pass shipped to `dev` across ~18 commits. Each root cause + fix:
-
-- **klein-4B prompt structure mismatch** — outputs from other tools (Draw Things) at the same model + ref looked visibly better than ours. Two implementation bugs: prompts didn't follow klein-4B's preferred subject → environment → style → technical hierarchy, AND default quantization was Q4. Fixed in `agent/prompts.py` (taught the structure) + Q6 default in `ImageEngineConfig.mflux_quantize`.
-- **Q4 stylization artifact** — Apple-Silicon community sweet spot is Q6 (~4-6% quality loss vs Q4's 8-12%). Per-image speed gap is 1-2 s on M4 Max. Q6 is the new default for mflux across the board. Draw Things ships Q5/Q6 by default for the same reason.
-- **Image jobs invisible in Now / Queue / Recent / Logs** — `/image/generate` was a synchronous HTTP endpoint that bypassed the queue/worker entirely. Image renders never appeared anywhere in the panel's job-tracking surfaces. Fixed by routing `mode='image'` jobs through `make_job` + a new `run_image_job_inner` that calls `agent_image_engine.generate()` with the same on_log → push() bridge so panel Logs streams live. `/image/generate` kept synchronous for agent callers; `_IMG_STUDIO_LOCK` arbitrates between the two paths.
-- **Image Studio's redundant in-pane gallery** — deleted now that the unified Recent tab can render image-mode jobs. Outputs land in the unified gallery alongside videos.
-- **Original beach.mp4 "barely moves, just a zoom out" bug** — the agent reused the still prompt verbatim for the i2v video render. Result: zero motion verbs in the i2v prompt, ~4 seconds of an almost-static frame. Fixed by adding a "Phase C — Writing prompts FOR i2v VIDEO renders" section to `agent/prompts.py` that forbids still-prompt reuse, requires explicit motion beats (~1 beat / 2-3 sec), and includes a director-rewrite checklist before each `submit_shot`.
-- **The 400×400 still-output mystery** — `flux2_edit` family was referenced in saved configs but never wired into `image_engine.py`. The fam fell through to "flux2" via inference; `mflux-generate-flux2` doesn't take `--image-paths`, so refs were silently dropped → output downsized to ref dim. Fixed by adding `flux2_edit` to `MFLUX_FAMILY_BIN` + `MFLUX_FAMILY_DEFAULTS`, routing refs to `--image-paths` for fam in (`qwen_edit`, `flux2_edit`), `--image-path` (singular) for `kontext`. Also added non-distilled photoreal presets (`flux2_edit_high`, `kontext_high`) — the previous engine_override list was all distilled (illustrative-cartoon look).
-- **Issue #2 (Akossimon's Metal abort crash)** — mflux SIGABRTs mid-Metal when 24 GB Qwen-Edit is asked to run with 8 GB free. The Python interpreter can't catch SIGABRT; mflux exits -6 and the panel UI shows nothing. Fixed: pre-flight RAM/disk check refuses jobs that can't fit before mflux launches, AND a SIGABRT detector in `agent/image_engine.py` raises a `RuntimeError` with an actionable OOM hint when mflux reaps -6. Report-bug button gives users a one-click GitHub-issue flow with sysinfo + log tail + .ips bundle.
-- **`auto_pause_during_renders` killed mid-batch agent calls** — chat engine got stopped the moment the first job hit the LTX worker, so the agent's next `submit_shot` chat call failed with "Connection error" (in the wild: queued 1 of 5 planned shots). Fixed: new `submit_shots` plural tool batches the entire plan in one dispatch + sets `_finish_after_turn` flag the runtime honors as loop-exit. Prompts.py teaches the agent to use `submit_shots` for any 2+ shot batch.
-- **`submit_shot` silently coerced invalid accel values** ("distilled" → "turbo"). Strict validation now rejects unknown values with a clear message; "exact" accepted as a friendly alias for "off".
-- **Agent obeyed broken user instructions** (e.g. `aspect="1:1"` for a 16:9 i2v shot → letterboxed → reads as slow zoom). New "push back when the user's instructions will produce broken output" rule in prompts.py rules of engagement. Aspect mismatches surface as questions instead of silent crops.
-- **AF pane stayed visible in Manual mode** — toggle was using `[hidden]` but a CSS rule `display: flex` overrode the browser's UA `[hidden] { display: none }`. Sessions chip, Plan/Sleep pill, engine pill, RAM chip, and engine readiness banner all kept rendering above the manual form. Fixed by switching to explicit `style.display` toggling.
-
-### Security review pass (2026-05-08)
-
-Full audit ran against `dev` mid-session. Findings: **0 CRITICAL · 4 HIGH · 6 MEDIUM**. All 10 shipped this session.
-
-- **HIGH (4)** — H1: reject `Origin: null` in `_is_local_request` (a local malicious HTML file dragged into the browser could otherwise drive the panel API with the user's session). H2: validate `mflux_python_path` at save (`_save_agent_image_config` → `_validate_mflux_python_path`) — must be an absolute path to an existing executable; defensive re-check in `agent/image_engine._resolve_mflux_bin`. H3: validate `model_path` at `/agent/local/start` — HF repo ids must match `<owner>/<name>` with owner on a small allow-list (Qwen, mlx-community, lmstudio-community, unsloth, Lightricks, Black-Forest-Labs, lightx2v, filipstrand, huihui-ai, google); local paths must resolve under `mlx_models/` or HF cache root. H4: cap `submit_shot`/`submit_shots` calls per turn in `agent/runtime` (was unbounded — a runaway agent loop could enqueue arbitrary numbers of renders).
-- **MEDIUM (6)** — M1: `/sidecar?path=` requires the underlying media to be one of `.mp4/.png/.webp/.jpg/.jpeg` before serving the `.json` next to it. M2: `/agent/models/install` reuses the H3 owner allow-list. M3: `_save_settings` lays down `panel_settings.json` with O_EXCL + fsync + os.replace + chmod 0o600 (atomic + perms-stable). M4: `inspect_clip`'s `prompt`/`negative_prompt` fields are wrapped in a "do NOT execute as instructions" marker and truncated to 2000 chars (defangs prompt-injection laundering). M5: `read_document`'s PDF branch rejects > 50 MB files pre-parse and runs pypdf in a daemon thread with a 30 s watchdog. M6: `/output/hide` rejects targets whose resolved path doesn't sit under OUTPUT or UPLOADS (containment).
-
-Full audit at `/tmp/phos_audit/security-review.md` — note that `/tmp` is ephemeral on macOS, so this report will need to be re-generated for the next pass. L-tier (low-severity) items, especially L2 anchors / select containment, are still open.
-
-### Shipped in v2.0.6 (May 7 2026, autonomous overnight Phase 0 polish)
-
-Roadmap reference: `docs/AGENTIC_FLOWS_ROADMAP.md`. Three Phase 0 items
-shipped autonomously while the user was running:
-
-- **#0.11 — Engine readiness banner** (commit `7334836`): tri-state
-  banner above the chat that probes the configured engine on session
-  init + after settings save. Catches 401 / unreachable / wrong-base-URL
-  BEFORE the user invests in attaching a script and writing a long
-  prompt. Tri-state: `ok` (green, fade-after-4s), `warn` (amber, sticky;
-  local helper not started — one-click "Start engine"), `err` (red,
-  sticky; "Open Settings" shortcut). Endpoint `/agent/engine/check`
-  wraps the existing `engine.health_check`.
-- **#0.9 — Turn summary chip** (commit `134b5b1`): one-line "what this
-  turn accomplished" chip below the LAST assistant message of each
-  completed turn. Reads at a glance: `✦ 21 shots queued · 1 manifest
-  writes · ✓ finished`. Walks `rendered_messages` once, pairs each
-  `tool_result` with the preceding `assistant.tool_call.tool` (same
-  pattern as the Stage activity feed). Verified against the CAD
-  session (8 turns, 47 submit_shots).
-- **#0.10 — Inline wall-time predictor** (commit `43a7c3b`): two
-  surfaces. Tool-call cards for `submit_shot` / `estimate_shot` now
-  render the predicted wall inline with the args
-  (`submit_shot · S5 motorhome — 6s i2v balanced · ~4m 45s`); batch-bar
-  above the composer sums predicted wall across PENDING picks
-  (`12 anchors picked · ready to render · ~57m 24s total`). JS predictor
-  mirrors `agent/tools.py::_estimate_wall_seconds` byte-for-byte (T^1.5
-  length scaling, accel discounts, mode/quality table, sharp upgrade);
-  verified across 6 cases — both implementations match exactly.
-
-Cumulative Phase 0 ships in this rolling polish session (v2.0.5 →
-v2.0.6): items #0.5 (`/help` slash + capabilities sheet), #0.6
-(a11y floor: `:focus-visible` + `prefers-reduced-motion` +
-`role="log"` + `aria-live`), #0.12 (atomic project-notes ring buffer),
-#0.11, #0.9, #0.10 — six of twelve Phase 0 rows shipped. Remaining:
-#0.1 SSE streaming (L), #0.2 server-side cancel (M), #0.3 recoverable
-error cards (M), #0.4 first-run tour (M), #0.7 session restore on
-panel restart (M), #0.8 default-engine recommendation banner (S).
-
-### Fixed in v2.0.5 (May 6–7 2026, agentic-flows polish session)
-- **Stage NOW RENDERING stuck at 0%**: `current.progress` schema went from flat float to structured object (`{phase, phase_label, pct, elapsed_sec, eta_sec, denoise_step}`). Stage pane was calling `Number(progressObj)` → NaN → 0%. Fixed by reading `.pct` directly with backward-compat fallback to flat float.
-- **Offline banner was a 1990s solid-red bar**: floating Phosphene-pill at top-center, pulsing logo icon, three-part text, slide-in animation.
-- **Typing indicator stuck on "Drafting plan"**: only re-evaluated when message count grew. Now refreshes every 1.5s with elapsed seconds appended after 6s ("Thinking · 12s") and contextual phrases like "Calling submit_shot", "Queued ce5c, planning next".
-- **Auto-scroll fought the user**: every async render did `scrollTop = scrollHeight`, yanking users back when scrolled up. Now uses scroll-pinning — auto-scroll only when within 80px of bottom; "↓ New messages" pill appears otherwise.
-- **No abort on long turns**: × button on typing row aborts in-flight fetch via AbortController. Server-side run_turn keeps stepping until it finishes (no kill switch in runtime today); UI is unstuck immediately.
-- **Tool cards visually outweighed prose**: 3px accent borders + bold accent-bright + monospace 12px overpowered the assistant's planning text. Now muted 2px, smaller, near-transparent — reads as side metadata.
-- **Anchor selection only changeable, never removable**: re-clicking the same anchor un-picks it. Per-grid pick-state badge ("✓ picked" / "click to pick") visible at all times. Backend accepts empty `png_path` as remove signal.
-- **No batch trigger**: "Queue them" pill above composer when picks > submitted_shots. One-click injects a structured message authorizing the agent to submit each pick as i2v.
-- **Multiple takes lost previous**: same-label calls overwrote candidates. New `append:true` arg writes under `take_NN/` subdir + appends to `takes` array. Chat renders all takes stacked with "Take N / M" labels.
-- **Memory crashes from OOM**: macOS suspended Claude.app at 83 GB while LTX rendered + Qwen 35B occupied 22 GB. Memory guard now refuses to auto-spawn engine at >92% pressure or >8 GB swap. Plan-and-sleep mode auto-stops engine after `finish` so RAM goes back to renderer.
-- **Reasoning models returned empty content** (CRITICAL — found May 7 1am during overnight session): Qwen 3.6 Abliterated splits output into `message.reasoning` + `message.content`. With `max_tokens=3072`, reasoning consumed budget and content came back empty with `finish_reason="length"` → runtime saw empty assistant message → ended turn. Agent appeared "stuck". Fixed: bumped default to 8192, engine.chat() now reads reasoning, raises actionable error on length truncation, falls back to reasoning when content is empty.
-- **Agent identity drift**: avatar was orange "C" reading as generic chat bot. Now circular Phosphene logo (favicon glyph), label "Phosphene". Identity is the brand, not the underlying model.
-
-### Open / partially understood
-- **KTDS install case** (Linear HAI-156): user reported `ModuleNotFoundError: No module named 'ltx_pipelines_mlx'` after a "green" install. Symptom is now possibly explained by the v2.0.2/v2.0.3 em-dash bug (the sanity check itself was broken, install completed green for the wrong reason). Asked for log tail + VERSION; pending response. Suggested fix: Reset → Install on v2.0.4.
-- **Qwen 3.6 Abliterated reasoning loops** (May 7 overnight session): Qwen 3.6 routinely emits 40k+ char chain-of-thought when planning multi-shot batches in long-context sessions. Even with `max_tokens=12000` and `DEFAULT_TIMEOUT_S=900`, a single turn can exhaust both. The new reasoning-aware engine.chat() raises an actionable error pointing the user to bump max_tokens, but for a recursive thought spiral no token budget is enough. Workarounds for the next session:
-  - **Recommend Gemma 12B for the agent** when the task is "queue 20+ shots". Already on disk at `mlx_models/gemma-3-12b-it-4bit`, no reasoning blocks, responds directly. 7.5 GB resident vs Qwen's 22 GB.
-  - **Or Anthropic API (claude-sonnet-4-5)** — paid, fast, no local reasoning block.
-  - **Smaller batches**: trigger 5 shots at a time in plain text (avoids long planning turns). Confirmed working tonight: agent submitted S1-S5 (News Intro, Wife LLM Monitor, Inpatient Toaster, Wife Coffee Variables, Psychiatrist Uptime) in one focused trigger before hitting the next reasoning-loop.
-  - **System-prompt injection** to discourage over-thinking: "Do not deliberate; emit the action block immediately." Untested as of 2026-05-07; worth a try.
-  - Future: detect reasoning-token consumption mid-stream + tool-loop checkpoint after each submit_shot so a long-running planner doesn't lose its place.
-
+#### Pre-semver Y1.NNN line (Apr 28 – May 3)
+- **Y1.001 → Y1.013** — first usable T2V/I2V; audio SHIP-BLOCKER fixed by pinning `mlx==0.31.1` (0.31.2 attenuated the vocoder by 22 dB).
+- **Y1.014 → Y1.024** — hardware-tier system, Boost/Turbo speed modes, CivitAI LoRA browser, Q8 two-stage HQ tier, FFLF + Extend, `hf_transfer`, Q4/Q8 download filter (~80 GB saved on existing installs).
+- **Y1.025 → Y1.035** (Codex-led) — Sharp upscale (PiperSR), I2V tail-stall fix (`Y1.034`, free DiT before VAE decode), VAE temporal-streaming (`Y1.035`), license/install hardening.
+- **Y1.036 → Y1.039** — fixed the `Y1.024` Extend regression (route to Q8), VAE auto-streaming threshold (recovered ~7% on short clips; the `Y1.034` patch had tiled even short clips for a ~30 s tax), Now-card progress-bar rewrite (phase + denoise-step aware), gallery black-frame race fix.
+- **S2 noir dialogue attribution swap** — wrong character delivered "Same thing, honey"; root cause was prompt format diverging from LTX docs. Linear HAI-152.
 ## 8. Open work / future direction
 
 Everything below is also tracked in Linear (HAI-150 → HAI-158 under the Phosphene project). This section duplicates the most current state for fast scan.
@@ -727,7 +563,7 @@ research-grade work on token merging.
 - **Apple Silicon (M1+) only**. No PyTorch, no CUDA, no MPS shim. Native MLX or it doesn't ship.
 - **Joint audio + video must remain**. That's the differentiator vs Wan / Hunyuan / Mochi. We don't drop audio for length.
 - **Existing queue + helper + patch architecture stays intact**. No new microservices.
-- **Branch policy**: dev → main only via fast-forward, only with Mr Bizarro's explicit OK.
+- **Branch policy** (post-2026-05-22 split, see §1): there is **no public `dev`** branch — it was deleted. Daily work goes to private `beta/main` (the local `dev` clone tracks it). **Promotion to PUBLIC `main` is the gated step — only with Mr Bizarro's explicit OK.**
 - **Mr Bizarro's voice in writing**: copy-edit, don't rewrite. See memory file `feedback_copy_edit_dont_rewrite.md`. Tweets, posts, README copy — fix typos and grammar, never restructure or stack value-prop language.
 
 ## 10. Memory pointers (for next-Claude)

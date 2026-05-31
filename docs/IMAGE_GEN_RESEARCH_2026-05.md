@@ -1,5 +1,11 @@
 # Phosphene Image-Gen Research — Apple Silicon, May 2026
 
+> ⚠️ **Historical research (2026-05) — SUPERSEDED.** The shipped Image Studio
+> default is **Qwen-Image-Edit** with a Lightning 4-step fast tier; **HiDream is
+> hidden** pending its lab repo (issue #15); **FLUX was removed 2026-05-13.** This
+> doc records the point-in-time research that informed those decisions, not the
+> current state — see `docs/STATE.md` for what actually ships.
+
 _Tier-aware research for the agent's anchor-still pipeline (i2v inputs).
 LTX 2.3's t2v is weak; image-gen quality is the dominant lever for video output._
 
@@ -8,7 +14,7 @@ LTX 2.3's t2v is weak; image-gen quality is the dominant lever for video output.
 - **"Flux Klein"** = **FLUX.2 [klein] 4B** by Black Forest Labs (Jan 2026). Apache 2.0, mflux-compatible at 4-bit (~4.3 GB), 4-step inference, ~12-18 s/image on Comfortable Mac. **Ship as default.**
 - **mflux 0.17.x is now multi-family.** Legacy `mflux-generate` is FLUX.1-only. New CLIs: `mflux-generate-flux2`, `mflux-generate-z-image-turbo`, `mflux-generate-fibo`, `mflux-generate-qwen`, `mflux-generate-kontext`. Panel currently calls legacy → silently misses every new family.
 - **Z-Image-Turbo (Tongyi/Alibaba, Nov 2025)** is the Compact-tier default — 6B model, ~5.9 GB at 4-bit, 8-9 steps, fits 16 GB.
-- **HiDream-O1-Image-Dev (May 2026 addition)** — 8B Qwen3-VL pixel-patch transformer, MIT licence, runs out of a separate lab venv (NOT mflux). **Q6 default** (~8 GB, ~36 s / 1024×1024) — 2× faster than Q8 with equivalent fidelity (mlx is bandwidth-bound). Strong prompt fidelity across all genres tested. Available as `kind="hidream"` in `agent/image_engine.py` since commit 45cad69.
+- **HiDream-O1-Image-Dev (May 2026 addition)** — 8B Qwen3-VL pixel-patch transformer, MIT licence, runs out of a separate lab venv (NOT mflux). **Q6 default** (~8 GB, ~36 s / 1024×1024) — 2× faster than Q8 with equivalent fidelity (mlx is bandwidth-bound). Strong prompt fidelity across all genres tested. Available as `kind="hidream"` in `image_engine.py` since commit 45cad69.
 
 ## The single default to ship
 
@@ -88,7 +94,7 @@ All share the same argparse mixins — `--prompt`, `--negative-prompt`, `--width
 
 mflux is great but only ships diffusion-based families. **HiDream-O1-Image-Dev** is a different beast: a single 8B Qwen3-VL backbone that does pixel-level patch generation directly (no separate VAE), distilled from a 50-step teacher into a 28-step student via flow matching. License is MIT (cleaner than FLUX.2-dev's NC).
 
-The lab port lives outside Phosphene at `~/HIDREAM-O1-MLX-LAB-active/` so its mlx-vlm dep tree doesn't fight Phosphene's ltx-2-mlx env. Phosphene shells out to the lab's python via subprocess (mirrors mflux pattern). Module path: `agent/image_engine.py`, `kind="hidream"`.
+The lab port lives outside Phosphene at `~/HIDREAM-O1-MLX-LAB-active/` so its mlx-vlm dep tree doesn't fight Phosphene's ltx-2-mlx env. Phosphene shells out to the lab's python via subprocess (mirrors mflux pattern). Module path: `image_engine.py`, `kind="hidream"`.
 
 ### Why ship it alongside mflux
 
@@ -116,7 +122,7 @@ The lab port lives outside Phosphene at `~/HIDREAM-O1-MLX-LAB-active/` so its ml
 
 ## Implementation plan (20 ranked items)
 
-1. **(M)** Family-aware `_resolve_mflux_bin` in `agent/image_engine.py:131` + new `MFLUX_FAMILY_BIN` lookup table. Without this, none of the 0.17 families are reachable.
+1. **(M)** Family-aware `_resolve_mflux_bin` in `image_engine.py:131` + new `MFLUX_FAMILY_BIN` lookup table. Without this, none of the 0.17 families are reachable.
 2. **(M)** Per-family default-flag table in `_generate_mflux`. klein-4B uses 4 steps + guidance 1; Z-Image-Turbo uses 9 steps + guidance 0; Krea-dev keeps 25 + guidance 4.5.
 3. **(L)** Tier auto-detect via `_default_image_engine_for_tier` in `mlx_ltx_panel.py:~2042`. Apply at first boot when `agent_image_config.json` doesn't exist.
 4. **(M)** Add FLUX.2-klein-4B to the model dropdown — `mlx_ltx_panel.py:10881`. Add `<optgroup>` per family.
@@ -131,7 +137,7 @@ The lab port lives outside Phosphene at `~/HIDREAM-O1-MLX-LAB-active/` so its ml
 13. **(M)** Sibling venv `image-gen/env/` so mflux deps don't conflict with LTX's transformers/mlx pins. `_resolve_mflux_bin` checks there first.
 14. **(S)** HF gating UX — when `_hf_size_estimate` returns `gated: true`, surface "Open HF model card → accept terms → paste HF_TOKEN" inline.
 15. **(S)** Update `docs/AGENTIC_FLOWS.md § Image generation backends` — document family dispatch, tier defaults, deprecate legacy `mflux-generate`-only path.
-16. **(S)** Update `agent/image_engine.py:1-28` module docstring — current still says "Two backends ship in v1: mock, bfl" with mflux as "future".
+16. **(S)** Update `image_engine.py:1-28` module docstring — current still says "Two backends ship in v1: mock, bfl" with mflux as "future".
 17. **(M)** Tier-aware default for `ImageEngineConfig.mflux_model` (was `"krea-dev"` — wrong for 16 GB Macs).
 18. **(L)** "Compare models" Settings page — runs test prompt across 3 picks side-by-side, click to set as default.
 19. **(L)** Add `mflux-upscale-seedvr2` as post-render option for image candidates.

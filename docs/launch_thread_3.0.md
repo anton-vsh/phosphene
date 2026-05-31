@@ -1,5 +1,11 @@
 # Phosphene 3.0 launch thread — draft
 
+> 📌 **Snapshot: this was the v3.0.0 launch draft (2026-05-18).** The Image
+> Studio engine roster has changed since — HiDream was later hidden (issue #15)
+> and FLUX was removed. Tweets 5 and 7 describe engines that no longer ship as
+> stated. See `docs/STATE.md` for the current engines. This file is preserved as
+> historical launch copy; the tweets are not edited.
+
 Twelve tweets. Each ≤ 280 chars. Bracketed `[MEDIA]` notes mark where Mr Bizarro plugs a clip or screencast. Before/after framing per Mr Bizarro's brief — everything claimed here is verified against the panel as it ships.
 
 The thread should run on `@PhospheneAI` (and optionally cross-posted to `@AIBizarrothe`).
