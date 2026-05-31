@@ -125,6 +125,17 @@ def emit(event: dict) -> None:
         with _emit_lock:
             _real_stdout.write(json.dumps(event) + "\n")
             _real_stdout.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        # 2026-05-31 review fix: the panel pipe is gone — the parent died or
+        # closed our stdout. Holding on just orphans a 20-30 GB helper that
+        # the idle reaper won't reap for up to LTX_IDLE_TIMEOUT (default 30
+        # min), pinning unified memory the whole time. Exit immediately. Use
+        # os._exit so we skip atexit/MLX-Metal teardown that can itself hang
+        # on a half-torn pipe.
+        try:
+            os._exit(0)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1699,6 +1710,63 @@ def configure_acceleration(mode: str) -> str:
     return requested
 
 
+# ---- ltx-2-mlx version gate (2026-05-31 review fix) --------------------------
+# ROOT CAUSE of every recent fire (#5, #9, accel regression): the helper
+# monkey-patches a MOVING upstream (ltx-2-mlx) at runtime, the v0.14.0 "pin"
+# is structurally leaky, and nothing asserted what's actually installed. The
+# vendored clone has been observed dirty-but-reporting-0.14.0 on this very
+# machine. This gate reads the installed package metadata at boot, compares to
+# the pin Phosphene's patches are written against, and makes ANY skew loud +
+# visible in the ready event (so every remote bug report carries it) instead
+# of letting it surface as an un-triageable TypeError mid-render.
+_LTX_EXPECTED_VERSION = "0.14.0"
+
+
+def _detect_ltx_version() -> dict:
+    """Best-effort: what ltx-pipelines-mlx is actually importable right now.
+
+    Returns {version, expected, match, note}. Never raises — a detection
+    failure is itself reported, not swallowed.
+    """
+    info = {"version": None, "expected": _LTX_EXPECTED_VERSION, "match": None, "note": ""}
+    # 1. Package metadata (authoritative for `pip install`-ed dist).
+    try:
+        import importlib.metadata as _md
+        for _dist in ("ltx-pipelines-mlx", "ltx_pipelines_mlx", "ltx-core-mlx"):
+            try:
+                info["version"] = _md.version(_dist)
+                break
+            except Exception:
+                continue
+    except Exception as exc:
+        info["note"] = f"metadata probe failed: {exc}"
+    # 2. Module __version__ as a cross-check — ONLY if ltx_pipelines_mlx is
+    #    already imported. We deliberately do NOT import it here: forcing the
+    #    MLX import chain at boot would add startup latency and side-effects.
+    #    The metadata probe above is authoritative for the installed version;
+    #    this is a free bonus cross-check when the module happens to be loaded.
+    try:
+        _lpm = sys.modules.get("ltx_pipelines_mlx")
+        mod_v = getattr(_lpm, "__version__", None) if _lpm else None
+        if mod_v and info["version"] and mod_v != info["version"]:
+            info["note"] = (info["note"] + f" module __version__={mod_v} "
+                            f"disagrees with metadata={info['version']}").strip()
+        if mod_v and not info["version"]:
+            info["version"] = mod_v
+    except Exception:
+        pass
+    info["match"] = (info["version"] == _LTX_EXPECTED_VERSION)
+    return info
+
+
+_LTX_VERSION_INFO = _detect_ltx_version()
+if not _LTX_VERSION_INFO["match"]:
+    emit({"event": "log",
+          "line": (f"⚠️ ltx-2-mlx VERSION SKEW: installed={_LTX_VERSION_INFO['version']} "
+                   f"expected={_LTX_EXPECTED_VERSION} — runtime patches are written "
+                   f"against {_LTX_EXPECTED_VERSION}; behavior on this version is "
+                   f"unvalidated. {_LTX_VERSION_INFO['note']}".strip())})
+
 # ---- ready -------------------------------------------------------------------
 emit({
     "event": "ready",
@@ -1706,6 +1774,9 @@ emit({
     "gemma": GEMMA_PATH,
     "low_memory": LOW_MEMORY,
     "idle_timeout_sec": IDLE_TIMEOUT,
+    "ltx_version": _LTX_VERSION_INFO["version"],
+    "ltx_version_expected": _LTX_EXPECTED_VERSION,
+    "ltx_version_match": _LTX_VERSION_INFO["match"],
 })
 
 
@@ -2396,7 +2467,7 @@ for line in sys.__stdin__:
             pipe = HDRICLoraPipeline(
                 model_dir=Path(model_dir),
                 lora_paths=resolved,
-                low_memory=HELPER_LOW_MEMORY,
+                low_memory=LOW_MEMORY,
             )
             emit({"event": "log",
                   "line": f"step:generate_hdr {p['width']}x{p['height']} "
