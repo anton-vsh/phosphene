@@ -221,7 +221,13 @@ module.exports = {
           //   - transformers (5.7.0+)    wants >=1.5.0,<2.0
           //   - smolagents 1.24.0        warns about <1.0 but works
           //   - hf download CLI          needs v1+ for the new command name
-          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0'",
+          // 2026-05-31 review fix (E3): pin `certifi` explicitly. start.js
+          // points SSL_CERT_FILE at certifi's cacert.pem (the v3.0.4 fix for
+          // the CivitAI CERTIFICATE_VERIFY_FAILED on uv-Python). certifi was
+          // only ever a transitive dep — if a future dep change drops it, the
+          // SSL_CERT_FILE path vanishes and ALL panel stdlib HTTPS breaks.
+          // Naming it here keeps the cert bundle guaranteed-present.
+          "uv pip install --python env/bin/python certifi pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0'",
           // v2.0.3: post-install confirmation that the local packages
           // actually landed in site-packages. The Y1.034+ patch script's
           // i2v target tolerates a missing ltx_pipelines_mlx — without

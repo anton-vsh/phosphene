@@ -125,6 +125,16 @@ module.exports = {
         message: "./ltx-2-mlx/env/bin/pip install --upgrade 'hf_transfer>=0.1.6'"
       }
     },
+    // 2026-05-31 review fix (E3): ensure certifi is present on every update.
+    // start.js points SSL_CERT_FILE at certifi's cacert.pem (v3.0.4 fix); if
+    // certifi is ever absent, that path vanishes and ALL panel stdlib HTTPS
+    // breaks. Naming it explicitly keeps the cert bundle guaranteed-present.
+    {
+      method: "shell.run",
+      params: {
+        message: "./ltx-2-mlx/env/bin/pip install --upgrade certifi"
+      }
+    },
     // litellm: replaces the stdlib urllib chat client in agent/engine.py
     // with a multi-provider router (free retries, normalized errors,
     // single abstraction for OpenAI / Anthropic / Ollama / mlx-lm.server).
