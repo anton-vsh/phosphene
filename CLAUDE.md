@@ -197,7 +197,7 @@ These are not arbitrary — every pin is a paid lesson:
 | `mlx==0.31.1` | mlx 0.31.2 introduced a numerical regression that attenuates LTX 2.3 vocoder output by ~22 dB. Verified: same model + same prompt + same seed → -42 dB peak on 0.31.2 vs -9 dB peak on 0.31.1. |
 | `mlx-lm==0.31.1` `mlx-metal==0.31.1` | Same release line, kept consistent with mlx. |
 | `huggingface-hub>=1.0` | `hf` CLI replaced `huggingface-cli`; older Pinokio bundles ship < 1.0. |
-| `ltx-2-mlx` at `main` (HEAD) | dcd639e (0.1.0) was tried as a pin during audio investigation but breaks the Extend `cfg_scale` API and forces a `transformer.safetensors` symlink hack. HEAD + the mlx pin is the right combination. |
+| `ltx-2-mlx` PINNED to **`v0.14.0`** (commit `b35254a`) | install.js + update.js do `git checkout v0.14.0`. This is NOT "main HEAD" — that was the old pre-pin policy and is wrong now (corrected 2026-05-31). v0.14.0 ("ultra-strict iso on frame_rate") is the last tag the panel + helper + patch_ltx_codec.py were validated against; dgrauet asked to lock onto a tag 2026-05-12 before pushing breaking changes. Bumping the pin (e.g. → v0.14.8, deep-review Phase 4) is a deliberate, tested operation — read the release notes, smoke-test on beta, bump BOTH install.js and update.js in one commit. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
 
 When changing a version, document the test that proved the new pin is OK.
 

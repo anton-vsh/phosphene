@@ -55,6 +55,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -131,8 +132,12 @@ def serve_reference(local_path: str):
         def do_GET(self):
             # Only the exact reference file is served — everything else 404s,
             # so the parent dir can't be walked even if a crafted path slips
-            # past SimpleHTTPRequestHandler's traversal guard.
-            req = self.path.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+            # past SimpleHTTPRequestHandler's traversal guard. unquote() so a
+            # percent-encoded request (spaces → %20, etc.) matches the raw
+            # filename — without it, any name with a space/%/#/Unicode 404s
+            # (v3.0.7 review P3).
+            req = urllib.parse.unquote(
+                self.path.split("?", 1)[0].split("#", 1)[0]).lstrip("/")
             if req != target_name:
                 self.send_error(404, "not found")
                 return
@@ -150,11 +155,15 @@ def serve_reference(local_path: str):
     try:
         port = srv.server_address[1]
         base = _lan_addr()
+        # Percent-encode the filename (v3.0.7 review P3) so spaces / % / # / ?
+        # / Unicode in the reference clip name produce a valid URL the remote
+        # Scenema pod can actually fetch.
+        enc_name = urllib.parse.quote(p.name)
         # If SCENEMA_REF_BASE_URL already includes a port, trust it as-is.
         if ":" in base.split("//", 1)[-1]:
-            url = f"{base}/{p.name}"
+            url = f"{base}/{enc_name}"
         else:
-            url = f"{base}:{port}/{p.name}"
+            url = f"{base}:{port}/{enc_name}"
         yield url
     finally:
         srv.shutdown()

@@ -22,6 +22,9 @@ panel_settings.json
 stats-data.jsonl
 *.log
 *.tmp
+# Manual `.original_<date>` asset backups (e.g. before re-exporting a logo).
+# Kept on disk for the author, never committed / shipped (v3.0.7 review P3).
+*.original_*
 
 # =============================================================================
 # Generated / user content — too big or too personal for git
