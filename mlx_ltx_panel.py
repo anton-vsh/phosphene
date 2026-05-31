@@ -2852,6 +2852,57 @@ CIVITAI_API_BASE = "https://civitai.com/api/v1"
 CIVITAI_USER_AGENT = "phosphene/1.0 (https://github.com/mrbizarro/phosphene)"
 
 
+# 2026-05-31 security fix (deep-review). The CivitAI download path takes a
+# `download_url` from model metadata (attacker-influenceable) and sends the
+# user's API token in BOTH the URL (`?token=`) and an `Authorization: Bearer`
+# header. Two holes were closed:
+#   1. The old host gate was `netloc.endswith("civitai.com")` — which also
+#      matches `evilcivitai.com`. Now an EXACT host allowlist.
+#   2. Python's default HTTPRedirectHandler re-attaches the Authorization
+#      header across redirects to ANY host, so a crafted/compromised download
+#      that 30x-redirects off-domain would exfiltrate the token. The handler
+#      below strips Authorization on any cross-host redirect.
+def _civitai_host_allowed(netloc: str) -> bool:
+    """True only for civitai.com itself or a real *.civitai.com subdomain."""
+    host = (netloc or "").split("@")[-1].split(":")[0].strip().lower()
+    return host == "civitai.com" or host.endswith(".civitai.com")
+
+
+def _civitai_opener():
+    """A urllib opener that strips the Authorization header on any cross-host
+    redirect, so the CivitAI token never travels to a host the user didn't
+    authenticate to. Built lazily so urllib.request is imported before the
+    handler subclass is defined (no module-load import-order coupling)."""
+    import urllib.request
+    import urllib.parse
+
+    class _AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if new_req is None:
+                return None
+            try:
+                # Keep Authorization only while staying inside the civitai.com
+                # domain (civitai.com -> images.civitai.com is legit). Strip it
+                # the moment a redirect leaves the domain — e.g. to a pre-signed
+                # CDN (which needs no auth anyway) or to an attacker's host.
+                new_netloc = urllib.parse.urlparse(newurl).netloc
+                if not _civitai_host_allowed(new_netloc):
+                    hdrs = {k: v for k, v in new_req.header_items()
+                            if k.lower() != "authorization"}
+                    new_req = urllib.request.Request(
+                        new_req.full_url, headers=hdrs, method=new_req.get_method())
+            except Exception:
+                # Reasoning about the redirect failed — fail closed.
+                try:
+                    new_req.remove_header("Authorization")
+                except Exception:
+                    pass
+            return new_req
+
+    return urllib.request.build_opener(_AuthStrippingRedirectHandler())
+
+
 def _civitai_request(path: str, params: dict | None = None,
                      timeout: float = 20.0) -> dict:
     """Minimal stdlib HTTP client for the CivitAI API. No third-party
@@ -2871,7 +2922,10 @@ def _civitai_request(path: str, params: dict | None = None,
     if api_key:
         req.add_header("Authorization", f"Bearer {api_key}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # Use the auth-stripping opener: the base host is hardcoded civitai.com
+        # so the initial request is safe, but this guards against a redirect
+        # response steering the Bearer token off-domain.
+        with _civitai_opener().open(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", "replace")
             return json.loads(body)
     except Exception as exc:
@@ -3044,9 +3098,9 @@ def _civitai_download(download_url: str, meta: dict) -> dict:
     # generic HTTP fetcher. Subdomains (e.g. images.civitai.com) are
     # also OK because CivitAI sometimes redirects there.
     parsed = urllib.parse.urlparse(download_url)
-    if parsed.scheme != "https" or not parsed.netloc.endswith("civitai.com"):
+    if parsed.scheme != "https" or not _civitai_host_allowed(parsed.netloc):
         raise RuntimeError(f"refusing to download from {parsed.netloc}; "
-                           f"only civitai.com is allowed")
+                           f"only civitai.com (and *.civitai.com) is allowed")
     # CivitAI's download endpoint started requiring auth for many models
     # in 2025+. The Authorization header sometimes works, but the
     # canonical path is `?token=<key>` on the URL — and many CDN hops
@@ -3089,9 +3143,10 @@ def _civitai_download(download_url: str, meta: dict) -> dict:
     req = urllib.request.Request(download_url, headers=headers)
     bytes_written = 0
     last_log = 0.0
+    _opener = _civitai_opener()  # strips Authorization on cross-host redirect
     try:
         try:
-            resp_ctx = urllib.request.urlopen(req, timeout=60)
+            resp_ctx = _opener.open(req, timeout=60)
         except urllib.request.HTTPError as he:
             # Surface the 401 case with a clear remediation. CivitAI now
             # requires API tokens for most LoRA downloads, even SFW ones,
@@ -5278,6 +5333,14 @@ def _preflight_estimate_ram_gb(cfg) -> float:
     The `9b` variant gets a hard override — its Metal residency dwarfs
     every 4B sibling regardless of quantize.
     """
+    if cfg.kind == "hidream":
+        # 2026-05-31 review fix: HiDream-O1 BF16 was exempt from the RAM gate
+        # (fell through to the 1.0 GB `!= mflux` branch). Its Metal residency
+        # is ~18 GB. HiDream is dropdown-hidden as of v3.0.3 (#15) but remains
+        # reachable via a saved agent_image_config / engine_override, so the
+        # gate must still cover it or a 16 GB Mac OOMs instead of getting the
+        # friendly "needs more memory" refusal.
+        return 18.0
     if cfg.kind != "mflux":
         # `mock` engine doesn't allocate; `bfl` is cloud-side.
         return 1.0
@@ -5499,6 +5562,13 @@ def run_image_job_inner(job: dict) -> None:
                / str(int(time.time() * 1000)))
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if _video_render_active():
+        # A video render is in flight — running mflux/HiDream concurrently can
+        # OOM-kill it on a memory-constrained Mac. Refuse rather than contend.
+        raise RuntimeError(
+            "a video render is in progress — image generation is paused until "
+            "it finishes (they would contend for GPU memory)"
+        )
     if not _IMG_STUDIO_LOCK.acquire(blocking=False):
         # The video worker already serialises queue jobs, so this
         # only fires when an agent-driven /image/generate call is in
@@ -7212,6 +7282,34 @@ AGENT_LOCK = threading.RLock()
 # instead of queueing up. The JS-side busy flag handles the common case;
 # this lock is the server-side safety net.
 _IMG_STUDIO_LOCK = threading.Lock()
+
+
+def _video_render_active() -> bool:
+    """True only if the warm-helper is mid VIDEO render (t2v/i2v/a2v/extend/…).
+
+    2026-05-31 review fix: inline image generation (mflux/HiDream) runs on the
+    HTTP worker thread and only held _IMG_STUDIO_LOCK (image-vs-image). It
+    never checked the VIDEO worker — so clicking Generate during a T2V/I2V
+    render spawned a second heavy GPU/RAM consumer concurrently and could
+    jetsam-kill the in-flight video on a memory-constrained Mac. The inline
+    image path now fail-fasts (429) when a video render is active.
+
+    CRITICAL: this MUST be mode-aware, not a bare `STATE['running']`. The
+    worker sets `running=True` for EVERY queued job — including image jobs —
+    before dispatching. A naive `running` check would make a queued image job
+    see itself as "a video render in progress" and fail unconditionally
+    (caught in adversarial verification before ship). Image-vs-image
+    contention is already handled by _IMG_STUDIO_LOCK; only a VIDEO render is
+    the heavy concurrent consumer we must refuse against."""
+    try:
+        with LOCK:
+            if not STATE.get("running"):
+                return False
+            cur = STATE.get("current") or {}
+            mode = ((cur.get("params") or {}).get("mode") or "").strip().lower()
+            return mode not in ("image", "")
+    except Exception:
+        return False
 
 # Rolling history of recent image-gen wall times keyed by engine. Used by
 # /image/engine_status to over-ride the hardcoded sec_per_image baselines
@@ -9594,6 +9692,14 @@ class Handler(BaseHTTPRequestHandler):
                        / str(int(time.time() * 1000)))
             out_dir.mkdir(parents=True, exist_ok=True)
 
+            # Refuse if a VIDEO render is in flight — a concurrent mflux + LTX
+            # render can OOM-kill the video on a memory-constrained Mac.
+            if _video_render_active():
+                self._json({
+                    "error": "a video render is in progress — image generation "
+                             "is paused until it finishes (they'd contend for GPU "
+                             "memory). Try again once the render completes.",
+                }, 429); return
             # Acquire the gen lock — fail fast (429) if another generation
             # is already running so the user doesn't queue up minutes of
             # GPU contention by accident.
@@ -9732,10 +9838,27 @@ class Handler(BaseHTTPRequestHandler):
                             reverse=True,
                         )[:5]
                         if ips:
-                            zp = Path(f"/tmp/phosphene-bug-{int(time.time())}.zip")
+                            # 2026-05-31 review fix: crash .ips files can carry
+                            # home paths / usernames. The old predictable
+                            # /tmp/phosphene-bug-<ts>.zip was world-readable
+                            # (default umask) and never cleaned. Write into a
+                            # private 0700 dir with a 0600 zip so other local
+                            # users can't read the crash bundle while it waits
+                            # to be drag-uploaded.
+                            import tempfile as _tf
+                            _zdir = _tf.mkdtemp(prefix="phosphene-bug-")
+                            try:
+                                os.chmod(_zdir, 0o700)
+                            except OSError:
+                                pass
+                            zp = Path(_zdir) / f"phosphene-bug-{int(time.time())}.zip"
                             with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
                                 for ip in ips:
                                     zf.write(ip, arcname=ip.name)
+                            try:
+                                os.chmod(zp, 0o600)
+                            except OSError:
+                                pass
                             zip_path = str(zp)
                 except Exception as exc:                            # noqa: BLE001
                     # Crash bundling is a nicety; if it fails we still
@@ -28589,9 +28712,50 @@ def _diagnose_port_busy(port: int) -> str:
             f"is on it and click Start again.")
 
 
+def _sweep_orphan_tmps() -> None:
+    """Delete atomic-write temp files left by dead processes.
+
+    2026-05-31 review fix: a hard kill (jetsam, SIGKILL, power loss) mid
+    atomic_write_text leaves `.{name}.{pid}.{tid}.{ns}.tmp` orphans in
+    state/. They accumulate forever (4 were found on disk from May 18, one
+    232 KB). The PID is encoded in the name, so we can safely remove only
+    those whose owning process is gone — never a temp file a live writer is
+    mid-flight on.
+    """
+    try:
+        if not STATE_DIR.is_dir():
+            return
+    except Exception:
+        return
+    removed = 0
+    for p in STATE_DIR.glob(".*.tmp"):
+        try:
+            parts = p.name.split(".")
+            if len(parts) < 5:  # .name.pid.tid.ns.tmp → ≥5 dot-parts
+                continue
+            pid_str = parts[-4]
+            if not pid_str.isdigit():
+                continue
+            pid = int(pid_str)
+            try:
+                os.kill(pid, 0)
+                continue          # process alive → leave its temp alone
+            except ProcessLookupError:
+                pass              # dead → safe to remove
+            except PermissionError:
+                continue          # alive under another uid → leave it
+            p.unlink()
+            removed += 1
+        except Exception:
+            continue
+    if removed:
+        print(f"[boot] swept {removed} orphaned state/*.tmp from dead processes", flush=True)
+
+
 if __name__ == "__main__":
     OUTPUT.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
+    _sweep_orphan_tmps()
     load_hidden()
     load_queue()
     threading.Thread(target=worker_loop, daemon=True).start()
