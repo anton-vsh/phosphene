@@ -1228,11 +1228,18 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
     #   Upsampler ≈ ~30s constant
     #   Total ≈ 5.0 step-equivalents + 30s vs 8.0 step-equivalents native.
     #
-    # OFF by default for v3.0.x stability — flip on for A/B with
+    # DEFAULT = single-stage, by Mr Bizarro's explicit call (2026-05-27).
+    # The A/B was run (tasks #49/#51, the e1_ab/compound_matrix HTML reports):
+    # two-stage is ~30-35% faster (M4 Max 7:40 → ~5:15) BUT visibly SOFTER —
+    # fine detail is reconstructed during the 2x upsample + 3-step refine
+    # rather than denoised directly at full res. Mr Bizarro eyeballed both and
+    # PREFERS single-stage's sharpness, so single-stage stays the default.
+    # (The 2026-05-31 deep review flagged single-stage as upstream-"OOD"; that
+    # concern is theoretical — the measured A/B showed single-stage sharper,
+    # not artefact-broken, on real prompts. Do NOT flip the default to
+    # two-stage without Mr Bizarro re-deciding.) Two-stage remains available
+    # opt-in for users who want the speed and accept the softness:
     #   PHOSPHENE_T2V_TWO_STAGE=1
-    # Same prompt+seed twice (env on / env off) to compare. The eventual
-    # Option-A (deleting this legacy branch entirely so two-stage T2V is
-    # universal) lands after we've validated quality on dev for a stretch.
     _t2v_two_stage = os.environ.get("PHOSPHENE_T2V_TWO_STAGE", "").strip().lower() in ("1", "true", "yes", "on")
     if not needs_image and not _t2v_two_stage and hasattr(pipe, "generate"):
         try:

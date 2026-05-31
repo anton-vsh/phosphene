@@ -1071,11 +1071,14 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # ones that did rather than failing the whole batch. Order by seed
     # so candidate numbering is deterministic.
     #
-    # mflux >=0.18 changed --output handling: even when the template
-    # already substitutes {seed}, mflux ALSO appends _seed_<seed> to the
-    # filename. So our `cand_{seed}_mflux.png` template lands on disk as
-    # `cand_<seed>_mflux_seed_<seed>.png`. Without this fallback every
-    # image-gen run since the upgrade returned an empty candidates list,
+    # IMPORTANT (2026-05-31 review H7 — do NOT delete this as "future compat"):
+    # mflux is pinned ==0.17.5 (<0.18). The PINNED 0.17.5 appends _seed_<seed>
+    # to the filename whenever n>1 seeds are passed (the default agent batch is
+    # n=4) — even when the template already substitutes {seed}. So our
+    # `cand_{seed}_mflux.png` template lands on disk as
+    # `cand_<seed>_mflux_seed_<seed>.png`. This fallback is LOAD-BEARING on the
+    # current pin, not dead >=0.18 compensation. Without it every multi-seed
+    # image-gen run returned an empty candidates list,
     # which meant: no sidecar JSON written (the for-loop ran zero times),
     # users saw thumbnails in the gallery via the library scan but had
     # no per-image metadata to show / reproduce / debug. The candidates
@@ -1087,7 +1090,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         path = Path(output_template.format(seed=seed))
         if not path.is_file():
             # Fall back to scanning the output dir for the EXACT filename
-            # mflux >=0.18 writes (template + auto-`_seed_<seed>` suffix).
+            # pinned mflux 0.17.5 writes on n>1 (template + auto-`_seed_<seed>`).
             # Substring matching by `seed_str in p.name` was wrong: seed
             # 123 would also match `cand_9123_mflux.png` from a previous
             # run in the same agent shot folder, returning the wrong PNG.
