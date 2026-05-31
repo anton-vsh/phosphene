@@ -11,6 +11,15 @@ state/
 panel_queue.json
 panel_hidden.json
 panel_settings.json
+# 2026-05-31 review: defense-in-depth for the private GitHub-stats data.
+# `state/` is an fs.link symlink off-repo, so `git check-ignore
+# state/stats-data.jsonl` reports "beyond a symbolic link" — i.e. the only
+# thing protecting it today is that it lives outside the repo. A basename
+# rule covers it even if PHOSPHENE_STATS_OUT is pointed somewhere tracked,
+# or the symlink is ever replaced with a real dir. (A snapshot leaked once
+# to docs/stats-data.jsonl — rolled back in 70b4489. Never again.)
+**/stats-data.jsonl
+stats-data.jsonl
 *.log
 *.tmp
 

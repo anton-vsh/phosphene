@@ -744,9 +744,32 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # with "Could not find LoRA file ... in downloaded files". Paths that
     # look like real files or that don't contain a colon are passed
     # through untouched.
-    if config.mflux_lora_paths:
+    # 2026-05-31 review fix (C2): the default config ships the Qwen-Edit
+    # Lightning LoRA (qwen_edit is the UI default). If the engine is switched
+    # to a FLUX family (e.g. via engine_override="auto") while that LoRA is
+    # still in the config, mflux would load a Qwen-architecture LoRA onto a
+    # FLUX transformer — a ~50s model load followed by a no-op or crash. A
+    # Qwen LoRA cannot apply to a non-Qwen model, so drop cross-family LoRAs
+    # (and their paired scales, kept index-aligned) up front and log it.
+    _lora_paths_in = list(config.mflux_lora_paths or [])
+    _lora_scales_in = list(config.mflux_lora_scales or [])
+    if fam != "qwen_edit" and _lora_paths_in:
+        _kept_p: list = []
+        _kept_s: list = []
+        for _i, _lp in enumerate(_lora_paths_in):
+            if "qwen" in str(_lp).lower():
+                if on_log is not None:
+                    try: on_log(f"[lora] skipping Qwen LoRA on {fam} family (incompatible): {_lp}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                continue
+            _kept_p.append(_lp)
+            if _i < len(_lora_scales_in):
+                _kept_s.append(_lora_scales_in[_i])
+        _lora_paths_in, _lora_scales_in = _kept_p, _kept_s
+    if _lora_paths_in:
         resolved_paths: list[str] = []
-        for lp in config.mflux_lora_paths:
+        for lp in _lora_paths_in:
             lp_str = str(lp)
             # Path with a colon → repo:filename collection syntax. Skip
             # if the file already exists locally (e.g. a Civitai LoRA
@@ -775,9 +798,17 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 resolved_paths.append(lp_str)
         cmd.append("--lora-paths")
         cmd.extend(resolved_paths)
-        if config.mflux_lora_scales:
+        if _lora_scales_in:
+            # 2026-05-31 review fix (C3): catch a scales/paths length mismatch
+            # HERE rather than letting mflux discover it after a ~50s model
+            # load and crash with an opaque error.
+            if len(_lora_scales_in) != len(resolved_paths):
+                raise ValueError(
+                    f"LoRA scales/paths length mismatch: {len(_lora_scales_in)} "
+                    f"scale(s) vs {len(resolved_paths)} path(s) — check "
+                    f"mflux_lora_scales / mflux_lora_paths in the engine config")
             cmd.append("--lora-scales")
-            cmd.extend(str(s) for s in config.mflux_lora_scales)
+            cmd.extend(str(s) for s in _lora_scales_in)
     # When `--model` is a HuggingFace id or local path (contains a
     # slash or starts with `~`), mflux needs `--base-model` to know
     # which architecture to instantiate. Fall through to the per-family
@@ -1425,6 +1456,29 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         start_new_session=True,
     )
     _register_active_proc(proc)
+    # 2026-05-31 review fix (C1): the read loop below blocks on proc.stdout
+    # with no deadline. A hung HiDream render (stalled MLX/Metal, no output,
+    # never exits) would pin the queue worker forever — only a manual /stop
+    # recovered. A watchdog timer SIGKILLs the process group after a generous
+    # deadline so a hang self-heals. mflux already has a select()-based
+    # deadline (≈:866); HiDream is dropdown-hidden (#15) so this lighter
+    # watchdog is sufficient until the two streamers are unified.
+    _hd_timed_out = {"v": False}
+    _hd_deadline = float(os.environ.get("PHOSPHENE_HIDREAM_TIMEOUT_S", "1500"))
+
+    def _hd_kill_on_timeout():
+        _hd_timed_out["v"] = True
+        try:
+            os.killpg(os.getpgid(proc.pid), 9)   # SIGKILL the whole group
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    _hd_wd = threading.Timer(_hd_deadline, _hd_kill_on_timeout)
+    _hd_wd.daemon = True
+    _hd_wd.start()
     try:
         if proc.stdout is not None:
             for line in proc.stdout:
@@ -1435,7 +1489,13 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
                     on_log(f"[hidream] {line}")
         rc = proc.wait()
     finally:
+        _hd_wd.cancel()
         _unregister_active_proc(proc)
+    if _hd_timed_out["v"]:
+        raise RuntimeError(
+            f"HiDream gen exceeded its {_hd_deadline:.0f}s deadline and was "
+            f"killed (likely a hung render). Raise PHOSPHENE_HIDREAM_TIMEOUT_S "
+            f"if your machine legitimately needs longer.")
     if rc != 0:
         # SIGTERM → rc = -15 on POSIX (or 143 if the shell wrapped it).
         # Treat that as cancellation, not failure, so the worker can mark

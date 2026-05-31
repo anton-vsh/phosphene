@@ -114,6 +114,8 @@ def serve_reference(local_path: str):
 
     parent = str(p.parent)
 
+    target_name = p.name
+
     class _Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
             super().__init__(*a, directory=parent, **k)
@@ -121,9 +123,27 @@ def serve_reference(local_path: str):
         def log_message(self, fmt, *args):  # silence default access log
             return
 
-    # Bind on 0.0.0.0 so a remote Scenema pod can reach us if the user has
-    # tunnelled. For 127.0.0.1-only deployments it works the same way.
-    srv = socketserver.TCPServer(("0.0.0.0", 0), _Handler)
+        def list_directory(self, path):
+            # 2026-05-31 review fix (D3): never expose a directory listing.
+            self.send_error(403, "directory listing forbidden")
+            return None
+
+        def do_GET(self):
+            # Only the exact reference file is served — everything else 404s,
+            # so the parent dir can't be walked even if a crafted path slips
+            # past SimpleHTTPRequestHandler's traversal guard.
+            req = self.path.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+            if req != target_name:
+                self.send_error(404, "not found")
+                return
+            return super().do_GET()
+
+    # 2026-05-31 review fix (D3): bind loopback by default. The old hard
+    # 0.0.0.0 bind exposed the whole parent directory to the LAN with no
+    # auth. A remote Scenema pod only needs 0.0.0.0 when the user has
+    # explicitly tunnelled — gate that behind SCENEMA_BIND_ALL=1.
+    _bind_host = "0.0.0.0" if os.environ.get("SCENEMA_BIND_ALL") == "1" else "127.0.0.1"
+    srv = socketserver.TCPServer((_bind_host, 0), _Handler)
     srv.allow_reuse_address = True
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()

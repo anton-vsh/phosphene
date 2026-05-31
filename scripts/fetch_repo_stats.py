@@ -747,12 +747,29 @@ def main(argv: list[str] | None = None) -> int:
                 except json.JSONDecodeError:
                     continue
         existing.append(row)
-        OUTPUT.write_text(
-            "\n".join(json.dumps(r, ensure_ascii=False) for r in existing) + "\n",
-            encoding="utf-8",
-        )
-        print(f"  wrote {len(existing)} rows -> "
-              f"{OUTPUT.relative_to(OUTPUT.parent.parent)}", flush=True)
+        # 2026-05-31 review fix (D1): write atomically. The old direct
+        # write_text() truncated the file before writing — a crash/kill
+        # mid-write (or disk-full) destroyed ALL accumulated history, and
+        # clones/views older than GitHub's 14-day window are unrecoverable.
+        # Temp file + fsync + os.replace: the real file is always either the
+        # complete old version or the complete new version, never torn. Guard
+        # against writing an empty payload over good data.
+        payload = "\n".join(json.dumps(r, ensure_ascii=False) for r in existing) + "\n"
+        if not existing or not payload.strip():
+            print("  WARN: refusing to overwrite stats with an empty payload", flush=True)
+        else:
+            import os as _os
+            _tmp = OUTPUT.with_name(f".{OUTPUT.name}.{_os.getpid()}.tmp")
+            with open(_tmp, "w", encoding="utf-8") as _fh:
+                _fh.write(payload)
+                _fh.flush()
+                try:
+                    _os.fsync(_fh.fileno())
+                except OSError:
+                    pass
+            _os.replace(_tmp, OUTPUT)
+            print(f"  wrote {len(existing)} rows -> "
+                  f"{OUTPUT.relative_to(OUTPUT.parent.parent)}", flush=True)
 
     # Summary line for GitHub Actions step output.
     clones_wow = _wow_delta(clones_window)
