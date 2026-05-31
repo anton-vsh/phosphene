@@ -4147,6 +4147,11 @@ class WarmHelper:
         # from `lock` so a /stop or /helper/restart can still kill the proc
         # while a run is mid-flight (the kill interrupts readline via EOF).
         self.run_lock = threading.Lock()
+        # v3.0.7 (review P2): retain the helper's `ready` payload so /status
+        # can surface the installed ltx-2-mlx version on EVERY install, not
+        # just log it loudly on a mismatch. Makes healthy remote bug reports
+        # carry the version that's actually running.
+        self.ready_info: dict = {}
 
     def _ensure(self) -> None:
         with self.lock:
@@ -4195,7 +4200,19 @@ class WarmHelper:
             ready = self._read_until(["ready", "error", "exit"], timeout=120)
             if not ready or ready.get("event") != "ready":
                 raise RuntimeError(f"helper failed to start: {ready}")
-            push(f"helper ready · model={ready.get('model')} · low_memory={ready.get('low_memory')}")
+            # v3.0.7 (P2): keep the version + model fields for /status.
+            self.ready_info = {
+                k: ready.get(k) for k in (
+                    "ltx_version", "ltx_version_expected", "ltx_version_match",
+                    "model", "gemma", "low_memory",
+                )
+            }
+            _vtag = ""
+            if ready.get("ltx_version") is not None:
+                _vtag = (f" · ltx-2-mlx={ready.get('ltx_version')}"
+                         + ("" if ready.get("ltx_version_match") else " ⚠️SKEW"))
+            push(f"helper ready · model={ready.get('model')} · "
+                 f"low_memory={ready.get('low_memory')}{_vtag}")
 
     def _read_until(self, target_events: list[str], timeout: float | None = None,
                     log_hook: callable | None = None,
@@ -7237,7 +7254,12 @@ def worker_loop() -> None:
         persist_queue()
 
         try:
-            run_job_inner(job)
+            # Hold the process-wide GPU gate for the whole job (v3.0.7 P1) so
+            # an inline /image/generate can't run a second heavy GPU consumer
+            # concurrently. Blocking acquire is correct here — the worker is
+            # already serialized; it only waits if an inline image is mid-flight.
+            with _GPU_LOCK:
+                run_job_inner(job)
             job["status"] = "done"
         except Exception as exc:
             if job.get("cancel_requested"):
@@ -7282,6 +7304,18 @@ AGENT_LOCK = threading.RLock()
 # instead of queueing up. The JS-side busy flag handles the common case;
 # this lock is the server-side safety net.
 _IMG_STUDIO_LOCK = threading.Lock()
+
+# 2026-05-31 (v3.0.7, review P1) — process-wide GPU gate. The earlier
+# image-vs-video guard was one-directional: inline /image/generate checked
+# `STATE['running']` then took the image-only lock, but the video worker
+# never took that lock — so an inline image could start first, then a queued
+# video/training job begin concurrently and still OOM the Mac. _GPU_LOCK is
+# held (blocking) by worker_loop around EVERY job and acquired non-blocking
+# by the inline image path, so the two GPU consumers can never overlap in
+# either direction. The worker blocking briefly behind an in-flight inline
+# image is fine (the queue just waits); the inline path always releases in a
+# finally, so the worker can't deadlock.
+_GPU_LOCK = threading.Lock()
 
 
 def _video_render_active() -> bool:
@@ -7950,6 +7984,13 @@ class Handler(BaseHTTPRequestHandler):
             payload["comfy_pids"] = find_comfy_pids()
             payload["server_now"] = time.time()
             payload["avg_elapsed_sec"] = avg
+            # v3.0.7 (P2): surface the installed ltx-2-mlx version (from the
+            # helper's ready event) so every bug report — not just a mismatch
+            # log — carries what's actually running. Empty until the helper
+            # has booted at least once this session.
+            payload["ltx_version"] = HELPER.ready_info.get("ltx_version")
+            payload["ltx_version_expected"] = HELPER.ready_info.get("ltx_version_expected")
+            payload["ltx_version_match"] = HELPER.ready_info.get("ltx_version_match")
             # Per-kind avg ETA: image jobs are 30s–2min, video jobs are
             # 5–30min. Computing queue ETA from one mixed avg makes an
             # image queued after a few videos show "~30 min" — the
@@ -9692,20 +9733,17 @@ class Handler(BaseHTTPRequestHandler):
                        / str(int(time.time() * 1000)))
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # Refuse if a VIDEO render is in flight — a concurrent mflux + LTX
-            # render can OOM-kill the video on a memory-constrained Mac.
-            if _video_render_active():
+            # Acquire the process-wide GPU gate — fail fast (429) if ANY GPU
+            # job is running: a video/image/training render on the worker
+            # (which holds _GPU_LOCK for its whole duration) OR another inline
+            # image. This is the v3.0.7 P1 fix — it covers BOTH directions, so
+            # a second concurrent GPU consumer can never start and OOM the Mac.
+            # Released in the finally below.
+            if not _GPU_LOCK.acquire(blocking=False):
                 self._json({
-                    "error": "a video render is in progress — image generation "
-                             "is paused until it finishes (they'd contend for GPU "
-                             "memory). Try again once the render completes.",
-                }, 429); return
-            # Acquire the gen lock — fail fast (429) if another generation
-            # is already running so the user doesn't queue up minutes of
-            # GPU contention by accident.
-            if not _IMG_STUDIO_LOCK.acquire(blocking=False):
-                self._json({
-                    "error": "another image generation is already in progress",
+                    "error": "the GPU is busy with a render or training job — "
+                             "image generation is paused until it finishes (they'd "
+                             "contend for GPU memory). Try again once it completes.",
                 }, 429); return
             t0 = time.time()
             try:
@@ -9731,7 +9769,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     self._json({"error": str(e)}, 400); return
             finally:
-                _IMG_STUDIO_LOCK.release()
+                _GPU_LOCK.release()
             elapsed = round(time.time() - t0, 2)
 
             # Sidecar JSON next to each candidate so list_library_images
