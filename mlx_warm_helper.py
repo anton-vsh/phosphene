@@ -571,9 +571,32 @@ def _install_a2v_frame_rate_patch() -> None:
               flush=True)
         return
     _orig = _orch.combined_image_conditionings
+    # 2026-05-28 fix (#5 claude3d M5): upstream ltx_pipelines_mlx is a moving
+    # target. v0.14.0 required `frame_rate` as a keyword-only kwarg (our
+    # original patch reason). Some v0.14.1+ point release DROPPED `frame_rate`
+    # entirely — passing it now raises
+    #   TypeError: combined_image_conditionings() got an unexpected keyword
+    #   argument 'frame_rate'
+    # which is the exact symptom on @claude3d's M5 install. Probe the live
+    # signature ONCE at install time and route accordingly. If the user's
+    # ltx-2-mlx is post-removal we silently strip `frame_rate`; if it's pre-
+    # removal (or upstream re-adds it later) we keep forwarding. Robust to
+    # future signature flips.
+    import inspect as _inspect_a2v
+    try:
+        _orig_accepts_fr = "frame_rate" in _inspect_a2v.signature(_orig).parameters
+    except (TypeError, ValueError):
+        # Builtins or C-extension may refuse inspection — assume yes for
+        # backward compatibility with the original patch behavior.
+        _orig_accepts_fr = True
 
     def _wrapped(*args, frame_rate: float = 24.0, **kwargs):
-        return _orig(*args, frame_rate=frame_rate, **kwargs)
+        if _orig_accepts_fr:
+            return _orig(*args, frame_rate=frame_rate, **kwargs)
+        # Upstream removed frame_rate — strip it before forwarding so we
+        # don't trip the post-removal path's TypeError.
+        kwargs.pop("frame_rate", None)
+        return _orig(*args, **kwargs)
 
     _orch.combined_image_conditionings = _wrapped
     # The A2V module already imported the original at module-load time
