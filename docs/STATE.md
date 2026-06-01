@@ -4,6 +4,8 @@
 
 Current `dev` head: see `git log -1` for the live SHA. `dev` tracks `beta/main` (private repo — see §1).
 
+> **Latest dev (2026-06-01, on `beta/main`, NOT yet public):** ltx-2-mlx pin bumped **v0.14.0 → v0.14.8** (commit `aaf1ba8`). Dropped 6 of 7 runtime patches — they're native upstream now, so `patch_ltx_codec.py` is **codec-only** and dev==prod parity is real. This is the proper fix path for the I2V "mosaic" (#17): it's a macOS **Metal command-buffer watchdog** issue (NOT a RAM-tier issue — dgrauet's `_pre_denoise_flush` commit reproduces on a 64 GB M2 Max), now native and wired into the Q4 one-stage path. Vendored tree stays **PINNED/detached at v0.14.8** (standing rule: always re-pin at the end). Full modality matrix validated on dev (M4 Max 64 GB). **Awaiting Mr Bizarro's Dev-panel test + an affected small-Mac user's confirmation before promoting to public `main`.** Full detail: memory `phosphene_ltx_pin_v0148.md`.
+
 Live URL: `https://github.com/mrbizarro/phosphene` · Linear project: `https://linear.app/hairstylemojo/project/phosphene-9c11240704bb`
 
 This doc is the **session-start handoff**. A new Claude window entering this project should read this first, then `CLAUDE.md` (architecture), then the relevant Linear issues.
