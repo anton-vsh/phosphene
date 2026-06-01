@@ -197,7 +197,7 @@ These are not arbitrary — every pin is a paid lesson:
 | `mlx==0.31.1` | mlx 0.31.2 introduced a numerical regression that attenuates LTX 2.3 vocoder output by ~22 dB. Verified: same model + same prompt + same seed → -42 dB peak on 0.31.2 vs -9 dB peak on 0.31.1. |
 | `mlx-lm==0.31.1` `mlx-metal==0.31.1` | Same release line, kept consistent with mlx. |
 | `huggingface-hub>=1.0` | `hf` CLI replaced `huggingface-cli`; older Pinokio bundles ship < 1.0. |
-| `ltx-2-mlx` PINNED to **`v0.14.0`** (commit `b35254a`) | install.js + update.js do `git checkout v0.14.0`. This is NOT "main HEAD" — that was the old pre-pin policy and is wrong now (corrected 2026-05-31). v0.14.0 ("ultra-strict iso on frame_rate") is the last tag the panel + helper + patch_ltx_codec.py were validated against; dgrauet asked to lock onto a tag 2026-05-12 before pushing breaking changes. Bumping the pin (e.g. → v0.14.8, deep-review Phase 4) is a deliberate, tested operation — read the release notes, smoke-test on beta, bump BOTH install.js and update.js in one commit. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
+| `ltx-2-mlx` PINNED to **`v0.14.8`** (commit `d2ad8e9`) | install.js + update.js do `git checkout v0.14.8` (2026-06-01 catch-up from v0.14.0). **STAY PINNED** — this is NOT "main HEAD". v0.14.8 is the tag the panel + helper + patch_ltx_codec.py were validated against (full modality matrix smoke-tested on dev). The bump pulled dgrauet's native `_pre_denoise_flush` (the Metal-watchdog fix that resolves the I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE decode tiling, and first-class `frame_rate` — which let us drop 6 of 7 runtime patches (codec-only now). Bumping the pin further is a deliberate, tested operation — read the release notes, bump `_LTX_EXPECTED_VERSION` in mlx_warm_helper.py, smoke-test the matrix on dev, then bump BOTH install.js and update.js in one commit. The historic `dcd639e (0.1.0)` detour broke the Extend `cfg_scale` API; do not revisit. |
 
 When changing a version, document the test that proved the new pin is OK.
 
@@ -208,7 +208,9 @@ are idempotent and fail loud on upstream drift (don't silently ship a
 broken pipeline). Each patch has an `OLD` text it expects to find and a
 `NEW` text it replaces with, plus a `marker` to detect "already patched."
 
-Currently shipped patches:
+As of the **v0.14.8** pin (2026-06-01 catch-up) only ONE patch remains —
+upstream absorbed the other six natively, so we dropped them and cut our
+divergence from 7 patches to 1 (the whole reason for the catch-up):
 
 1. **Codec (`yuv444p crf 0` + `+faststart`)** — required.
    Patches `ltx_core_mlx/model/video_vae/video_vae.py`. Default ffmpeg
@@ -216,37 +218,28 @@ Currently shipped patches:
    to the front of the file so gallery thumbnails render the first
    frame without downloading the full clip.
 
-2. **I2V free DiT before VAE decode** — optional (warns if upstream changed).
-   Patches `ImageToVideoPipeline.generate_and_save` in
-   `ltx_pipelines_mlx/ti2vid_one_stage.py`. Frees DiT + text encoder +
-   feature extractor before the VAE decode step.
+**Dropped at v0.14.8 (now native upstream — do NOT re-add):**
 
-3. **I2V free vae_encoder + feature_extractor BEFORE denoise** — optional.
-   Patches `generate_from_image` to null `self.vae_encoder` and
-   `self.feature_extractor` right after `_encode_text_and_load`
-   returns. The connector inside feature_extractor is ~5.91 GiB on Q4
-   and was sitting resident through denoise for no reason.
+- **I2V / pre-denoise / base-load memory frees** (old patches 2,3,4) →
+  native `low_memory` path. v0.14.8 frees generation components via
+  composition-block `.free()` (`prompt_encoder`/`image_conditioner`) in
+  `ti2vid_one_stage.py` + `_base.py` before loading decoders.
+- **VAE temporal streaming** (old patch 5) → native budget-aware tiled
+  `decode_and_stream` in `video_vae.py` (`LTX2_VAE_DECODE_BUDGET_GB`,
+  default 8 GB; single-pass for short clips). Strictly better than ours.
+- **Metal-watchdog DiT-eval-cadence fix** (old patch 7) → native
+  `_pre_denoise_flush` (an `mx.eval` barrier before every denoise loop).
+  `_DIT_EVAL_EVERY` no longer exists. The flush is wired into the Q4
+  one-stage path (`ti2vid_one_stage.py`) — the exact path that produced
+  the I2V "mosaic" on memory-pressured Macs (#17) — plus all pipelines.
+- **one-stage `frame_rate` / 12→24 fps long clips** (old patch 6) →
+  native, first-class, keyword-only `frame_rate` threaded end-to-end.
 
-4. **Base `load()` also clears feature_extractor** — optional.
-   Patches `TextToVideoPipeline.load`. Drops one extra ~5.91 GiB blob
-   from the peak when the DiT loads.
-
-5. **VAE temporal streaming with auto-skip on short clips** (Y1.035 +
-   Y1.037). Patches `VideoDecoder.decode_and_stream` in
-   `ltx_core_mlx/model/video_vae/video_vae.py`. Upstream's method
-   *advertised* streaming but actually called `self.decode(latent)` on
-   the full video volume before iterating frames — caused multi-minute
-   end-of-render stalls / jetsam on long 720p clips. The patch routes
-   through `tiled_decode()` with a `TemporalTilingConfig` (default
-   tile = 64 latent frames, overlap = 24). Default mode is `auto`:
-   tiling is applied only when latent length > `LTX_VAE_STREAMING_AUTO_MAX_FRAMES`
-   (default 121 video frames ≈ 5 s). Short clips skip tiling and gain
-   ~30 s on 5-sec Standard renders. `LTX_VAE_STREAMING=0` forces
-   full-decode fallback; `=1` forces always-stream. Helper-side
-   `_apply_vae_streaming_decision()` in `mlx_warm_helper.py` sets the
-   env var per-job based on `num_frames`, so even pre-2.0 patched
-   installs that haven't re-run `patch_ltx_codec.py` get the right
-   behavior.
+The helper calls the new API defensively (`hasattr` guard on
+`generate`/`generate_from_image`, `inspect.signature` probing, and
+`_filter_unsupported_kwargs`), so nothing depends on the dropped patches.
+Re-implementing any of them against v0.14.8 would only re-introduce the
+divergence the catch-up removed.
 
 The "upgrade" path in `apply_patch()` lets old patched installs receive
 new patch versions without a venv rebuild — used when we added

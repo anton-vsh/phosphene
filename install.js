@@ -82,18 +82,23 @@ module.exports = {
       }
     },
 
-    // ---- ltx-2-mlx version: PIN to v0.14.0. dgrauet asked on 2026-05-12
+    // ---- ltx-2-mlx version: PIN to v0.14.8 (2026-06-01 catch-up). dgrauet asked on 2026-05-12
     //      to lock onto a tag because he's about to push breaking changes
     //      upstream to sync with the official Lightricks repo. Without a
     //      tag pin, every fresh install (and every Update) would pull the
     //      next breaking push and Phosphene would fail to start.
     //
-    //      v0.14.0 (commit b35254a, the "ultra-strict iso on frame_rate
-    //      kwarg" release) is the last known-good tag against which the
-    //      current panel + helper + patch_ltx_codec.py were validated.
-    //      Tag-bumps from here are a deliberate decision — read his
-    //      release notes first, smoke-test on dev, then bump this pin
-    //      AND the matching pin in update.js in one commit.
+    //      v0.14.8 is the pinned tag against which the current panel +
+    //      helper + patch_ltx_codec.py were validated (2026-06-01 catch-up
+    //      from v0.14.0). The bump pulled dgrauet's native fixes —
+    //      `_pre_denoise_flush` (the Metal-watchdog fix that resolves the
+    //      I2V "mosaic" on memory-pressured Macs, #17), budget-aware VAE
+    //      decode tiling, and first-class `frame_rate` — which let us DROP
+    //      6 of our 7 runtime patches (only the lossless-codec patch remains).
+    //      STAY PINNED here: do not auto-track upstream main. Tag-bumps are a
+    //      deliberate decision — read his release notes, smoke-test the full
+    //      modality matrix on dev, bump `_LTX_EXPECTED_VERSION` in
+    //      mlx_warm_helper.py, then bump this pin AND update.js in one commit.
     //
     //      Idempotent — works on a fresh clone (already on the cloned
     //      branch's tip) AND on a re-install where the clone exists.
@@ -103,7 +108,7 @@ module.exports = {
         path: "ltx-2-mlx",
         message: [
           "git fetch --tags origin",
-          "git checkout v0.14.0",
+          "git checkout v0.14.8",
           "git rev-parse --short HEAD"
         ]
       }

@@ -110,11 +110,11 @@ If you have a Hugging Face token, paste it under **Settings** in the panel. Down
 ### Manual install
 
 ```bash
-# 1. Clone Phosphene + the upstream MLX port (pinned to v0.14.0).
+# 1. Clone Phosphene + the upstream MLX port (pinned to v0.14.8).
 git clone https://github.com/mrbizarro/phosphene.git
 cd phosphene
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
-cd ltx-2-mlx && git checkout v0.14.0 && cd ..
+cd ltx-2-mlx && git checkout v0.14.8 && cd ..
 
 # 2. Create the Python 3.11 venv inside ltx-2-mlx (uv-managed).
 cd ltx-2-mlx
@@ -158,7 +158,7 @@ HF_HUB_ENABLE_HF_TRANSFER=1 ./ltx-2-mlx/env/bin/hf download \
 ./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
 ```
 
-About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to `v0.14.0` — upstream is about to ship breaking changes. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against.
+About the version pins: `mlx 0.31.2` attenuates the LTX vocoder by 22 dB. Stay on 0.31.1. `ltx-2-mlx` is pinned to `v0.14.8` — we track a known-good tag, never upstream `main`. `mflux 0.17.5` is the version `patch_mflux_fbcache.py` is line-targeted against.
 
 ## Interface
 
@@ -210,7 +210,7 @@ Behavioral changes worth noting in 3.0:
 - `mlx_ltx_panel.py` is the panel HTTP server. One file, around 22k lines, with HTML, CSS, and JS inlined as the page string. Worker thread plus helper subprocess management plus capability tier detection.
 - `mlx_warm_helper.py` is the long-running inference subprocess. Holds T2V, I2V, Extend, HQ, and Keyframe pipelines. Reads job specs from stdin, emits events to stdout.
 - `image_engine.py` dispatches the Image tab. Backends `hidream`, `mflux`, `mock`. Each spawns its own subprocess with `start_new_session=True` so `/stop` kills the whole tree.
-- `patch_ltx_codec.py` applies idempotent runtime patches: lossless H.264, free-DiT-before-decode, VAE temporal streaming for long clips.
+- `patch_ltx_codec.py` applies one idempotent runtime patch: lossless H.264 output (yuv444p). As of the v0.14.8 pin the memory-frees, VAE streaming, Metal-watchdog and frame_rate patches are all native upstream.
 - `lora_lab/` is vendored from the [`lora-lab`](https://github.com/mrbizarro/lora-lab) authoring tree. Training works out of the box; set `LTX_LORA_LAB_ROOT` to iterate against an external clone.
 - `mlx_models/` and `mlx_outputs/` both persist across Pinokio Reset via fs.link.
 

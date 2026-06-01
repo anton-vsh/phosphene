@@ -569,7 +569,7 @@ def _install_a2v_frame_rate_patch() -> None:
     because their explicit kwarg overrides the default.
 
     Why a wrapper instead of editing the vendored file: the ltx-2-mlx
-    checkout is pinned to v0.14.0 and any direct edit gets clobbered on
+    checkout is pinned to v0.14.8 and any direct edit gets clobbered on
     re-clone. The patch is idempotent so repeated helper boots are safe.
     """
     global _A2V_FRAME_RATE_PATCH_INSTALLED
@@ -1726,7 +1726,7 @@ def configure_acceleration(mode: str) -> str:
 # the pin Phosphene's patches are written against, and makes ANY skew loud +
 # visible in the ready event (so every remote bug report carries it) instead
 # of letting it surface as an un-triageable TypeError mid-render.
-_LTX_EXPECTED_VERSION = "0.14.0"
+_LTX_EXPECTED_VERSION = "0.14.8"
 
 
 def _detect_ltx_version() -> dict:
@@ -1769,7 +1769,7 @@ def _detect_ltx_version() -> dict:
 _LTX_VERSION_INFO = _detect_ltx_version()
 if not _LTX_VERSION_INFO["match"]:
     emit({"event": "log",
-          "line": (f"⚠️ ltx-2-mlx VERSION SKEW: installed={_LTX_VERSION_INFO['version']} "
+          "line": (f"WARNING ltx-2-mlx VERSION SKEW: installed={_LTX_VERSION_INFO['version']} "
                    f"expected={_LTX_EXPECTED_VERSION} — runtime patches are written "
                    f"against {_LTX_EXPECTED_VERSION}; behavior on this version is "
                    f"unvalidated. {_LTX_VERSION_INFO['note']}".strip())})

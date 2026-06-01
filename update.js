@@ -38,20 +38,24 @@ module.exports = {
         ]
       }
     },
-    // ltx-2-mlx is PINNED to v0.14.0 (dgrauet's request 2026-05-12 — he
-    // is pushing breaking changes upstream to sync with the official
-    // Lightricks repo). Update no longer tracks main; it fetches tags
-    // and re-checks-out the pinned tag so a previously-installed user
-    // converges to a known-good state, never to a moving HEAD. To bump
-    // the pin: edit BOTH install.js and update.js to a new tag, smoke-
-    // test on dev, push.
+    // ltx-2-mlx is PINNED to v0.14.8 (2026-06-01 catch-up from v0.14.0;
+    // dgrauet's original tag-pin request 2026-05-12 — he pushes breaking
+    // changes upstream to sync with the official Lightricks repo). Update
+    // no longer tracks main; it fetches tags and re-checks-out the pinned
+    // tag so a previously-installed user converges to a known-good state,
+    // never to a moving HEAD. The ltx-package re-install step below then
+    // force-copies the v0.14.8 source into site-packages (non-editable),
+    // so an existing user's runtime actually moves to 0.14.8 — a bare
+    // checkout alone would leave the old copy installed. To bump the pin:
+    // edit BOTH install.js and update.js to the new tag, bump
+    // _LTX_EXPECTED_VERSION in mlx_warm_helper.py, smoke-test on dev, push.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
         message: [
           "git fetch --tags origin",
-          "git checkout v0.14.0",
+          "git checkout v0.14.8",
           "git rev-parse --short HEAD"
         ]
       }
