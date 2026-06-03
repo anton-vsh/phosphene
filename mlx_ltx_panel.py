@@ -18394,7 +18394,7 @@ HTML = r"""<!doctype html>
            effective state so power users can scan at a glance.
 
            Lives at form level (not mode-conditional) — its inner rows
-           manage their own visibility (e.g. dimsRow hides in I2V flows;
+           manage their own visibility (e.g. dimsRow stays visible in all flows now;
            i2vAudioModeSection only shows for I2V; method only shows
            when an upscale is active). The wrapping #sizingSection
            class kept for the mode-only show/hide that still toggles
@@ -23446,11 +23446,16 @@ function updateDerived() {
   // to swap out, so the dropdown is just noise.
   const i2vAudioSec = document.getElementById('i2vAudioModeSection');
   if (i2vAudioSec) i2vAudioSec.classList.toggle('show', inI2V);
-  // In image flows the aspect picker is the only sizing control. Width/height
-  // auto-derive from aspect+quality so the source image drives the framing
-  // and we don't accidentally cover-crop a 16:9 photo into 9:16.
+  // Width/height stays visible in image flows too. (Restored 2026-06-03: the
+  // 2026-05-17 simplification hid it for I2V/FFLF, which cost users the custom
+  // I2V sizing they relied on.) The image still drives the DEFAULT —
+  // snapAspectToImage() auto-snaps aspect+dims on upload so the common case
+  // can't cover-crop a 16:9 photo into 9:16 — but the inputs are now editable
+  // so power users can set an exact custom size. Safe on low-RAM Macs: the
+  // server-side per-tier clamp (tier_max_dim → make_job, ~line 6806) caps base
+  // (<48 GB) I2V at 768 regardless of what's typed, so this can't push to swap.
   const dimsRow = document.getElementById('dimsRow');
-  if (dimsRow) dimsRow.style.display = inImageFlow ? 'none' : '';
+  if (dimsRow) dimsRow.style.display = '';
 
   // Image previews are now part of the picker component itself — the
   // preview <img> + clear button live inside .picker-drop and are toggled
