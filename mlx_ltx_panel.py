@@ -22005,10 +22005,16 @@ async function trainCheckPreflight() {
 }
 
 async function trainInstall(key) {
-  const fd = new FormData();
-  fd.set('key', key);
+  // The panel parses POST bodies with parse_qs (urlencoded ONLY); a FormData
+  // body serializes as multipart and reads back empty, so /train/install saw
+  // key='' and returned "unknown install key" (reported by @cocktailpeanut,
+  // 2026-06-04). Send urlencoded like every other POST in this panel.
   try {
-    const r = await fetch('/train/install', { method: 'POST', body: fd });
+    const r = await fetch('/train/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'key=' + encodeURIComponent(key),
+    });
     const data = await r.json();
     if (!data.ok) {
       alert('Download failed: ' + (data.error || r.status));
