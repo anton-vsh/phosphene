@@ -2651,6 +2651,94 @@ def repo_status_list() -> list[dict]:
     return out
 
 
+# ---- Model integrity (corrupt/partial-weight detection) ----------------------
+# A truncated or corrupt safetensors decodes to garbage — the leading
+# *non-Metal* explanation for the "mosaic" / latent-grid output some users hit
+# (it hits some Macs and not others — exactly the observed pattern — and a clean
+# re-download fixes it). These checks are header-only (no tensor load), so they
+# are cheap enough to run at boot and surface in /status.
+def _verify_safetensors(path: Path) -> tuple[bool, str]:
+    """Validate a .safetensors file's structure WITHOUT loading tensors.
+
+    Layout: [8-byte little-endian u64 header_len][header JSON][tensor data].
+    Each tensor entry carries ``data_offsets`` [start, end] into the data blob,
+    so the file must be exactly ``8 + header_len + max(end)`` bytes. A shorter
+    file = an interrupted/partial download. Returns ``(ok, reason)``."""
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        return False, f"missing ({e})"
+    if size < 8:
+        return False, f"too small ({size} bytes)"
+    try:
+        with open(path, "rb") as fh:
+            hdr_len = int.from_bytes(fh.read(8), "little")
+            if hdr_len <= 0 or hdr_len > 100 * 1024 * 1024:
+                return False, f"implausible header length ({hdr_len})"
+            if 8 + hdr_len > size:
+                return False, f"truncated header (need {8 + hdr_len}, file is {size})"
+            header = json.loads(fh.read(hdr_len).decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 — any parse failure means corrupt
+        return False, f"unreadable header ({e})"
+    max_end = 0
+    for name, meta in header.items():
+        if name == "__metadata__":
+            continue
+        off = (meta or {}).get("data_offsets")
+        if isinstance(off, list) and len(off) == 2:
+            try:
+                max_end = max(max_end, int(off[1]))
+            except (TypeError, ValueError):
+                return False, "corrupt data_offsets in header"
+    expected = 8 + hdr_len + max_end
+    if size < expected:
+        return False, (f"incomplete: {size} bytes on disk, header declares "
+                       f"{expected} ({expected - size} short — interrupted download)")
+    return True, "ok"
+
+
+_INTEGRITY_LOCK = threading.Lock()
+_INTEGRITY_CACHE: dict = {"ts": 0.0, "data": None}
+
+
+def _model_integrity(force: bool = False) -> dict:
+    """Header-only integrity scan of installed model weights. Cached ~120 s so
+    the frequently-polled /status doesn't re-read headers every tick.
+
+    Returns {"ok": bool, "bad": [{"repo","file","reason"}], "checked": int,
+             "scanned_ts": float}."""
+    now = time.time()
+    with _INTEGRITY_LOCK:
+        cached = _INTEGRITY_CACHE["data"]
+        if (not force) and cached is not None and (now - _INTEGRITY_CACHE["ts"] < 120):
+            return cached
+    result: dict = {"ok": True, "bad": [], "checked": 0, "scanned_ts": now}
+    try:
+        snap = repo_status_list()
+    except Exception:  # noqa: BLE001 — integrity must never break /status
+        snap = []
+    defs = {r["key"]: r for r in _repos()}
+    for r in snap:
+        if not r.get("complete"):
+            continue  # a missing model is the download flow's job, not integrity's
+        base = Path(r.get("location") or (ROOT / r["local_dir"]))
+        for fname in defs.get(r["key"], {}).get("files", []):
+            if not fname.endswith(".safetensors"):
+                continue
+            fpath = base / fname
+            if not fpath.exists():
+                continue  # presence already vetted by repo_status_list; don't false-flag
+            ok, reason = _verify_safetensors(fpath)
+            result["checked"] += 1
+            if not ok:
+                result["ok"] = False
+                result["bad"].append({"repo": r["key"], "file": fname, "reason": reason})
+    with _INTEGRITY_LOCK:
+        _INTEGRITY_CACHE["ts"] = now
+        _INTEGRITY_CACHE["data"] = result
+    return result
+
+
 # ---- HF download (in-panel model fetcher) ------------------------------------
 # `hf` is the v1+ huggingface_hub CLI. We resolve it from (in order):
 #   1. $LTX_HF env var
@@ -8056,6 +8144,9 @@ class Handler(BaseHTTPRequestHandler):
             _repo_snap = repo_status_list()
             payload["repos_total"] = len(_repo_snap)
             payload["repos_ready"] = sum(1 for r in _repo_snap if r.get("complete"))
+            # Structural integrity of installed weights — corrupt/partial
+            # safetensors decode to a garbage "mosaic". Cached + header-only.
+            payload["model_integrity"] = _model_integrity(force=False)
             # Hardware tier — UI uses this to disable mode pills / quality
             # buttons / show a helpful banner explaining what this Mac can
             # and can't do. Detected once at startup; the override env
@@ -11397,6 +11488,52 @@ class Handler(BaseHTTPRequestHandler):
             _kill_active_download()
             push(f"[hf] cancel requested for {rid}")
             self._json({"ok": True}); return
+
+        if path == "/models/verify":
+            # On-demand structural integrity re-scan of installed weights.
+            self._json(_model_integrity(force=True)); return
+
+        if path == "/models/repair":
+            # Re-download corrupt/partial weight files for a repo. We DELETE the
+            # bad files first (hf skips files it believes are already complete,
+            # so a same-size-but-corrupt file would never be re-fetched), then
+            # run the normal resumable download. POST { repo_key }.
+            key = (form.get("repo_key", [""])[0] or "").strip()
+            repo = next((r for r in _repos() if r.get("key") == key), None)
+            if not repo:
+                self._json({"error": f"unknown repo key: {key!r}"}, 400); return
+            bad = [b["file"] for b in _model_integrity(force=True)["bad"] if b["repo"] == key]
+            if not bad:
+                self._json({"ok": True, "nothing_to_repair": True,
+                            "note": f"no corrupt files detected for {key!r}"}); return
+            if HF_BIN is None:
+                self._json({"error": "hf binary not found. Reinstall Phosphene."}, 500); return
+            target = Q8_LOCAL_PATH if key == "q8" else (ROOT / repo["local_dir"])
+            deleted = []
+            for fname in bad:
+                for cand in {Path(target) / fname, ROOT / repo["local_dir"] / fname}:
+                    try:
+                        if cand.exists():
+                            cand.unlink()
+                            if fname not in deleted:
+                                deleted.append(fname)
+                    except OSError:
+                        pass
+            with DOWNLOAD_LOCK:
+                if DOWNLOAD["active"]:
+                    self._json({"error": f"another download is in progress: "
+                                         f"{DOWNLOAD['repo_id']}. Wait or Cancel."}, 409); return
+                DOWNLOAD["active"] = True
+                DOWNLOAD["key"] = key
+                DOWNLOAD["repo_id"] = repo["repo_id"]
+                DOWNLOAD["started_ts"] = time.time()
+                DOWNLOAD["last_line"] = "repairing…"
+            with _INTEGRITY_LOCK:           # bust the cache so the next scan re-checks
+                _INTEGRITY_CACHE["ts"] = 0.0
+            push(f"[repair] {key}: deleted {len(deleted)} corrupt/partial file(s) "
+                 f"({', '.join(deleted)}) — re-downloading.")
+            threading.Thread(target=_download_thread, args=(repo,), daemon=True).start()
+            self._json({"ok": True, "deleted": deleted, "repo_id": repo["repo_id"]}, 202); return
 
         if path == "/prompt/enhance":
             # Gemma-driven prompt enhancement, routed through the warm
@@ -23750,6 +23887,53 @@ function _setOfflineBanner(visible, msg) {
   }
 }
 
+// 2026-06-04: model-integrity banner. The backend flags corrupt/partial weight
+// files (a garbage-decode "mosaic" cause) in /status.model_integrity; surface a
+// one-click Repair so users self-heal instead of staring at broken renders.
+function renderIntegrityBanner(integ) {
+  const bad = (integ && !integ.ok) ? (integ.bad || []) : [];
+  let el = document.getElementById('integrityBanner');
+  if (!bad.length) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'integrityBanner';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#7a1f1f;'
+      + 'color:#fff;padding:10px 16px;font-size:13px;line-height:1.4;display:flex;'
+      + 'align-items:center;gap:12px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.45)';
+    document.body.appendChild(el);
+  }
+  const repos = [...new Set(bad.map(b => b.repo))];
+  const files = bad.map(b => b.file).join(', ');
+  el.innerHTML =
+    '<span style="font-weight:700">Model files look incomplete / corrupt</span>'
+    + '<span style="opacity:.92">' + escapeHtml(files) + ' — this produces garbled / "mosaic" '
+    + 'output (usually an interrupted download).</span>'
+    + '<span style="margin-left:auto;display:flex;gap:8px">'
+    + repos.map(k => '<button class="btn btn-primary" onclick="repairModel(\'' + escapeHtml(k)
+        + '\')">Repair ' + escapeHtml(k.toUpperCase()) + ' (re-download)</button>').join('')
+    + '<button class="btn" onclick="this.closest(\'#integrityBanner\').remove()">Dismiss</button>'
+    + '</span>';
+}
+
+async function repairModel(key) {
+  if (!confirm('Re-download the corrupt ' + key.toUpperCase() + ' model file(s)?\n\n'
+      + 'This deletes the bad files and fetches fresh copies (resumable).')) return;
+  try {
+    const r = await fetch('/models/repair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'repo_key=' + encodeURIComponent(key),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      alert('Repair started — re-downloading ' + ((data.deleted || []).length) + ' file(s). '
+        + 'Watch the download progress / Logs; the banner clears once the files verify clean.');
+    } else {
+      alert('Repair failed: ' + (data.error || r.status));
+    }
+  } catch (e) { alert('Repair failed: ' + e); }
+}
+
 async function poll() {
   // Reflect HDR-vs-character mutual exclusion every poll cycle. character_id
   // gets set from multiple code paths (manual chip click, load-params,
@@ -23777,6 +23961,9 @@ async function poll() {
     return;
   }
   LAST_STATUS = s;
+
+  // Corrupt/partial-weight banner (mosaic self-heal).
+  try { renderIntegrityBanner(s.model_integrity); } catch (_) {}
 
   // Memory
   const m = s.memory;
@@ -28834,6 +29021,25 @@ if __name__ == "__main__":
         raise
     print(f"LTX MLX Studio: http://127.0.0.1:{PORT}", flush=True)
     print(f"queue: {len(STATE['queue'])} pending, hidden: {len(HIDDEN_PATHS)}", flush=True)
+    # Boot-time weight integrity scan. A truncated/corrupt safetensors decodes
+    # to garbage ("mosaic"); flag it loudly so the user can Repair rather than
+    # stare at broken renders. Header-only, so it is fast. ASCII only (emoji in
+    # panel stdout can break the Pinokio/helper handshake — see 2026-06-02).
+    try:
+        _integ = _model_integrity(force=True)
+        if not _integ["ok"]:
+            print("-" * 64, flush=True)
+            print(f"WARNING model integrity: {len(_integ['bad'])} weight file(s) look "
+                  f"corrupt/incomplete:", flush=True)
+            for _b in _integ["bad"]:
+                print(f"    [{_b['repo']}] {_b['file']} - {_b['reason']}", flush=True)
+            print("  This produces garbled / 'mosaic' output. Use the Repair banner in", flush=True)
+            print("  the panel (or re-run Install) to re-download the affected files.", flush=True)
+            print("-" * 64, flush=True)
+        else:
+            print(f"model integrity: OK ({_integ['checked']} weight files verified)", flush=True)
+    except Exception as _ie:  # noqa: BLE001 — never block boot on the scan
+        print(f"model integrity scan skipped: {_ie}", flush=True)
     try:
         server.serve_forever()
     finally:
