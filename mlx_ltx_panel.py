@@ -4285,6 +4285,9 @@ class WarmHelper:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True,
             )
+            # Fresh fd → drop any bytes carried over from a prior helper's pipe
+            # so _read_until's line buffer starts clean for this process.
+            self._read_carry = b""
             ready = self._read_until(["ready", "error", "exit"], timeout=120)
             if not ready or ready.get("event") != "ready":
                 raise RuntimeError(f"helper failed to start: {ready}")
@@ -4293,14 +4296,21 @@ class WarmHelper:
                 k: ready.get(k) for k in (
                     "ltx_version", "ltx_version_expected", "ltx_version_match",
                     "model", "gemma", "low_memory",
+                    "mlx_version", "mlx_metal_version", "chip", "macos",
                 )
             }
             _vtag = ""
             if ready.get("ltx_version") is not None:
                 _vtag = (f" · ltx-2-mlx={ready.get('ltx_version')}"
-                         + ("" if ready.get("ltx_version_match") else " ⚠️SKEW"))
+                         + ("" if ready.get("ltx_version_match") else " SKEW"))
+            # Self-documenting env on the ready line — mlx + chip are the data we
+            # need on mosaic / garbled-output reports (an MLX numerical bug per
+            # chip/mlx, not a crash). ASCII only (emoji here can break stdout).
+            _env = (f" · mlx={ready.get('mlx_version')}" if ready.get("mlx_version") else "")
+            if ready.get("chip"):
+                _env += f" · {ready.get('chip')}"
             push(f"helper ready · model={ready.get('model')} · "
-                 f"low_memory={ready.get('low_memory')}{_vtag}")
+                 f"low_memory={ready.get('low_memory')}{_vtag}{_env}")
 
     def _read_until(self, target_events: list[str], timeout: float | None = None,
                     log_hook: callable | None = None,
@@ -4320,10 +4330,30 @@ class WarmHelper:
         deadline = time.time() + timeout if timeout else None
         # Poll-and-check loop: blocking readline() used to mean a hung helper
         # froze the worker thread until /stop. select() with a small interval
-        # gives us deterministic deadline enforcement; readline() is only
-        # called once we know there's data waiting.
+        # gives us deterministic deadline enforcement.
+        #
+        # CRITICAL (2026-06-05): we read the RAW fd with os.read() and split
+        # lines ourselves instead of select()+stdout.readline(). The old code
+        # mixed select() on the OS fd with a buffered TextIOWrapper.readline().
+        # When the helper emits a burst — e.g. a "log" line immediately
+        # followed by "ready" — a single readline() pulls BOTH lines off the
+        # pipe into Python's userspace buffer and returns only the first. The
+        # second ("ready") then sits in the TextIOWrapper buffer, NOT on the
+        # OS fd, so select() never reports it readable; if the helper then
+        # goes silent (exactly what it does after "ready"), _read_until hung
+        # for the full timeout → "helper failed to start: None". This was
+        # dormant for as long as "ready" was the helper's first emitted event;
+        # any pre-ready line (the version-skew log, the runtime fingerprint)
+        # exposed it. os.read() only ever returns bytes select() already saw,
+        # and we drain EVERY complete line from the carry buffer before
+        # waiting on select() again — so no line is ever stranded.
         poll_interval = 0.5
-        stdout = self.proc.stdout
+        try:
+            fd = self.proc.stdout.fileno()
+        except (OSError, ValueError):
+            return None
+        if not hasattr(self, "_read_carry"):
+            self._read_carry = b""
         while True:
             if deadline and time.time() > deadline:
                 return None
@@ -4334,18 +4364,25 @@ class WarmHelper:
                 synth = panic_check()
                 if synth is not None:
                     return synth
-            rlist, _, _ = select.select([stdout], [], [], poll_interval)
-            if not rlist:
-                continue  # idle slice — re-check deadline
-            try:
-                line = stdout.readline()
-            except (OSError, ValueError):
-                # Pipe closed underneath us (kill from another thread).
-                return None
-            if not line:
-                # EOF — helper closed stdout (likely crashed or was killed).
-                return None
-            line = line.strip()
+            nl = self._read_carry.find(b"\n")
+            if nl < 0:
+                # No complete line buffered — wait for more bytes on the fd.
+                rlist, _, _ = select.select([fd], [], [], poll_interval)
+                if not rlist:
+                    continue  # idle slice — re-check deadline
+                try:
+                    chunk = os.read(fd, 65536)
+                except (OSError, ValueError):
+                    # Pipe closed underneath us (kill from another thread).
+                    return None
+                if not chunk:
+                    # EOF — helper closed stdout (likely crashed or was killed).
+                    return None
+                self._read_carry += chunk
+                continue  # loop back to drain complete lines from the buffer
+            raw = self._read_carry[:nl]
+            self._read_carry = self._read_carry[nl + 1:]
+            line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
             try:
@@ -8079,6 +8116,12 @@ class Handler(BaseHTTPRequestHandler):
             payload["ltx_version"] = HELPER.ready_info.get("ltx_version")
             payload["ltx_version_expected"] = HELPER.ready_info.get("ltx_version_expected")
             payload["ltx_version_match"] = HELPER.ready_info.get("ltx_version_match")
+            # Runtime fingerprint (mlx/chip/macOS) for triaging the "mosaic"
+            # MLX-numerical bug — surfaces in every bug report's /status.
+            payload["mlx_version"] = HELPER.ready_info.get("mlx_version")
+            payload["mlx_metal_version"] = HELPER.ready_info.get("mlx_metal_version")
+            payload["chip"] = HELPER.ready_info.get("chip")
+            payload["macos"] = HELPER.ready_info.get("macos")
             # Per-kind avg ETA: image jobs are 30s–2min, video jobs are
             # 5–30min. Computing queue ETA from one mixed avg makes an
             # image queued after a few videos show "~30 min" — the

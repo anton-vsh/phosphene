@@ -1774,6 +1774,51 @@ if not _LTX_VERSION_INFO["match"]:
                    f"against {_LTX_EXPECTED_VERSION}; behavior on this version is "
                    f"unvalidated. {_LTX_VERSION_INFO['note']}".strip())})
 
+# ---- runtime fingerprint (mlx / chip / OS) ----------------------------------
+# Every render log then self-documents the exact environment — the data we keep
+# having to ask for on "mosaic" / garbled-output reports. Those are an MLX
+# numerical-correctness issue on specific chip+mlx combos (the render completes
+# and writes a normal-size file full of garbage pixels — not a crash, OOM, or
+# corrupt weights), so the mlx/mlx-metal version and the Apple chip are exactly
+# what's needed to triangulate. Never raises.
+def _detect_runtime_env() -> dict:
+    env = {"mlx": None, "mlx_metal": None, "mlx_lm": None,
+           "chip": None, "macos": None, "arch": None}
+    try:
+        import importlib.metadata as _md
+        for _k, _dist in (("mlx", "mlx"), ("mlx_metal", "mlx-metal"), ("mlx_lm", "mlx-lm")):
+            try:
+                env[_k] = _md.version(_dist)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        import platform as _pf
+        env["arch"] = _pf.machine()
+        env["macos"] = _pf.mac_ver()[0] or None
+    except Exception:
+        pass
+    try:
+        import subprocess as _sp
+        _chip = _sp.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                        capture_output=True, text=True, timeout=3).stdout.strip()
+        env["chip"] = _chip or None
+    except Exception:
+        pass
+    return env
+
+
+_RUNTIME_ENV = _detect_runtime_env()
+# ASCII only — this is emitted to the helper's stdout, which the panel reads to
+# parse events; a non-ASCII byte there can break the read on a non-UTF-8 locale
+# (the same failure mode the version-skew emoji had). No "·" / emoji here.
+emit({"event": "log",
+      "line": (f"runtime | mlx={_RUNTIME_ENV.get('mlx')} "
+               f"mlx-metal={_RUNTIME_ENV.get('mlx_metal')} | "
+               f"chip={_RUNTIME_ENV.get('chip')} | "
+               f"macOS={_RUNTIME_ENV.get('macos')} ({_RUNTIME_ENV.get('arch')})")})
+
 # ---- ready -------------------------------------------------------------------
 emit({
     "event": "ready",
@@ -1784,6 +1829,10 @@ emit({
     "ltx_version": _LTX_VERSION_INFO["version"],
     "ltx_version_expected": _LTX_EXPECTED_VERSION,
     "ltx_version_match": _LTX_VERSION_INFO["match"],
+    "mlx_version": _RUNTIME_ENV.get("mlx"),
+    "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
+    "chip": _RUNTIME_ENV.get("chip"),
+    "macos": _RUNTIME_ENV.get("macos"),
 })
 
 
