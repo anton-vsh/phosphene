@@ -46,6 +46,14 @@ from urllib.parse import parse_qs, quote, urlparse
 # Pre-removal snapshot: git tag pre-agent-removal-2026-05-15.
 import image_engine as agent_image_engine
 
+# Agent-facing Ideogram 4 caption builder + validator (pure stdlib). Powers
+# the GET /image/agent/schema + POST /image/agent endpoints — a clean JSON
+# surface that lets an LLM agent compose an Ideogram 4 layout (scene, text
+# placement, object regions, colors) WITHOUT knowing the model's finicky
+# internal caption schema. Faithful Python port of the panel's JS canvas
+# serializer (ideoBuildCaption / ideoSynthDesc / ideoRectToBbox).
+import ideogram_caption
+
 # --- Paths -------------------------------------------------------------------
 # Everything below is overridable via env vars so the panel can be cloned and
 # run from any directory without source edits. Defaults assume the repo layout:
@@ -8579,6 +8587,227 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 40
             self._json({"uploads": list_uploads(limit=max(1, min(200, limit)))})
             return
+        if parsed.path == "/image/agent/schema":
+            # Self-serve contract for an LLM agent driving Ideogram 4 layout
+            # via POST /image/agent. An agent that reads ONLY this response
+            # should be able to compose a valid request: it documents the
+            # box model (fractions, top-left origin), every field + its
+            # allowed values, the caption rules we enforce, two complete
+            # worked examples, and how wait/validate_only behave. No secrets.
+            self._json({
+                "version": "1.0",
+                "description": (
+                    "Compose an Ideogram 4 image — scene, on-image text, object "
+                    "regions, styles, colors — by describing it in plain terms. "
+                    "POST your spec to /image/agent. The server translates it into "
+                    "Ideogram 4's strict internal caption for you; you never write "
+                    "that caption by hand. Coordinates are FRACTIONS of the frame "
+                    "with a top-left origin: x,y is the top-left corner of a box, "
+                    "w,h its size, each in [0,1]. (0,0)=top-left, (1,1)=bottom-right. "
+                    "Coordinates are aspect-independent — the same box lands in the "
+                    "same relative spot at any aspect ratio."
+                ),
+                "endpoint": {
+                    "method": "POST",
+                    "path": "/image/agent",
+                    "content_type": "application/json",
+                },
+                "spec_schema": {
+                    "scene": {
+                        "type": "string", "required": True,
+                        "doc": "Overall background / setting / mood of the whole image. "
+                               "This becomes the caption background — describe the world, "
+                               "not the text. e.g. 'A moody vintage travel poster of a "
+                               "mountain lake at golden hour, warm muted palette'.",
+                    },
+                    "boxes": {
+                        "type": "array", "required": True,
+                        "doc": "List of placed elements (text and/or objects). May be "
+                               "empty for a pure-scene render. Each item is a box object "
+                               "(see box_schema). Max 6 TEXT boxes; object boxes are "
+                               "uncapped but keep layouts legible.",
+                        "item": "box",
+                    },
+                    "render": {
+                        "type": "string", "required": False, "default": "design",
+                        "enum": list(ideogram_caption.VALID_RENDER),
+                        "doc": "'design' = graphic/poster/vector look (strong typography). "
+                               "'photo' = photographic look. Affects the high-level "
+                               "description the model receives.",
+                    },
+                    "aspect": {
+                        "type": "string", "required": False, "default": "16:9",
+                        "enum": list(ideogram_caption.VALID_ASPECT),
+                        "doc": "Frame aspect ratio. 16:9=1280x720, 1:1=1024x1024, "
+                               "9:16=720x1280, 4:3=1024x768, 3:4=768x1024, 21:9=1280x544.",
+                    },
+                    "quality": {
+                        "type": "string", "required": False, "default": "turbo",
+                        "enum": list(ideogram_caption.VALID_QUALITY),
+                        "doc": "Sampler effort. 'turbo' (12 steps, fastest), "
+                               "'default' (20 steps), 'quality' (48 steps, slowest/best).",
+                    },
+                    "n": {
+                        "type": "integer", "required": False, "default": 1,
+                        "min": 1, "max": 4,
+                        "doc": "How many candidate images to render (1-4).",
+                    },
+                    "seed": {
+                        "type": "integer", "required": False, "default": -1,
+                        "doc": "Fixed seed for reproducibility; -1 (or omit) = random. "
+                               "For n>1 the server uses seed, seed+1, ... per candidate.",
+                    },
+                    "validate_only": {
+                        "type": "boolean", "required": False, "default": False,
+                        "doc": "If true, do NOT render — return the built caption + any "
+                               "warnings so you can inspect/iterate cheaply.",
+                    },
+                    "wait": {
+                        "type": "boolean", "required": False, "default": True,
+                        "doc": "If true (default), block until the render finishes and "
+                               "return image paths/urls. If false, enqueue and return "
+                               "immediately with queued:true.",
+                    },
+                    "box_schema": {
+                        "type": {
+                            "type": "string", "required": True,
+                            "enum": list(ideogram_caption.VALID_TYPES),
+                            "doc": "'text' renders literal words; 'object' renders a "
+                                   "described thing in that region.",
+                        },
+                        "x": {"type": "number", "required": True, "min": 0, "max": 1,
+                              "doc": "Left edge as a fraction of frame width (0=left)."},
+                        "y": {"type": "number", "required": True, "min": 0, "max": 1,
+                              "doc": "Top edge as a fraction of frame height (0=top)."},
+                        "w": {"type": "number", "required": True, "min": 0, "max": 1,
+                              "doc": "Width as a fraction of frame width. x+w must be <= 1."},
+                        "h": {"type": "number", "required": True, "min": 0, "max": 1,
+                              "doc": "Height as a fraction of frame height. y+h must be <= 1."},
+                        "text": {"type": "string", "required": "for type=text",
+                                 "doc": "The literal words to render. Required for text "
+                                        "boxes; empty text boxes are dropped."},
+                        "desc": {"type": "string", "required": "for type=object",
+                                 "doc": "What to render. REQUIRED for object boxes. "
+                                        "Optional for text boxes — when given it overrides "
+                                        "the auto-generated style/align/color description."},
+                        "style": {"type": "string", "required": False, "default": "headline",
+                                  "enum": list(ideogram_caption.VALID_STYLES),
+                                  "doc": "Text-only. Typographic feel: headline/subhead/"
+                                         "body/caps/script/serif."},
+                        "align": {"type": "string", "required": False, "default": "center",
+                                  "enum": list(ideogram_caption.VALID_ALIGN),
+                                  "doc": "Text-only. left/center/right."},
+                        "color": {"type": "string", "required": False, "default": "#FFFFFF",
+                                  "doc": "Text-only. Hex #RRGGBB (any case; normalized to "
+                                         "uppercase). Bad values fall back to #FFFFFF."},
+                    },
+                },
+                "caption_rules_summary": [
+                    "Coordinates are fractions in [0,1] with a top-left origin; "
+                    "internally each box becomes a bbox [y_min,x_min,y_max,x_max] of "
+                    "row-first integers in 0..1000 (you never write this yourself).",
+                    "At most 6 text boxes. Object boxes carry a required desc.",
+                    "Each text box gets one color (#RRGGBB, uppercased). Boxes that "
+                    "extend past the frame edge (x+w>1 or y+h>1) are clamped — a warning "
+                    "is returned.",
+                    "Heavily overlapping boxes (>40% of the smaller box) get a warning "
+                    "but still render.",
+                    "Empty text boxes are silently dropped from the final caption.",
+                ],
+                "examples": [
+                    {
+                        "name": "16:9 poster — 2 text + 1 object",
+                        "request": {
+                            "scene": "A moody vintage travel poster of a mountain lake at "
+                                     "golden hour, warm muted palette",
+                            "render": "design",
+                            "aspect": "16:9",
+                            "quality": "turbo",
+                            "n": 1,
+                            "boxes": [
+                                {"type": "text", "x": 0.08, "y": 0.08, "w": 0.84, "h": 0.18,
+                                 "text": "LAKE DISTRICT", "style": "headline",
+                                 "align": "center", "color": "#F5C518"},
+                                {"type": "text", "x": 0.30, "y": 0.80, "w": 0.40, "h": 0.10,
+                                 "text": "Est. 1951", "style": "serif",
+                                 "align": "center", "color": "#FFFFFF"},
+                                {"type": "object", "x": 0.55, "y": 0.32, "w": 0.35, "h": 0.42,
+                                 "desc": "A small wooden canoe drifting on the still lake"},
+                            ],
+                        },
+                        "built_caption": ideogram_caption.build_caption({
+                            "scene": "A moody vintage travel poster of a mountain lake at "
+                                     "golden hour, warm muted palette",
+                            "render": "design",
+                            "boxes": [
+                                {"type": "text", "x": 0.08, "y": 0.08, "w": 0.84, "h": 0.18,
+                                 "text": "LAKE DISTRICT", "style": "headline",
+                                 "align": "center", "color": "#F5C518"},
+                                {"type": "text", "x": 0.30, "y": 0.80, "w": 0.40, "h": 0.10,
+                                 "text": "Est. 1951", "style": "serif",
+                                 "align": "center", "color": "#FFFFFF"},
+                                {"type": "object", "x": 0.55, "y": 0.32, "w": 0.35, "h": 0.42,
+                                 "desc": "A small wooden canoe drifting on the still lake"},
+                            ],
+                        }),
+                    },
+                    {
+                        "name": "9:16 label — single headline on a clean background",
+                        "request": {
+                            "scene": "A minimalist product label, soft off-white paper "
+                                     "texture, centered composition",
+                            "render": "design",
+                            "aspect": "9:16",
+                            "quality": "default",
+                            "n": 1,
+                            "boxes": [
+                                {"type": "text", "x": 0.10, "y": 0.42, "w": 0.80, "h": 0.16,
+                                 "text": "COLD BREW", "style": "caps",
+                                 "align": "center", "color": "#0A0A0A"},
+                            ],
+                        },
+                        "built_caption": ideogram_caption.build_caption({
+                            "scene": "A minimalist product label, soft off-white paper "
+                                     "texture, centered composition",
+                            "render": "design",
+                            "boxes": [
+                                {"type": "text", "x": 0.10, "y": 0.42, "w": 0.80, "h": 0.16,
+                                 "text": "COLD BREW", "style": "caps",
+                                 "align": "center", "color": "#0A0A0A"},
+                            ],
+                        }),
+                    },
+                ],
+                "usage_notes": {
+                    "validate_only": "POST with validate_only:true to get {ok, caption, "
+                                     "issues} back without rendering — use it to iterate on "
+                                     "a layout for free. issues is a list of human-readable "
+                                     "warnings; an empty list means the spec is clean.",
+                    "wait_true": "Default. The request blocks until the render completes "
+                                 "(or fails/times out) and returns {ok, caption, images:"
+                                 "[{path,url}], seconds}. Open each url on this same host to "
+                                 "view the PNG.",
+                    "wait_false": "Returns 202 {ok, queued:true, caption, where_results_land} "
+                                  "immediately; the job runs on the panel's queue and the "
+                                  "results appear in the panel's Recent tab / library.",
+                    "busy": "If the GPU is busy with another render or training job, a "
+                            "wait:true request waits in the queue. Renders are serialized; "
+                            "expect to wait behind any in-flight job.",
+                    "render_times_per_image": {
+                        "turbo": "~12-step sampler; fastest. Seconds-to-low-minutes per "
+                                 "image after a one-time model load (first call also pays "
+                                 "the cold model load).",
+                        "default": "~20-step sampler; moderate.",
+                        "quality": "~48-step sampler; slowest, highest fidelity.",
+                        "note": "Wall time = one-time model cold-load + n × per-image "
+                                "sampler time. The first Ideogram render after panel start "
+                                "is slower because the weights load once.",
+                    },
+                    "timeout": "A wait:true render gives up after 25 minutes and returns an "
+                               "error; the job may still complete on the queue.",
+                },
+            })
+            return
         if parsed.path == "/image/engine_status":
             # Per-engine cache + wall-time data for the Image Studio's status
             # pill + Generate button label. The Studio polls this on entry +
@@ -10093,6 +10322,219 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:
                 self._json({"error": f"voice upload failed: {exc}"}, 500)
+            return
+
+        # ===== Agent-facing Ideogram 4 layout endpoint =====================
+        # POST /image/agent — an LLM agent describes a composition in plain
+        # terms (scene + fractional text/object boxes) and we translate it
+        # into Ideogram 4's strict internal caption, then render it through
+        # the SAME queue path the browser UI uses (engine_override=
+        # ideogram4_inline, prompt = the JSON caption). GET /image/agent/schema
+        # is the self-serve contract an agent reads first. Lives before the
+        # urlencoded parsing because the body is JSON. NEVER echoes secrets.
+        if path == "/image/agent" and ctype.startswith("application/json"):
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self._json({"ok": False, "error": "invalid Content-Length"}, 400); return
+            if length <= 0:
+                self._json({"ok": False, "error": "Content-Length required for JSON body"}, 411); return
+            MAX_AGENT_JSON = 1 * 1024 * 1024
+            if length > MAX_AGENT_JSON:
+                self._json({"ok": False, "error": f"body too large (max {MAX_AGENT_JSON} bytes)"}, 413); return
+            try:
+                spec = json.loads(self.rfile.read(length).decode() or "{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._json({"ok": False, "error": "invalid JSON body"}, 400); return
+            if not isinstance(spec, dict):
+                self._json({"ok": False, "error": "body must be a JSON object (the spec)"}, 400); return
+
+            # ---- option fields (with HTTP-layer enum/range enforcement) ----
+            render = spec.get("render", "design")
+            aspect = spec.get("aspect", "16:9")
+            quality = spec.get("quality", "turbo")
+            wait = spec.get("wait", True)
+            validate_only = bool(spec.get("validate_only", False))
+            try:
+                n = int(spec.get("n", 1))
+            except (TypeError, ValueError):
+                n = -1
+            try:
+                seed = int(spec.get("seed", -1))
+            except (TypeError, ValueError):
+                seed = -1
+
+            # Fatal, request-shape errors (400) — these block before we even
+            # build a caption. Distinct from spec WARNINGS (returned in issues).
+            shape_errors: list[str] = []
+            if render not in ideogram_caption.VALID_RENDER:
+                shape_errors.append(f"render must be one of {list(ideogram_caption.VALID_RENDER)}")
+            if aspect not in ideogram_caption.VALID_ASPECT:
+                shape_errors.append(f"aspect must be one of {list(ideogram_caption.VALID_ASPECT)}")
+            if quality not in ideogram_caption.VALID_QUALITY:
+                shape_errors.append(f"quality must be one of {list(ideogram_caption.VALID_QUALITY)}")
+            if not isinstance(n, int) or n < 1 or n > 4:
+                shape_errors.append("n must be an integer in 1..4")
+            if not isinstance(spec.get("boxes", []), list):
+                shape_errors.append("boxes must be a list")
+
+            # Content validation — warnings + harder problems, human-readable.
+            issues = ideogram_caption.validate_spec(spec)
+
+            # Which issues are FATAL (the model could not produce a usable
+            # render)? Off-frame clamps, overlaps and bad-color fallbacks are
+            # tolerable warnings; the rest (no scene, object w/o desc, bad
+            # type, out-of-range/missing coords, >6 text boxes) are fatal.
+            def _is_warning(msg: str) -> bool:
+                return (
+                    "extends past the" in msg
+                    or "overlap" in msg
+                    or "default to #FFFFFF" in msg
+                    or "it will be dropped from the caption" in msg
+                )
+            fatal_issues = [m for m in issues if not _is_warning(m)]
+
+            # Build the caption regardless (so validate_only can show it even
+            # when warnings exist); guarded so a malformed box can't 500.
+            try:
+                caption = ideogram_caption.build_caption(spec)
+            except Exception as exc:  # noqa: BLE001
+                self._json({"ok": False, "issues": [f"could not build caption: {exc}"] + issues}, 400)
+                return
+
+            # A render needs at least one element that survives into the
+            # caption (empty boxes => pure-scene is allowed, but an all-empty-
+            # text spec with no objects renders nothing meaningful).
+            elements = caption.get("compositional_deconstruction", {}).get("elements", [])
+            boxes_in = spec.get("boxes", []) if isinstance(spec.get("boxes", []), list) else []
+            if boxes_in and not elements:
+                fatal_issues.append("no renderable elements — every box was empty or invalid")
+
+            if shape_errors or fatal_issues:
+                self._json({"ok": False, "issues": shape_errors + fatal_issues}, 400)
+                return
+
+            if validate_only:
+                # No render — hand back the caption + any remaining warnings.
+                self._json({"ok": True, "caption": caption, "issues": issues})
+                return
+
+            # ---- submit through the SAME queue path the UI uses ----
+            # Build the exact form make_job()'s mode=image branch consumes,
+            # then enqueue like /queue/add. The worker serializes GPU work
+            # (holds _GPU_LOCK for the whole job) and routes mode=image to
+            # run_image_job_inner — identical to a browser submit, so the
+            # render also shows up in the panel's Now/Queue/Recent surfaces.
+            prompt_json = json.dumps(caption, ensure_ascii=False)
+            form = {
+                "mode": "image",
+                "prompt": prompt_json,
+                "engine_override": "ideogram4_inline",
+                "ideo_preset": ideogram_caption.QUALITY_PRESET[quality],
+                "aspect": aspect,
+                "n": str(n),
+                "seed": str(seed),
+                "refs": "[]",
+                "session_tag": "agent",
+            }
+            try:
+                job = make_job(form)
+            except Exception as exc:  # noqa: BLE001
+                self._json({"ok": False, "error": f"could not build job: {exc}"}, 400)
+                return
+            with QUEUE_COND:
+                STATE["queue"].append(job)
+                QUEUE_COND.notify_all()
+            persist_queue()
+            job_id = job["id"]
+
+            if not wait:
+                # Fire-and-forget — tell the agent where to look.
+                self._json({
+                    "ok": True,
+                    "queued": True,
+                    "job_id": job_id,
+                    "caption": caption,
+                    "where_results_land": (
+                        "The render runs on the panel queue; results appear in the "
+                        "panel's Recent tab and under panel_uploads/library/manual/"
+                        "<date>/. Poll GET /state for this job_id, or re-submit with "
+                        "wait:true to block for the images."
+                    ),
+                }, 202)
+                return
+
+            # ---- wait: poll the job to completion (server-side) ----------
+            # A job lives in STATE['queue'] (waiting), STATE['current']
+            # (running) or STATE['history'] (finished) — find it by id across
+            # all three under LOCK. We poll the JOB RECORD (not a global
+            # guess): success => status done + output_path/candidate_paths
+            # populated; failure => status failed/cancelled + error.
+            def _find_job(jid: str):
+                with LOCK:
+                    cur = STATE.get("current")
+                    if cur and cur.get("id") == jid:
+                        return cur
+                    for j in STATE.get("queue", []):
+                        if j.get("id") == jid:
+                            return j
+                    for j in STATE.get("history", []):
+                        if j.get("id") == jid:
+                            return j
+                return None
+
+            deadline = time.time() + 25 * 60  # 25 min timeout
+            poll_t0 = time.time()
+            while True:
+                rec = _find_job(job_id)
+                if rec is not None:
+                    status = rec.get("status")
+                    if status in ("done", "failed", "cancelled"):
+                        break
+                if time.time() > deadline:
+                    self._json({
+                        "ok": False,
+                        "error": "render timed out after 25 minutes (the job may still "
+                                 "finish on the queue)",
+                        "job_id": job_id,
+                        "caption": caption,
+                    }, 504)
+                    return
+                time.sleep(1.0)
+
+            rec = _find_job(job_id) or {}
+            status = rec.get("status")
+            if status != "done":
+                err = (rec.get("error") or "render failed").strip()
+                low = err.lower()
+                # GPU/lock contention or video-in-flight → 503 (transient), not a
+                # generic 500: tell the agent it can retry once the GPU frees up.
+                if ("in progress" in low or "gpu is busy" in low
+                        or "already in progress" in low or "contend" in low):
+                    code = 503
+                elif status == "cancelled":
+                    code = 409
+                else:
+                    code = 500
+                self._json({"ok": False, "error": err, "job_id": job_id, "caption": caption}, code)
+                return
+
+            # Success — collect the candidate PNG paths the worker recorded.
+            params = rec.get("params", {}) or {}
+            paths = list(params.get("candidate_paths") or [])
+            if not paths and rec.get("output_path"):
+                paths = [rec["output_path"]]
+            images = [{"path": p, "url": "/file?path=" + quote(p)} for p in paths]
+            seconds = rec.get("elapsed_sec")
+            if seconds is None:
+                seconds = round(time.time() - poll_t0, 2)
+            self._json({
+                "ok": True,
+                "job_id": job_id,
+                "caption": caption,
+                "images": images,
+                "seconds": seconds,
+            })
             return
 
         # JSON-body endpoint for the manual Image Studio. Lives BEFORE
@@ -13459,7 +13901,7 @@ HTML = r"""<!doctype html>
       position: absolute; box-sizing: border-box;
       border: 1.5px solid var(--accent);
       background: rgba(47,129,247,0.08);
-      border-radius: 3px; cursor: move; overflow: hidden;
+      border-radius: 3px; cursor: move; overflow: visible;
       transition: border-color var(--t-fast), background var(--t-fast);
     }
     .ideo-box.obj { border-style: dashed; border-color: var(--muted); background: rgba(182,191,209,0.06); }
@@ -13491,6 +13933,17 @@ HTML = r"""<!doctype html>
       color: var(--muted); background: rgba(10,15,36,0.7); border-bottom-right-radius: 3px;
       pointer-events: none; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+    /* object label in describe mode: fills the box as a centered caret target */
+    .ideo-box-obj-label.editing {
+      inset: 0; display: flex; align-items: center; justify-content: center; text-align: center;
+      font-size: 12px; padding: 6px 10px; pointer-events: auto; cursor: text;
+      user-select: text; -webkit-user-select: text; outline: none;
+      background: rgba(8,12,28,0.30); box-shadow: inset 0 0 0 1.5px var(--accent-bright);
+      white-space: normal; max-width: none; border-bottom-right-radius: 0;
+    }
+    .ideo-box-obj-label[data-ph]:empty::before {
+      content: attr(data-ph); opacity: .4; pointer-events: none;
+    }
     /* resize handles — 8 around the box */
     .ideo-handle {
       position: absolute; width: 9px; height: 9px; box-sizing: border-box;
@@ -13505,6 +13958,75 @@ HTML = r"""<!doctype html>
     .ideo-handle.ne { top: -5px; right: -5px; cursor: nesw-resize; }
     .ideo-handle.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
     .ideo-handle.se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+
+    /* ---- inline editing + per-box controls ---- */
+    /* the editable text overrides the stage's user-select:none + crosshair */
+    .ideo-box-text.editing {
+      pointer-events: auto; cursor: text;
+      user-select: text; -webkit-user-select: text; outline: none;
+      background: rgba(8,12,28,0.30);
+      box-shadow: inset 0 0 0 1.5px var(--accent-bright);
+    }
+    .ideo-box-text[data-ph]:empty::before {
+      content: attr(data-ph); opacity: .4; font-weight: 400;
+      text-transform: none; letter-spacing: normal; pointer-events: none;
+    }
+    /* delete button — just outside the top-right corner, fades in on hover/select */
+    .ideo-box-del {
+      position: absolute; top: -9px; right: -9px; width: 19px; height: 19px;
+      display: flex; align-items: center; justify-content: center; padding: 0;
+      border: 1.5px solid var(--bg, #0a0f24); border-radius: 50%;
+      background: #e5484d; color: #fff; font-size: 14px; line-height: 1;
+      cursor: pointer; opacity: 0; transform: scale(.5);
+      transition: opacity var(--t-fast), transform var(--t-fast); z-index: 7;
+    }
+    .ideo-box:hover > .ideo-box-del,
+    .ideo-box.selected > .ideo-box-del { opacity: 1; transform: scale(1); }
+    .ideo-box-del:hover { background: #ff5b60; }
+    /* floating per-box toolbar (color / align / delete) */
+    .ideo-fab {
+      position: absolute; z-index: 8; display: inline-flex; align-items: center; gap: 3px;
+      padding: 4px 6px; white-space: nowrap;
+      background: var(--panel, #11161f); color: var(--text, #e8eef6);
+      border: 1px solid var(--border-strong, #2a3344); border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+    .ideo-fab.above { transform: translate(-50%, calc(-100% - 9px)); }
+    .ideo-fab.below { transform: translate(-50%, 9px); }
+    .ideo-fab-sw-row { display: inline-flex; gap: 4px; }
+    .ideo-fab-sw {
+      width: 16px; height: 16px; padding: 0; border-radius: 50%; cursor: pointer;
+      border: 1.5px solid rgba(255,255,255,0.22); box-sizing: border-box;
+      transition: transform var(--t-fast);
+    }
+    .ideo-fab-sw:hover { transform: scale(1.14); }
+    .ideo-fab-sw.on { border-color: var(--accent-bright); box-shadow: 0 0 0 2px var(--accent-dim); }
+    .ideo-fab-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 25px; height: 22px; padding: 0; border-radius: 6px; cursor: pointer;
+      background: transparent; border: 1px solid transparent; color: var(--muted, #9aa6bd);
+    }
+    .ideo-fab-btn:hover { background: var(--bg-2, #0c1226); color: var(--text, #e8eef6); }
+    .ideo-fab-btn.on { background: var(--accent-dim); color: var(--accent-bright); }
+    .ideo-fab-btn.ideo-fab-del { color: #e07a80; }
+    .ideo-fab-btn.ideo-fab-del:hover { background: rgba(229,72,77,0.16); color: #ff6b6f; }
+    .ideo-fab-sep { width: 1px; height: 16px; background: var(--border, #2a3344); margin: 0 1px; }
+    .ideo-fab-style {
+      height: 22px; font-size: 11.5px; background: var(--bg-2, #0c1226); color: var(--text, #e8eef6);
+      border: 1px solid var(--border, #2a3344); border-radius: 6px; padding: 0 4px; max-width: 92px;
+    }
+    .ideo-fab-btn:focus-visible, .ideo-fab-sw:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 1px; }
+    .ideo-fab-btn:focus:not(:focus-visible), .ideo-fab-sw:focus:not(:focus-visible) { outline: none; }
+    /* On-stage the canvas owns text/align/color/delete, so the left inspector
+       slims to just what the canvas can't do (type, style, describe), and the
+       now-orphaned "placement preview" note is dropped. */
+    body[data-workflow="studio"].ideo-canvas-on #ideoStageNote { display: none; }
+    /* the canvas's own stage bar now carries Insert/Snap/Undo/Examples → the
+       composer toolbar is redundant while the canvas holds the right stage. */
+    body[data-workflow="studio"].ideo-canvas-on .ideo-toolbar { display: none; }
+    body[data-workflow="studio"].ideo-canvas-on .ideo-inspector .ideo-insp-row:has(#ideoInspSwatches) { display: none; }
+    body[data-workflow="studio"].ideo-canvas-on .ideo-insp-actions .ideo-danger { display: none; }
+    body[data-workflow="studio"].ideo-canvas-on .ideo-insp-grid { grid-template-columns: 1fr; }
 
     .ideo-stage-note {
       font-size: 10.5px; color: var(--muted); margin: 6px 2px 0; line-height: 1.45;
@@ -15550,6 +16072,108 @@ HTML = r"""<!doctype html>
        vertical (so a tall clip doesn't push the carousel off-screen).
        object-fit:contain is the safety net — even if JS fails to set
        aspect, vertical clips letterbox cleanly instead of crop. */
+    /* ===== Ideogram Layout: the placement canvas portals into the big right
+       stage column. Toggle + host are hidden until body.ideo-canvas-on. ===== */
+    /* The stage bar holds creation tools + the Edit/Result toggle, so the canvas
+       is self-contained on the right; hidden with the host until canvas-on. */
+    #ideoStageBar, #ideoCanvasHost { display: none; }
+    body[data-workflow="studio"].ideo-canvas-on #ideoStageBar {
+      display: flex; align-items: center; gap: 10px;
+      margin: 14px 16px 0; flex: 0 0 auto;
+    }
+    /* Joined segment for the two primary creation actions. flex:0 0 auto is
+       load-bearing: with overflow:hidden the group has no min-content floor,
+       so on a tight bar flex-shrink would crush it before anything else. */
+    .ideo-stage-bar .isb-group {
+      display: inline-flex; align-items: stretch; overflow: hidden;
+      flex: 0 0 auto;
+      background: var(--bg-2, #0c1226);
+      border: 1px solid var(--border-strong, #2a3344); border-radius: 9px;
+    }
+    .ideo-stage-bar .isb-group .isb-btn {
+      border: 0; border-radius: 0; background: transparent;
+      color: var(--text, #e8eef6); font-weight: 600;
+    }
+    .ideo-stage-bar .isb-group .isb-btn + .isb-btn { border-left: 1px solid var(--border, #2a3344); }
+    .ideo-stage-bar .isb-group .isb-btn:hover { background: var(--accent-dim); color: var(--accent-bright); }
+    .ideo-stage-bar .isb-btn {
+      appearance: none; display: inline-flex; align-items: center;
+      width: auto;              /* the panel-wide reset makes every button width:100% */
+      height: 30px; padding: 0 14px; box-sizing: border-box;
+      background: transparent; border: 1px solid var(--border, #2a3344);
+      color: var(--text-dim, #9aa6bd); font: inherit; font-size: 12.5px;
+      border-radius: 9px; cursor: pointer;
+      transition: color .12s, border-color .12s, background .12s; white-space: nowrap;
+    }
+    .ideo-stage-bar .isb-btn:hover { color: var(--text, #e8eef6); border-color: var(--border-strong, #2a3344); }
+    .ideo-stage-bar .isb-btn:disabled { opacity: .4; cursor: default; }
+    .ideo-stage-bar .isb-spacer { flex: 1; }
+    .ideo-stage-bar .isb-toggle {
+      display: inline-flex; align-items: center; gap: 6px; height: 30px;
+      padding: 0 4px; box-sizing: border-box;
+      font-size: 12px; color: var(--muted, #9aa6bd); cursor: pointer;
+    }
+    .ideo-stage-bar .isb-toggle input { accent-color: var(--accent, #2f81f7); cursor: pointer; }
+    .ideo-stage-bar .isb-select {
+      appearance: none; height: 30px; box-sizing: border-box;
+      width: 118px;             /* size to the closed label, not the longest option */
+      background: var(--bg-2, #0c1226); border: 1px solid var(--border, #2a3344);
+      color: var(--text-dim, #9aa6bd); font: inherit; font-size: 12.5px;
+      padding: 0 26px 0 12px; border-radius: 9px; cursor: pointer;
+      transition: color .12s, border-color .12s;
+    }
+    .ideo-stage-bar .isb-select:hover { color: var(--text, #e8eef6); border-color: var(--border-strong, #2a3344); }
+    /* The Edit/Result toggle keeps its pill-container look but is now a flex
+       child of the stage bar (the spacer pushes it to the right). */
+    body[data-workflow="studio"].ideo-canvas-on #stageModeToggle {
+      display: inline-flex; gap: 4px; padding: 3px;
+      background: var(--bg-2, #11161f); border: 1px solid var(--border);
+      border-radius: 10px; flex: 0 0 auto;
+    }
+    body[data-workflow="studio"].ideo-canvas-on #stageModeToggle .smt-btn {
+      appearance: none; border: 0; background: transparent;
+      color: var(--text-dim, #9aa6bd); font: inherit; font-size: 12.5px;
+      font-weight: 600; padding: 4px 14px; height: 22px; box-sizing: border-box;
+      display: inline-flex; align-items: center; border-radius: 7px;
+      cursor: pointer; transition: background .12s, color .12s;
+      white-space: nowrap;
+    }
+    body[data-workflow="studio"].ideo-canvas-on #stageModeToggle .smt-btn:hover { color: var(--text, #e8eef6); }
+    body[data-workflow="studio"].ideo-canvas-on #stageModeToggle .smt-btn.active { background: var(--accent, #2f81f7); color: #fff; }
+    /* Edit view: show the canvas host (flex-fills the column), hide the player hero. */
+    body[data-workflow="studio"].ideo-canvas-on.stage-editing #ideoCanvasHost {
+      display: flex; flex: 1 1 auto; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 0; padding: 16px; gap: 12px;
+    }
+    body[data-workflow="studio"].ideo-canvas-on.stage-editing .stage-pane > .player-surface { display: none; }
+    /* Edit view hides the outputs gallery so the canvas owns the full column
+       height; the Result toggle (or selecting an output) brings both back. */
+    body[data-workflow="studio"].ideo-canvas-on.stage-editing .stage-pane > .carousel-wrap { display: none; }
+    #ideoCanvasHost:has(#ideoStageWrap) .ideo-canvas-empty { display: none; }
+    .ideo-canvas-empty {
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+      color: var(--text-dim, #9aa6bd); font-size: 14px; text-align: center;
+    }
+    /* The portaled canvas fills the host width, capped so it stays a comfortable
+       size, and never taller than the available column height. */
+    #ideoCanvasHost #ideoStageWrap {
+      width: 100%; max-width: none; margin: 0;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 0;
+    }
+    /* On the stage the canvas is a real artboard: ideoFitStage() sizes it in px
+       to fit the host at the exact aspect (equal margins all around); the card
+       gets a deeper shadow and a faint dot grid for design-tool orientation. */
+    #ideoCanvasHost #ideoStage {
+      width: 100%; height: auto; max-width: none; margin: 0;
+      border-radius: 10px; border-color: var(--border-strong, #2a3344);
+      box-shadow: 0 18px 48px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.35) inset;
+      background-image:
+        radial-gradient(rgba(122,140,180,0.10) 1px, transparent 1.2px),
+        linear-gradient(160deg, #0d1430, #0a0f24);
+      background-size: 22px 22px, 100% 100%;
+    }
     .player-surface {
       position: relative;
       flex: 0 0 auto;
@@ -19587,16 +20211,16 @@ HTML = r"""<!doctype html>
                ideoApplyAspect(); boxes store x,y,w,h as 0..1 fractions so a
                ratio change just restyles the box, never moves coordinates.
                role=application + keyboard handlers make it a11y-operable. -->
-          <div class="ideo-stage-wrap">
+          <div class="ideo-stage-wrap" id="ideoStageWrap">
             <div class="ideo-stage" id="ideoStage" role="application"
                  aria-label="Text placement canvas. Click Insert text or drag to add a box; arrow keys nudge the selected box, Delete removes it."
                  tabindex="0"
                  onpointerdown="ideoStagePointerDown(event)">
-              <div class="ideo-stage-hint" id="ideoStageHint">Drag here, or click <strong>Insert text</strong>, to place words on the frame.</div>
+              <div class="ideo-stage-hint" id="ideoStageHint">Drag to draw a text box, or use <strong>+ Text</strong> above.</div>
               <!-- guide lines + boxes are injected here by ideoRender() -->
             </div>
           </div>
-          <div class="ideo-stage-note">
+          <div class="ideo-stage-note" id="ideoStageNote">
             <svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-info"/></svg>
             Placement preview — boxes show where words sit; Ideogram renders the final type, weight, and texture.
           </div>
@@ -20505,6 +21129,42 @@ HTML = r"""<!doctype html>
        (#filterAll/#filterHidden retired with the Visible/Hidden
        segmented control — orphan textContent/setFilter calls removed.) -->
   <section class="stage-pane">
+    <!-- Ideogram Layout editor: the placement canvas (#ideoStageWrap) portals
+         into #ideoCanvasHost here in the big right column, and the Edit/Result
+         toggle flips between the canvas and the rendered output. Both are
+         display:none until body gets .ideo-canvas-on (set by ideoSyncStage). -->
+    <div class="ideo-stage-bar" id="ideoStageBar">
+      <div class="isb-group" role="group" aria-label="Add to canvas">
+        <button type="button" class="isb-btn" onclick="ideoInsertBox('text')" title="Add a text box (or drag on an empty area of the frame)">+ Text</button>
+        <button type="button" class="isb-btn" onclick="ideoInsertBox('obj')" title="Add an object region (something the model should draw)">+ Object</button>
+      </div>
+      <label class="isb-toggle" title="Snap boxes to thirds / center / other boxes">
+        <input type="checkbox" id="ideoSnapToggleStage" checked onchange="ideoState.snap=this.checked">
+        <span>Snap</span>
+      </label>
+      <button type="button" class="isb-btn" id="ideoUndoBtnStage" onclick="ideoUndo()" title="Undo (Cmd/Ctrl+Z)" disabled>Undo</button>
+      <select id="ideoExamplePickerStage" class="isb-select" onchange="ideoLoadExample(this.value); this.value='';" title="Load an example layout">
+        <option value="">Examples…</option>
+        <option value="poster">Poster — 16:9 event</option>
+        <option value="logo">Logo — 1:1 wordmark</option>
+        <option value="label">Product label — 9:16</option>
+        <option value="meme">Meme — 1:1 top/bottom</option>
+      </select>
+      <span class="isb-spacer"></span>
+      <div class="stage-mode-toggle" id="stageModeToggle" role="group" aria-label="Stage view">
+        <button type="button" class="smt-btn active" data-stage-mode="edit" onclick="stageSetMode('edit')">Edit canvas</button>
+        <button type="button" class="smt-btn" data-stage-mode="result" onclick="stageSetMode('result')">Result</button>
+      </div>
+    </div>
+    <div class="ideo-canvas-host" id="ideoCanvasHost">
+      <div class="ideo-canvas-empty" id="ideoCanvasEmpty">
+        <svg width="40" height="40" viewBox="0 0 56 56" fill="none" aria-hidden="true">
+          <rect x="8" y="12" width="40" height="32" rx="3" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.4"/>
+          <path d="M16 30 L24 22 L34 32 L40 26" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.4" fill="none"/>
+        </svg>
+        <div>Pick <strong>Layout</strong> on the left to place words on the frame.</div>
+      </div>
+    </div>
     <!-- Player surface — the hero. Holds the <video>/<img>, the filename
          overlay (top), the action overlay (top-right), and an inline
          job-progress overlay (bottom) when something is rendering. The
@@ -21976,7 +22636,12 @@ function imgStudioUpdateRefWarning() {
   // cinematic-portrait placeholder; 2+ refs swap to a multi-subject
   // example that anchors each reference explicitly.
   if (prompt) {
-    if (refsCount >= 2) {
+    // Ideogram owns the placeholder (ideoApplyComposerChrome words it per
+    // Simple/Layout mode) and takes no reference images — this handler runs
+    // after it in the engine onchange chain, so writing here would stomp it.
+    if (typeof ideoIsActive === 'function' && ideoIsActive()) {
+      /* leave Ideogram's placeholder alone */
+    } else if (refsCount >= 2) {
       prompt.placeholder =
         'the man from reference 1 and the woman from reference 2 sitting at a candlelit dinner, warm tungsten light, soft bokeh, photorealistic';
     } else {
@@ -22263,6 +22928,7 @@ const ideoState = {
   snap: true,
   history: [],
   _editing: false,                      // a text input is focused (don't steal keys)
+  _editId: null,                        // box currently being edited inline on the canvas
   _seq: 1,
 };
 
@@ -22286,6 +22952,79 @@ function ideoIsActive(){
 }
 function ideoInLayout(){ return ideoIsActive() && ideoState.mode === 'layout'; }
 
+// --- Ideogram canvas portal -------------------------------------------------
+// In Layout mode the placement canvas (#ideoStageWrap) moves into the big right
+// stage (#ideoCanvasHost); otherwise it sits in the composer just before the
+// note. Every box handler resolves #ideoStage by id, so relocating the node is
+// safe — coordinates are fractional and survive the move untouched.
+var _stageMode = 'edit';
+var _ideoStageWasOn = false;
+function ideoCanvasPortal(toStage){
+  var wrap = document.getElementById('ideoStageWrap');
+  if (!wrap) return;
+  if (toStage){
+    var host = document.getElementById('ideoCanvasHost');
+    if (host && wrap.parentNode !== host) host.appendChild(wrap);
+  } else {
+    var note = document.getElementById('ideoStageNote');
+    if (note && note.parentNode && wrap.parentNode !== note.parentNode){
+      note.parentNode.insertBefore(wrap, note);
+    }
+  }
+}
+// Size the canvas to FIT the host box at the exact aspect ratio — width-bound
+// on wide hosts, height-bound on short ones — so the artboard always sits with
+// even margins instead of width-filling and overflowing the leftover height.
+// Inline px width is cleared when the canvas portals home (the composer copy
+// keeps its own responsive sizing).
+function ideoFitStage(){
+  var host = document.getElementById('ideoCanvasHost');
+  var stage = document.getElementById('ideoStage');
+  var wrap = document.getElementById('ideoStageWrap');
+  if (!host || !stage || !wrap || wrap.parentNode !== host) return;
+  if (!document.body.classList.contains('stage-editing')) return;
+  var cs = getComputedStyle(host);
+  var availW = host.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0);
+  var availH = host.clientHeight - parseFloat(cs.paddingTop || 0) - parseFloat(cs.paddingBottom || 0);
+  if (availW <= 50 || availH <= 50) return;
+  var ar = String(stage.style.aspectRatio || '16 / 9').split('/');
+  var r = (parseFloat(ar[0]) || 16) / (parseFloat(ar[1]) || 9);
+  var w = Math.min(availW, availH * r);
+  stage.style.width = Math.max(220, Math.floor(w)) + 'px';
+}
+// Flip the right stage between the editor canvas (edit) and the rendered output.
+function stageSetMode(which){
+  _stageMode = (which === 'result') ? 'result' : 'edit';
+  document.body.classList.toggle('stage-editing', _stageMode === 'edit');
+  document.querySelectorAll('#stageModeToggle .smt-btn').forEach(function(b){
+    var on = b.dataset.stageMode === _stageMode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  if (_stageMode === 'edit') ideoFitStage();   // host was hidden in result view
+}
+// Park the canvas in the right place for the current engine + mode.
+// The edit canvas is a property of the Images workflow: leaving for
+// Video/Audio/Train suspends it (classes off, canvas parked home, player
+// restored) and coming back restores it — ideoState keeps the boxes, so
+// nothing is lost across the round-trip.
+function ideoSyncStage(){
+  var on = ideoInLayout() && document.body.getAttribute('data-workflow') === 'studio';
+  document.body.classList.toggle('ideo-canvas-on', on);
+  ideoCanvasPortal(on);
+  if (on){
+    if (!_ideoStageWasOn) stageSetMode('edit');   // fresh entry → show the canvas
+    var sn = document.getElementById('ideoSnapToggleStage'); if (sn) sn.checked = !!ideoState.snap;
+    ideoApplyAspect(); ideoFitStage(); ideoRender();
+  } else {
+    if (typeof ideoExitEdit === 'function') ideoExitEdit();   // drop any live caret
+    document.body.classList.remove('stage-editing');
+    var st = document.getElementById('ideoStage');
+    if (st) st.style.width = '';                  // composer copy sizes itself
+  }
+  _ideoStageWasOn = on;
+}
+
 // Show/hide the panel + re-skin the surrounding composer based on engine.
 function ideoSyncVisibility(){
   const panel = document.getElementById('ideoPanel');
@@ -22298,6 +23037,7 @@ function ideoSyncVisibility(){
     ideoRender();
     ideoRefreshRaw();
   }
+  ideoSyncStage();
 }
 
 // When Ideogram is active+Layout: relabel the prompt box to "Scene &
@@ -22347,6 +23087,7 @@ function ideoSetMode(mode){
     ideoRender();
     ideoRefreshRaw();
   }
+  ideoSyncStage();
 }
 
 // Map the studio aspect select to a CSS aspect-ratio on the stage. Boxes are
@@ -22358,6 +23099,7 @@ function ideoApplyAspect(){
   const a = (sel.value || '16:9').split(':');
   const w = parseFloat(a[0]) || 16, h = parseFloat(a[1]) || 9;
   stage.style.aspectRatio = `${w} / ${h}`;
+  if (typeof ideoFitStage === 'function') ideoFitStage();   // refit the artboard
 }
 
 function ideoSetRender(r){
@@ -22376,8 +23118,11 @@ function ideoSnapshot(){
   ideoUpdateUndoBtn();
 }
 function ideoUpdateUndoBtn(){
+  const dis = ideoState.history.length === 0;
   const b = document.getElementById('ideoUndoBtn');
-  if (b) b.disabled = ideoState.history.length === 0;
+  if (b) b.disabled = dis;
+  const bs = document.getElementById('ideoUndoBtnStage');
+  if (bs) bs.disabled = dis;
 }
 function ideoUndo(){
   if (!ideoState.history.length) return;
@@ -22426,11 +23171,9 @@ function ideoInsertBox(type){
   ideoState.selId = box.id;
   ideoRender();
   ideoRefreshRaw();
-  // Focus the text input so the user can type immediately.
-  if (box.type === 'text'){
-    const inp = document.getElementById('ideoInspText');
-    if (inp) { try { inp.focus(); } catch(e){} }
-  }
+  // Drop the caret straight into the new box so the user types/describes on the
+  // canvas (text boxes get a text caret; object boxes get the describe field).
+  ideoEnterEdit(box.id);
 }
 
 function ideoSelectedBox(){ return ideoState.boxes.find(b => b.id === ideoState.selId) || null; }
@@ -22468,8 +23211,111 @@ function ideoDeleteSel(){
   ideoSnapshot();
   ideoState.boxes = ideoState.boxes.filter(b => b.id !== box.id);
   ideoState.selId = null;
+  ideoState._editId = null;
+  ideoState._editing = false;
   ideoRender();
   ideoRefreshRaw();
+}
+
+// ---- inline text editing on the canvas ----
+// Turn the selected text box into a live-editable element: caret in the box,
+// type/paste directly on the frame. Coordinates are untouched; only box.text
+// changes. _editing flips so the global key handler stops stealing keystrokes.
+function ideoEnterEdit(id){
+  const box = ideoState.boxes.find(b => b.id === id);
+  if (!box) return;
+  ideoState.selId = id;
+  ideoState._editId = id;
+  ideoRenderBoxes();                       // re-render so this box gets contentEditable
+  // Text boxes edit the .ideo-box-text; object boxes edit the .ideo-box-obj-label.
+  const sel = box.type === 'text' ? '.ideo-box-text' : '.ideo-box-obj-label';
+  const el = document.querySelector('.ideo-box[data-id="' + id + '"] ' + sel);
+  if (el){
+    el.focus();
+    try {
+      const range = document.createRange(); range.selectNodeContents(el); range.collapse(false);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    } catch(e){}
+  }
+  ideoSyncInspector();
+}
+function ideoExitEdit(){
+  if (ideoState._editId == null) return;
+  ideoState._editId = null;
+  ideoState._editing = false;
+  ideoRenderBoxes();
+  ideoSyncInspector();
+  ideoRefreshRaw();
+}
+// Live keystroke handler: mirror the box text without a full re-render (which
+// would blow away the caret), and keep the empty/warn outline + inspector field
+// in sync.
+function ideoBoxTextInput(ev, id){
+  const box = ideoState.boxes.find(b => b.id === id);
+  if (!box) return;
+  box.text = ev.target.textContent || '';
+  const wrap = ev.target.closest('.ideo-box');
+  if (wrap) wrap.classList.toggle('warn', !box.text.trim());
+  const inp = document.getElementById('ideoInspText');
+  if (inp && document.activeElement !== inp) inp.value = box.text;
+  ideoRefreshRaw();
+}
+// Object-box twin of ideoBoxTextInput: live-mirror the describe text into
+// box.descManual (no full re-render, which would drop the caret) and keep the
+// inspector's describe field in sync.
+function ideoObjDescInput(ev, id){
+  const box = ideoState.boxes.find(b => b.id === id);
+  if (!box) return;
+  box.descManual = ev.target.textContent || '';
+  const inp = document.getElementById('ideoInspDesc');
+  if (inp && document.activeElement !== inp) inp.value = box.descManual;
+  ideoRefreshRaw();
+}
+// The floating per-box toolbar (color, alignment, delete) — appended to the
+// stage and positioned above the box (or below if the box hugs the top edge),
+// so common edits live right on the canvas instead of a far-off side panel.
+function ideoBuildBoxToolbar(box, stage){
+  const bar = document.createElement('div');
+  bar.className = 'ideo-fab';
+  let cx = (box.x + box.w / 2) * 100;
+  cx = Math.max(15, Math.min(85, cx));     // keep it from overflowing the stage sides
+  bar.style.left = cx + '%';
+  if (box.y < 0.14){ bar.style.top = ((box.y + box.h) * 100) + '%'; bar.classList.add('below'); }
+  else { bar.style.top = (box.y * 100) + '%'; bar.classList.add('above'); }
+  // no drag, keep caret focus — but DON'T preventDefault on a <select>, or its
+  // native dropdown won't open (preventDefault on pointerdown swallows it).
+  bar.addEventListener('pointerdown', function(e){ e.stopPropagation(); if (!e.target.closest('select')) e.preventDefault(); });
+  const A = [['left','M2 4h16M2 8h9M2 12h16'],['center','M2 4h16M5 8h10M2 12h16'],['right','M2 4h16M9 8h7M2 12h16']];
+  let html = '';
+  if (box.type === 'text'){
+    html += '<span class="ideo-fab-sw-row">';
+    IDEO_SWATCHES.forEach(hex => {
+      const on = (box.color || '').toUpperCase() === hex.toUpperCase();
+      html += '<button type="button" class="ideo-fab-sw' + (on ? ' on' : '') + '" data-color="' + hex + '" style="background:' + hex + '" title="' + hex + '"></button>';
+    });
+    html += '</span><span class="ideo-fab-sep"></span>';
+    A.forEach(([al, d]) => {
+      const on = box.align === al;
+      html += '<button type="button" class="ideo-fab-btn' + (on ? ' on' : '') + '" data-align="' + al + '" title="Align ' + al + '"><svg viewBox="0 0 18 16" width="15" height="13"><path d="' + d + '" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button>';
+    });
+    html += '<span class="ideo-fab-sep"></span>';
+    // text style picker (Headline/Subhead/Body/Caps/Script/Serif)
+    const STY = [['headline','Headline'],['subhead','Subhead'],['body','Body'],['caps','Caps'],['script','Script'],['serif','Serif']];
+    html += '<select class="ideo-fab-style" title="Text style">';
+    STY.forEach(([v, lbl]) => {
+      html += '<option value="' + v + '"' + (box.style === v ? ' selected' : '') + '>' + lbl + '</option>';
+    });
+    html += '</select><span class="ideo-fab-sep"></span>';
+  }
+  html += '<button type="button" class="ideo-fab-btn ideo-fab-del" data-del title="Delete (Backspace)"><svg viewBox="0 0 20 20" width="14" height="14"><path d="M5 6h10M8 6V4.5h4V6M7.5 6l.6 9h3.8l.6-9" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
+  bar.innerHTML = html;
+  bar.querySelectorAll('[data-color]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); ideoState.selId = box.id; ideoUpdateSel({ color: b.dataset.color }); }));
+  bar.querySelectorAll('[data-align]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); ideoState.selId = box.id; ideoUpdateSel({ align: b.dataset.align }); }));
+  var st = bar.querySelector('.ideo-fab-style');
+  if (st) st.addEventListener('change', function(e){ e.stopPropagation(); ideoState.selId = box.id; ideoUpdateSel({ style: st.value }); });
+  const delB = bar.querySelector('[data-del]');
+  if (delB) delB.addEventListener('click', e => { e.stopPropagation(); ideoState.selId = box.id; ideoDeleteSel(); });
+  stage.appendChild(bar);
 }
 
 // ---- rendering ----
@@ -22481,8 +23327,8 @@ function ideoRender(){
 function ideoRenderBoxes(){
   const stage = document.getElementById('ideoStage');
   if (!stage) return;
-  // Remove existing boxes + guides (keep the hint node).
-  stage.querySelectorAll('.ideo-box, .ideo-guide').forEach(n => n.remove());
+  // Remove existing boxes + guides + floating toolbars (keep the hint node).
+  stage.querySelectorAll('.ideo-box, .ideo-guide, .ideo-fab').forEach(n => n.remove());
   stage.classList.toggle('has-boxes', ideoState.boxes.length > 0);
   const overlaps = ideoComputeOverlaps();
   ideoState.boxes.forEach(box => {
@@ -22508,13 +23354,59 @@ function ideoRenderBoxes(){
       // scale font roughly to box height so the preview reads as placement
       const px = Math.max(8, Math.min(40, Math.round(box.h * (stage.clientHeight || 300) * 0.55)));
       t.style.fontSize = px + 'px';
+      t.setAttribute('data-ph', 'Type text…');
+      // Inline editing: the selected-for-edit box becomes a live caret target.
+      // plaintext-only means a paste drops formatting → clean caption text.
+      if (box.id === ideoState._editId){
+        t.contentEditable = 'plaintext-only';
+        t.spellcheck = false;
+        t.classList.add('editing');
+        t.addEventListener('input', e => ideoBoxTextInput(e, box.id));
+        t.addEventListener('focus', () => { ideoState._editing = true; });
+        t.addEventListener('blur', () => { ideoExitEdit(); });
+        t.addEventListener('pointerdown', e => e.stopPropagation());  // caret, not drag
+        t.addEventListener('dblclick', e => e.stopPropagation());
+        t.addEventListener('keydown', e => {
+          e.stopPropagation();                                        // don't nudge/delete
+          if (e.key === 'Escape'){ e.preventDefault(); t.blur(); }
+        });
+      }
       el.appendChild(t);
     } else {
       const lbl = document.createElement('div');
       lbl.className = 'ideo-box-obj-label';
-      lbl.textContent = box.descManual ? box.descManual.slice(0, 40) : 'object';
+      if (box.id === ideoState._editId){
+        // Describe mode: the label fills the box as a live caret target. Empty
+        // descManual shows the placeholder (don't fall back to 'object' here).
+        lbl.contentEditable = 'plaintext-only';
+        lbl.spellcheck = false;
+        lbl.classList.add('editing');
+        lbl.setAttribute('data-ph', 'Describe the object…');
+        lbl.textContent = box.descManual || '';
+        lbl.addEventListener('input', e => ideoObjDescInput(e, box.id));
+        lbl.addEventListener('focus', () => { ideoState._editing = true; });
+        lbl.addEventListener('blur', () => { ideoExitEdit(); });
+        lbl.addEventListener('pointerdown', e => e.stopPropagation());  // caret, not drag
+        lbl.addEventListener('dblclick', e => e.stopPropagation());
+        lbl.addEventListener('keydown', e => {
+          e.stopPropagation();                                          // don't nudge/delete
+          if (e.key === 'Escape'){ e.preventDefault(); lbl.blur(); }
+        });
+      } else {
+        lbl.textContent = box.descManual ? box.descManual.slice(0, 40) : 'object';
+      }
       el.appendChild(lbl);
     }
+    // delete affordance on every box (fades in on hover / when selected)
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'ideo-box-del';
+    del.setAttribute('aria-label', 'Delete this box');
+    del.title = 'Delete (Backspace)';
+    del.innerHTML = '&times;';
+    del.addEventListener('pointerdown', e => { e.stopPropagation(); e.preventDefault(); });
+    del.addEventListener('click', e => { e.stopPropagation(); ideoState.selId = box.id; ideoDeleteSel(); });
+    el.appendChild(del);
     // resize handles only on the selected box
     if (box.id === ideoState.selId){
       ['nw','n','ne','e','se','s','sw','w'].forEach(dir => {
@@ -22525,6 +23417,10 @@ function ideoRenderBoxes(){
       });
     }
     stage.appendChild(el);
+    // floating toolbar for the selected box (color / align / delete)
+    if (box.id === ideoState.selId){
+      ideoBuildBoxToolbar(box, stage);
+    }
   });
 }
 
@@ -22551,13 +23447,17 @@ function ideoSyncInspector(){
   // type pills
   insp.querySelectorAll('[data-ideo-type]').forEach(b =>
     b.classList.toggle('active', b.dataset.ideoType === box.type));
-  // text row visible only for text boxes
+  // text row visible only for text boxes. When the canvas is on the right
+  // stage, text/align live on the canvas (inline + floating toolbar), so the
+  // inspector drops them and keeps only what the canvas can't do: type, style,
+  // describe.
+  const onStage = document.body.classList.contains('ideo-canvas-on');
   const textRow = document.getElementById('ideoInspTextRow');
   const styleCell = document.getElementById('ideoInspStyleCell');
   const alignCell = document.getElementById('ideoInspAlignCell');
-  if (textRow) textRow.style.display = isText ? '' : 'none';
+  if (textRow) textRow.style.display = (isText && !onStage) ? '' : 'none';
   if (styleCell) styleCell.style.display = isText ? '' : 'none';
-  if (alignCell) alignCell.style.display = isText ? '' : 'none';
+  if (alignCell) alignCell.style.display = (isText && !onStage) ? '' : 'none';
   const descLabel = document.querySelector('#ideoInspDescRow .mf-label');
   if (descLabel) descLabel.textContent = isText
     ? 'Describe it (optional — refines look)'
@@ -22981,8 +23881,9 @@ function ideoStagePointerDown(ev){
     // move
     const box = ideoState.boxes.find(b => b.id === boxEl.dataset.id);
     if (!box) return;
+    const wasSel = (ideoState.selId === box.id);
     ideoSnapshot();
-    _ideoDrag = { mode:'move', id:box.id, startX:f.x, startY:f.y, orig:{...box}, created:false };
+    _ideoDrag = { mode:'move', id:box.id, startX:f.x, startY:f.y, orig:{...box}, created:false, wasSel:wasSel, moved:false };
     ideoState.selId = box.id;
     ideoRenderBoxes(); ideoSyncInspector();
   } else {
@@ -23004,6 +23905,7 @@ function ideoStagePointerMove(ev){
   const box = ideoState.boxes.find(b => b.id === _ideoDrag.id);
   if (!box) return;
   const dx = f.x - _ideoDrag.startX, dy = f.y - _ideoDrag.startY;
+  if (Math.abs(dx) > 0.004 || Math.abs(dy) > 0.004) _ideoDrag.moved = true;
   if (_ideoDrag.mode === 'move'){
     let nx = _ideoDrag.orig.x + dx, ny = _ideoDrag.orig.y + dy;
     nx = Math.max(0, Math.min(1 - box.w, nx));
@@ -23023,9 +23925,10 @@ function ideoStagePointerMove(ev){
 }
 function ideoStagePointerUp(ev){
   if (!_ideoDrag) return;
-  const box = ideoState.boxes.find(b => b.id === _ideoDrag.id);
+  const drag = _ideoDrag;
+  const box = ideoState.boxes.find(b => b.id === drag.id);
   if (box){
-    if (_ideoDrag.mode === 'create' && (box.w < IDEO_MIN_FRAC || box.h < IDEO_MIN_FRAC)){
+    if (drag.mode === 'create' && (box.w < IDEO_MIN_FRAC || box.h < IDEO_MIN_FRAC)){
       // tiny drag = click → snap to a default-sized box centered on the click
       const d = ideoDefaultBox('text');
       box.w = d.w; box.h = d.h;
@@ -23042,7 +23945,14 @@ function ideoStagePointerUp(ev){
   ideoClearGuides();
   ideoRender();
   ideoRefreshRaw();
-  if (box && box.type === 'text'){ const inp = document.getElementById('ideoInspText'); if (inp) { try { inp.focus(); } catch(e){} } }
+  // Enter inline edit when a text box was just drawn (drag-create is always a
+  // text box), or any already-selected box was clicked without dragging
+  // (Figma-style click-to-edit — text boxes type, object boxes describe).
+  const enterEdit = box && (
+    (drag.mode === 'create' && box.type === 'text') ||
+    (drag.mode === 'move' && !drag.moved && drag.wasSel)
+  );
+  if (enterEdit) ideoEnterEdit(box.id);
 }
 function ideoApplyResize(box, handle, orig, dx, dy){
   let x0 = orig.x, y0 = orig.y, x1 = orig.x + orig.w, y1 = orig.y + orig.h;
@@ -23118,6 +24028,9 @@ function ideoOnKeyDown(ev){
   window.addEventListener('pointerup', ideoStagePointerUp);
   window.addEventListener('pointercancel', ideoStagePointerUp);
   window.addEventListener('keydown', ideoOnKeyDown);
+  window.addEventListener('resize', function(){
+    if (document.body.classList.contains('ideo-canvas-on')) ideoFitStage();
+  });
 })();
 
 async function imgStudioGenerate() {
@@ -23211,6 +24124,10 @@ async function imgStudioGenerate() {
     }
     const r = await fetch('/queue/add', { method: 'POST', body: fd });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    // The job is queued — if the Ideogram canvas is holding the right stage,
+    // flip it to Result so the player (with its inline job-progress overlay) is
+    // visible the moment the render starts.
+    if (typeof ideoInLayout === 'function' && ideoInLayout() && typeof stageSetMode === 'function') stageSetMode('result');
     document.getElementById('imgStudioStatus').textContent =
       'Submitted. Watch Now / Recent → Photos.';
     // Non-blocking toast — the user can stay focused on the form (e.g.
@@ -27030,6 +27947,10 @@ function _imgEngineLabel(token) {
 
 function animateFromPhoto(payload) {
   if (!payload || !payload.path) return;
+  // Leave the Studio/Ideogram workflow first — otherwise body[data-workflow]
+  // stays "studio" and its CSS keeps the video form (#genForm) hidden, so
+  // setMode('i2v') alone would look like nothing happened. Back to Video.
+  if (typeof workflowSwitch === 'function') workflowSwitch('manual');
   // Switch to i2v mode (pill + form fields). setMode('i2v') hides the
   // Studio pane, shows the video form, and applies the i2v-specific
   // dropdown selection.
@@ -27267,6 +28188,17 @@ function findOutputByPath(path) {
 }
 function selectOutput(path) {
   activePath = path;
+  // If the Ideogram editor canvas is holding the stage, a USER click on an
+  // output means they want to see the render — flip the stage to Result.
+  // Gate on isTrusted so the boot-time auto-select of the newest output (and
+  // any other programmatic selection) can't yank someone out of mid-edit;
+  // the Generate flow flips explicitly in imgStudioGenerate.
+  var _uev = (typeof window !== 'undefined') ? window.event : null;
+  if (_uev && _uev.isTrusted &&
+      typeof ideoInLayout === 'function' && ideoInLayout() &&
+      typeof stageSetMode === 'function') {
+    stageSetMode('result');
+  }
   document.querySelectorAll('.car-card').forEach(el => el.classList.toggle('active', el.dataset.path === path));
   const wrap = document.getElementById('playerWrap');
   wrap.classList.remove('empty');
@@ -31320,6 +32252,10 @@ function workflowSwitch(name) {
     // Manual — show the video form, restore the previous video mode.
     if (manual) manual.style.display = '';
   }
+  // The Ideogram edit canvas belongs to the Images workflow only — re-sync
+  // so leaving suspends it (player/outputs restored) and returning to
+  // Images with Ideogram active brings it back with its boxes intact.
+  if (typeof ideoSyncStage === 'function') ideoSyncStage();
   try { localStorage.setItem('phos_workflow', name); } catch(e) {}
 }
 
