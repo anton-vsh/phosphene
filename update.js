@@ -209,10 +209,15 @@ module.exports = {
           // Two-step (WITH deps then --force-reinstall --no-deps) mirrors
           // install_qwen.js so the full transitive set (transformers, accelerate,
           // sentencepiece, …) resolves, then the version is locked.
+          // uv, NOT plain pip: mlx-vlm is installed --no-deps, so plain pip dumps
+          // a scary "ERROR: pip's dependency resolver…" block about mlx-vlm's
+          // unsatisfied extras on every install (verified — this is what made
+          // cocktailpeanut's update look broken even though mflux installed fine).
+          // uv does the same install with zero such noise.
           "echo 'Installing/refreshing the mflux image-engine pack (Ideogram 4 + Qwen-Edit) — now standard…' && \\",
-          "( ./ltx-2-mlx/env/bin/pip install 'mflux==0.18.0' && \\",
-          "  ./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.18.0' && \\",
-          "  ./ltx-2-mlx/env/bin/pip install 'mlx-teacache==0.4.1' ) \\",
+          "( uv pip install --python ./ltx-2-mlx/env/bin/python 'mflux==0.18.0' && \\",
+          "  uv pip install --python ./ltx-2-mlx/env/bin/python --reinstall --no-deps 'mflux==0.18.0' && \\",
+          "  uv pip install --python ./ltx-2-mlx/env/bin/python 'mlx-teacache==0.4.1' ) \\",
           "|| echo 'WARN: mflux image-engine install hit an error — video is unaffected; re-run Update, or use the Reinstall image engines action, to retry.'"
         ].join("\n")
       }
@@ -254,6 +259,29 @@ module.exports = {
     // training install on every panel update — users who clicked
     // Download Q8 dev for training and then Update would lose 11 GB of
     // bandwidth and have to re-download.
+    // ---- Mosaic fix (2026-06-13) -----------------------------------------
+    // The Q4 render path is two-stage: it upscales the half-res latent with
+    // spatial_upscaler_x2_v1_1.safetensors. The Y1.024 download allowlist
+    // dropped that file, so affected Q4 installs silently ran a
+    // RANDOMLY-INITIALISED upsampler -> the "mosaic"/rainbow-grid (#23; root
+    // cause found by @dgrauet, who also made ltx-pipelines-mlx fail loud about
+    // it upstream). It's back in required_files.json (verify/repair flags it),
+    // and fetched here so existing users self-heal on Update without clicking
+    // Repair. ~1 GB, resumable; hf skips it when already present. BEST-EFFORT —
+    // a network hiccup must not fail the update.
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "ltx-2-mlx",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
+        message: [
+          "echo 'Ensuring the Q4 spatial upscaler is present (mosaic fix)…' && \\",
+          "hf download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4 --include 'spatial_upscaler_x2_v1_1.safetensors' \\",
+          "|| echo 'WARN: spatial upscaler fetch failed — open the panel and click Repair to retry (fixes the mosaic).'"
+        ].join("\n")
+      }
+    },
     {
       method: "shell.run",
       params: {

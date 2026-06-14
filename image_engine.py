@@ -280,6 +280,13 @@ ASPECT_DIMS = {
     "9:16":  (720, 1280),
     "3:4":   (768, 1024),
     "21:9":  (1280, 544),
+    # Small variants (value suffixed "s") — ~1/3–1/4 the pixels so weaker
+    # Apple GPUs render fast and stay under the Metal watchdog. The client
+    # CSS ratio uses parseFloat, which reads "9s" as 9, so the stage still
+    # shows the right shape. Requested by cocktailpeanut.
+    "16:9s": (768, 432),
+    "1:1s":  (512, 512),
+    "9:16s": (432, 768),
 }
 
 
@@ -738,7 +745,14 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     #     the prompt string VERBATIM to a temp .json and pass that path.
     #   - --steps / --guidance are warned-and-ignored (the preset defines
     #     them) so we omit them; the preset goes on --preset.
-    #   - no -q / quantization flag and no --image-paths (text-to-image).
+    #   - --image-paths is unsupported (text-to-image).
+    #   - -q defaults to 6 (the config builder passes mflux_quantize=6 for
+    #     normal Ideogram, 4 for fast mode). Quantizing the fp8 weights on
+    #     load gives smaller/faster GPU kernels — the only thing that helps
+    #     slower Apple GPUs (M1/M2) clear the macOS Metal command-buffer
+    #     watchdog (ml-explore/mlx#3267, wontfix). Raw fp8 (no -q) renders
+    #     but is far slower and trips the watchdog on M1; q6 is the M1-safe
+    #     default cocktailpeanut validated, q4 halves RAM again for ≤16 GB.
     # The temp file is deleted in the `finally` after the subprocess ends
     # (it must outlive the child, which reads it during model setup).
     ideogram_prompt_file: str | None = None
@@ -757,8 +771,10 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "--width", str(width),
             "--height", str(height),
             "--preset", (config.mflux_preset or "V4_DEFAULT_20"),
-            "--seed", *[str(s) for s in seeds],
         ]
+        if config.mflux_quantize:                       # None/0 → raw fp8; 4 → fast mode
+            cmd += ["-q", str(config.mflux_quantize)]
+        cmd += ["--seed", *[str(s) for s in seeds]]
     else:
         cmd = [
             bin_path,
@@ -880,6 +896,17 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     #   qwen_edit:             ~30 s @ 8 steps Q4 / ~5 min @ 30 steps Q8
     # Plus the one-time load, plus first-run download.
     env = _clean_subprocess_env()
+    # Ideogram (raw fp8 DiT) overruns the macOS Metal command-buffer
+    # watchdog on slower Apple GPUs — the subprocess aborts with
+    # kIOGPUCommandBufferCallbackErrorImpactingInteractivity / SIGABRT
+    # (exit -6). Disabling MLX's kernel compile and forcing fast Metal
+    # sync make MLX submit shorter command buffers that stay under the
+    # watchdog. Found by cocktailpeanut getting Ideogram to run on an
+    # M1 Max 64 GB (ml-explore/mlx#3267, upstream wontfix). Ideogram-only
+    # so the other mflux families keep mx.compile.
+    if fam == "ideogram":
+        env.setdefault("MLX_DISABLE_COMPILE", "1")
+        env.setdefault("MLX_METAL_FAST_SYNCH", "1")
     # FBCache toggle for the Qwen-Edit transformer (skips middle blocks
     # when the layer-0 residual is stable step-to-step). The patch is
     # injected by patch_mflux_fbcache.py at install/update time and is
