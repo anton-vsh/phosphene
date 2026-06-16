@@ -5401,6 +5401,15 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 # engine; ignored by every other engine. _build_image_engine_config
                 # reads it off these params to set ImageEngineConfig.mflux_preset.
                 "ideo_preset": f("ideo_preset", "V4_DEFAULT_20") or "V4_DEFAULT_20",
+                # These two are read back off the params by the worker's
+                # _build_image_engine_config(form=p) call, so they MUST be
+                # carried here — anything not in this dict is silently dropped
+                # on the /queue/add path (the path the panel UI posts to).
+                # ideo_quantize = Fast-mode Q4; ideo_reference_bridge = the
+                # Ideogram vision-caption reference bridge. Both no-op'd before
+                # this line was added.
+                "ideo_quantize": f("ideo_quantize", ""),
+                "ideo_reference_bridge": f("ideo_reference_bridge", ""),
                 "aspect": aspect,
                 "n": n,
                 "seed": str(seed),
@@ -7982,6 +7991,16 @@ def _build_image_engine_config(
         # smaller/faster kernels + ~half the RAM for ≤16 GB Macs.
         _ideo_q = str(form.get("ideo_quantize") or "").strip()
         _ideo_quantize = int(_ideo_q) if _ideo_q in ("3", "4", "5", "6", "8") else 6
+        # Reference bridge (panel checkbox "Use reference"): when ON, the
+        # worker vision-captions a loaded reference image and folds that
+        # description into the Ideogram prompt — a re-interpretation, NOT a
+        # pixel copy (Ideogram's CLI has no --image-paths). Off/absent = the
+        # historical text-only behaviour. The dataclass field is added by the
+        # image_engine.py side of this contract; we only set it here.
+        # Accept "1"/1/true from both the form path (always a string "1") and
+        # the JSON /image/agent path (a real bool True -> str(True) == "True").
+        _ideo_ref_bridge = (str(form.get("ideo_reference_bridge") or "").strip().lower()
+                            in ("1", "true", "yes", "on"))
         return agent_image_engine.ImageEngineConfig(
             kind="mflux",
             mflux_model=_resolve_ideogram_repo(),   # un-gated mirror unless official already cached
@@ -7990,6 +8009,7 @@ def _build_image_engine_config(
             mflux_quantize=_ideo_quantize,          # 6 → M1-safe default; 4 → fast mode
             mflux_lora_paths=[],
             mflux_lora_scales=[],
+            ideogram_reference_bridge=_ideo_ref_bridge,
         )
     # ===== Qwen-Image-Edit-2511 — Fast / Medium / Quality ====================
     # All three share the same ~24 GB Qwen-Image-Edit-2511 model on disk
@@ -12629,6 +12649,17 @@ _PER_IT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s/it")
 # or `[image] model.safetensors: 45%|...` — so download progress is never
 # mistaken for denoise steps.
 _IMAGE_STEP_RE = re.compile(r"\[image\]\s+\d+%\|[^|]*\|\s*(\d+)\s*/\s*(\d+)")
+# First-run model download. huggingface_hub prints an aggregate
+# "Fetching N files: …| i/N" tqdm bar to the mflux/helper subprocess stdout,
+# which streams into the job log. Surfacing it stops the Now card from sitting
+# on "Loading pipeline" for the ~10 min a cold 20-30 GB model takes (which
+# reads as a hang). Matches with or without the "[image] " prefix.
+_DL_FETCH_RE = re.compile(r"Fetching\s+\d+\s+files:[^|]*\|[^|]*\|\s*(\d+)\s*/\s*(\d+)")
+# image_engine emits a disk-based "[download] model weights: X.X GB" line every
+# ~15 s while a model downloads — more reliable than the per-file Fetching bar
+# on big shards (which is silent for minutes). Prefer it: a climbing GB count is
+# honest and never sticks at 90% like the elapsed-creep fallback.
+_DL_GB_RE = re.compile(r"\[download\]\s*model weights:\s*([\d.]+)\s*GB")
 
 
 def _parse_progress_signals(log_lines: list[str]) -> dict:
@@ -12648,6 +12679,9 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
     stage1_step = stage1_total = None  # latest seen for stage 1
     stage2_step = stage2_total = None  # latest seen for stage 2
     image_step = image_total = None    # latest seen for an mflux image job
+    download_seen = False               # a first-run model download is in flight
+    download_files = download_total = None
+    download_gb = None                  # disk-based GB downloaded (preferred signal)
     last_per_it = None
     decode_started = decode_done = generate_done = upscale_done = pipe_loaded = False
     for ln in reversed(log_lines or []):
@@ -12686,6 +12720,18 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
                 pit = _PER_IT_RE.search(ln)
                 if pit:
                     last_per_it = float(pit.group(1))
+        # First-run model download progress (huggingface_hub aggregate bar).
+        mg = _DL_GB_RE.search(ln)
+        if mg and download_gb is None:
+            try: download_gb = float(mg.group(1))
+            except ValueError: download_gb = None
+            download_seen = True
+        md = _DL_FETCH_RE.search(ln)
+        if md and download_files is None:
+            download_files, download_total = int(md.group(1)), int(md.group(2))
+            download_seen = True
+        elif not download_seen and "Downloading model from HuggingFace" in ln:
+            download_seen = True
         if not decode_started and "step:decode_and_save start" in ln:
             decode_started = True
         if not decode_done and "step:decode_and_save done" in ln:
@@ -12733,6 +12779,10 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
         "generate_done": generate_done,
         "upscale_done": upscale_done,
         "pipe_loaded": pipe_loaded,
+        "download_seen": download_seen,
+        "download_files": download_files,
+        "download_total": download_total,
+        "download_gb": download_gb,
     }
 
 
@@ -12810,6 +12860,7 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
     eta = _bucket_eta(p)
     signals = _parse_progress_signals(log_lines[-200:] if log_lines else [])
     weights = _phase_weights(p)
+    download_frac = 0.0
 
     # Phase pick — newest-first markers win. Order: post > decode > denoise > setup.
     if signals["upscale_done"]:
@@ -12839,6 +12890,23 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
         if param_total > dt:
             dt = param_total
         phase_label = f"Denoising · step {ds} / {dt}"
+    elif signals["download_seen"] and not signals["pipe_loaded"]:
+        # Cold first-run model download — show it (with a moving bar) instead
+        # of sitting on "Loading pipeline" for ~10 min, which reads as a hang.
+        phase = "download"
+        df, dft, dgb = signals["download_files"], signals["download_total"], signals.get("download_gb")
+        if dgb is not None:
+            # Disk-based GB — the honest signal; bar creeps on elapsed but the
+            # GB count is what tells the user it's progressing, not frozen.
+            download_frac = min(0.95, elapsed / 900.0)
+            phase_label = f"Downloading model · first run · {dgb:.1f} GB"
+        elif df is not None and dft:
+            download_frac = max(0.0, min(0.99, df / dft))
+            phase_label = f"Downloading model · first run · {df}/{dft} files"
+        else:
+            # No signal yet — creep on elapsed so the bar still moves.
+            download_frac = min(0.95, elapsed / 600.0)
+            phase_label = "Downloading model · first run · this can take several minutes…"
     else:
         phase = "setup"
         phase_label = "Loading pipeline" if not signals["pipe_loaded"] else "Preparing"
@@ -12852,6 +12920,11 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
         setup_budget = 60.0 if not signals["pipe_loaded"] else 10.0
         within = min(0.92, elapsed / setup_budget) if setup_budget else 0
         pct = within * setup_w
+    elif phase == "download":
+        # Its own 0→95% bar — the cold download dominates first-run wall time
+        # and we can't predict it. When generation starts the phase flips to
+        # "Denoising"; a clear two-phase progress beats a frozen bar.
+        pct = download_frac * 95
     elif phase == "denoise":
         ds = signals["denoise_step"] or 0
         dt = signals["denoise_total"] or 1
@@ -12901,7 +12974,7 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
         else:
             tail = 30.0
         remaining = denoise_left + tail
-    elif eta:
+    elif eta and phase != "download":
         remaining = max(0.0, eta - elapsed)
 
     return {
@@ -20181,8 +20254,8 @@ HTML = r"""<!doctype html>
       <div class="composer-card">
         <div class="composer-refs">
           <div class="show">
-            <h2>Reference images
-              <span class="h2-hint">2-3 subjects: Qwen Edit (reliable) · HiDream Dev (fragile)</span>
+            <h2>Reference image(s) &mdash; for image-to-image (Reference Edit)
+              <span class="h2-hint">Drop a photo to edit/transform it · 2-3 subjects: Qwen Edit (reliable) · HiDream Dev (fragile)</span>
             </h2>
             <div class="studio-ref-grid" id="imgStudioRefs">
               <div class="studio-ref-slot" data-slot="0">
@@ -20390,6 +20463,17 @@ HTML = r"""<!doctype html>
             <span><strong style="color:var(--text)">⚡ Fast mode</strong> &mdash; 4-bit, for M1/M2 or low-RAM Macs <em>(slightly lower quality)</em></span>
           </label>
 
+          <!-- Reference bridge: Ideogram is text-only and can't copy pixels.
+               When a reference image IS loaded, this opt-in vision-captions it
+               and folds the description into the prompt so Ideogram REDRAWS the
+               idea (a re-interpretation, not a pixel copy). Sends
+               ideo_reference_bridge=1. Hidden until a ref is present — see
+               ideoSyncRefBridge(). -->
+          <label class="ideo-refbridge" id="ideoRefBridgeRow" title="Ideogram is text-only — it cannot copy your reference pixel-for-pixel. With this on, the reference is described and that description is added to your prompt, so Ideogram redraws the idea in its own style. For a faithful copy, use a Reference Edit engine instead." style="display:none;align-items:center;gap:8px;margin-top:10px;padding:8px 11px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel-2);font-size:12.5px;color:var(--muted,#9aa6bd);cursor:pointer">
+            <input type="checkbox" id="ideoRefBridge" onchange="ideoState.refBridge=this.checked;if(typeof imgStudioUpdateValidity==='function')imgStudioUpdateValidity();if(typeof imgStudioUpdateRefWarning==='function')imgStudioUpdateRefWarning()" style="accent-color:var(--accent);cursor:pointer;flex:0 0 auto;width:16px;height:16px;margin:0">
+            <span><strong style="color:var(--text)">Use reference</strong> &mdash; Ideogram redraws it from a description <em>(not a pixel copy)</em></span>
+          </label>
+
           <!-- Image-level palette (collapsible). ≤16 colors. -->
           <details class="ideo-details" id="ideoPaletteDetails">
             <summary>Image palette <span class="ideo-summary-meta" id="ideoPaletteCount"></span></summary>
@@ -20438,10 +20522,10 @@ HTML = r"""<!doctype html>
           <div class="studio-engine-row">
             <select id="imgStudioEngine" onchange="if(typeof ideoSyncVisibility==='function')ideoSyncVisibility();imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();imgStudioUpdateRefWarning();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto">Auto (use Settings)</option>
-              <option value="qwen_edit_lightning_inline" selected>Fast &mdash; Lightning 4-step (~1:20, default, multi-ref)</option>
-              <option value="qwen_edit_inline">Standard &mdash; 8-step Q6 (~2:05, no LoRA)</option>
-              <option value="qwen_edit_high_inline">Quality &mdash; 40-step Q8 + CFG (~3:50, final renders)</option>
-              <option value="ideogram4_inline">Ideogram 4 &mdash; typography &amp; layout (text-in-image)</option>
+              <option value="qwen_edit_lightning_inline" selected>Reference Edit &mdash; Fast (image-to-image, Lightning 4-step, ~1:20, default, multi-ref)</option>
+              <option value="qwen_edit_inline">Reference Edit &mdash; Standard (image-to-image, 8-step Q6, ~2:05, no LoRA)</option>
+              <option value="qwen_edit_high_inline">Reference Edit &mdash; Quality (image-to-image, 40-step Q8 + CFG, ~3:50, final renders)</option>
+              <option value="ideogram4_inline">Ideogram 4 &mdash; typography &amp; layout (text-in-image; optional reference bridge)</option>
               <!-- HiDream-O1 hidden 2026-05-28 (issue #15): the engine expects a
                    standalone lab-repo clone at ~/HIDREAM-O1-MLX-LAB-active/.venv
                    which hasn't been made public yet, so selecting any of these
@@ -22573,6 +22657,18 @@ function imgStudioUpdateValidity() {
   } else if (needsRefs && refsCount === 0) {
     invalidReason = 'Pick at least 1 reference image (drop a file into one of the 3 slots above) — Qwen-Image-Edit composes against an image, it cannot run text-only. Use the Lightning preset only after picking a ref.';
   }
+  // Non-blocking notice (does NOT disable Generate): Ideogram is text-only,
+  // so a loaded reference is silently dropped unless the reference bridge is
+  // on. Surface that trap with a way out (turn on the bridge, or switch to a
+  // Reference Edit engine for a faithful pixel copy). Closes the silent-drop
+  // trap flagged in the spec.
+  let softNotice = '';
+  if (!invalidReason
+      && eng.value === 'ideogram4_inline'
+      && refsCount >= 1
+      && !(typeof ideoState === 'object' && ideoState.refBridge)) {
+    softNotice = 'Heads up: Ideogram is text-only, so your reference image will be IGNORED. Turn on "Use reference" above to have Ideogram redraw it from a description, or switch to a Reference Edit engine for a faithful copy.';
+  }
   // Don't override the busy state — imgStudioGenerate manages disabled
   // during in-flight gens.
   if (!IMG_STUDIO.busy) {
@@ -22581,6 +22677,8 @@ function imgStudioUpdateValidity() {
     if (status && !status.textContent.startsWith('Generating')) {
       if (invalidReason) {
         status.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>' + escapeHtml(invalidReason);
+      } else if (softNotice) {
+        status.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>' + escapeHtml(softNotice);
       } else {
         status.textContent = '';
       }
@@ -22696,6 +22794,9 @@ function imgStudioRenderSlot(idx) {
   }
   imgStudioUpdateValidity();
   imgStudioUpdateRefWarning();
+  // The Ideogram reference-bridge checkbox only appears once a ref exists —
+  // re-evaluate its visibility whenever a slot fills or clears.
+  if (typeof ideoSyncRefBridge === 'function') ideoSyncRefBridge();
   // Recent strip's "in-use" highlight depends on which paths are bound to
   // slots — re-render the strip so freshly-cleared slots release their
   // selection ring.
@@ -23018,6 +23119,7 @@ const ideoState = {
   _editing: false,                      // a text input is focused (don't steal keys)
   _editId: null,                        // box currently being edited inline on the canvas
   fast: false,                          // Fast mode → 4-bit quantize (slower-GPU / low-RAM)
+  refBridge: false,                     // Reference bridge → caption a loaded ref into the prompt (ideogram only)
   _seq: 1,
 };
 
@@ -23138,8 +23240,13 @@ function ideoApplyComposerChrome(){
   const prompt = document.getElementById('imgStudioPrompt');
   const layout = ideoInLayout();
   const active = ideoIsActive();
-  // Refs: hidden whenever Ideogram is the engine (it never takes refs).
-  if (refsWrap) refsWrap.style.display = active ? 'none' : '';
+  // Refs stay visible for Ideogram so the user can drop one for the
+  // reference bridge (vision-caption → prompt). Ideogram still can't copy
+  // pixels — the bridge checkbox + ref-warning explain that. (Previously
+  // the refs were force-hidden whenever Ideogram was active.)
+  if (refsWrap) refsWrap.style.display = '';
+  // Show/hide the bridge checkbox based on engine + whether a ref is loaded.
+  if (typeof ideoSyncRefBridge === 'function') ideoSyncRefBridge();
   if (promptLabel){
     if (layout){
       promptLabel.hidden = false;
@@ -23157,6 +23264,24 @@ function ideoApplyComposerChrome(){
       prompt.placeholder = 'A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic';
     }
   }
+}
+
+// Show the Ideogram reference-bridge checkbox only when Ideogram is the
+// engine AND at least one reference image is loaded. Keep the checkbox and
+// ideoState.refBridge in sync. Called from ideoApplyComposerChrome (engine
+// change) and imgStudioRenderSlot (refs added/removed).
+function ideoSyncRefBridge(){
+  const row = document.getElementById('ideoRefBridgeRow');
+  const cb = document.getElementById('ideoRefBridge');
+  if (!row) return;
+  const active = (typeof ideoIsActive === 'function') && ideoIsActive();
+  const refsCount = ((typeof IMG_STUDIO === 'object' && IMG_STUDIO.refs) || []).filter(r => r && r.path).length;
+  // Bridge is simple-mode only: in Layout the prompt is a serialized JSON
+  // caption, and the backend skips the bridge to avoid corrupting it.
+  const show = active && refsCount >= 1
+               && !((typeof ideoInLayout === 'function') && ideoInLayout());
+  row.style.display = show ? 'flex' : 'none';
+  if (cb) cb.checked = !!ideoState.refBridge;
 }
 
 function ideoSetMode(mode){
@@ -24174,6 +24299,11 @@ async function imgStudioGenerate() {
     // Fast mode → 4-bit quantize (Ideogram only). Null otherwise so the
     // server applies its M1-safe q6 default.
     ideo_quantize: (engineVal === 'ideogram4_inline' && typeof ideoState === 'object' && ideoState.fast) ? 4 : null,
+    // Reference bridge → caption a loaded ref into the Ideogram prompt. Only
+    // meaningful for ideogram4_inline AND when at least one ref is present.
+    ideo_reference_bridge: (engineVal === 'ideogram4_inline'
+      && typeof ideoState === 'object' && ideoState.refBridge
+      && IMG_STUDIO.refs.filter(r => r && r.path).length >= 1) ? 1 : null,
     refs,
   };
   // Submit through the same /queue/add endpoint video jobs use, with
@@ -24198,6 +24328,9 @@ async function imgStudioGenerate() {
     // _build_image_engine_config reads it into ImageEngineConfig.mflux_preset.
     if (body.ideo_preset) fd.set('ideo_preset', body.ideo_preset);
     if (body.ideo_quantize) fd.set('ideo_quantize', String(body.ideo_quantize));
+    // Reference bridge flag — _build_image_engine_config reads it into
+    // ImageEngineConfig.ideogram_reference_bridge (ideogram branch).
+    if (body.ideo_reference_bridge) fd.set('ideo_reference_bridge', '1');
     fd.set('aspect', body.aspect || '16:9');
     fd.set('n', String(body.n || 1));
     fd.set('seed', String(body.seed != null ? body.seed : -1));

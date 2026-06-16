@@ -205,6 +205,13 @@ class ImageEngineConfig:
     # None → the ideogram argv branch falls back to "V4_DEFAULT_20" (20
     # steps). Valid values: "V4_TURBO_12" | "V4_DEFAULT_20" | "V4_QUALITY_48".
     mflux_preset: str | None = None
+    # Ideogram 4 "reference bridge". Ideogram is TEXT-TO-IMAGE only (no
+    # --image-paths), so when this is on AND refs are present we vision-
+    # caption the first ref(s) with local Gemma 3 and splice the caption
+    # into the Ideogram prompt — a re-interpretation of the look, not a
+    # pixel copy. Ignored by every non-ideogram family (they consume refs
+    # directly via --image-paths). See the bridge block in _generate_mflux.
+    ideogram_reference_bridge: bool = False
     mflux_python_path: str = ""                     # optional override for the mflux CLI location
     # Optional Lightning / acceleration LoRAs. With qwen_edit + a 4-step
     # Lightning LoRA, generation drops from ~5 min to ~10-15 sec per
@@ -758,11 +765,86 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     ideogram_prompt_file: str | None = None
     if fam == "ideogram":
         import tempfile
+        # Reference bridge: Ideogram has no image input, so when the user
+        # enabled it AND dropped reference image(s), vision-caption the
+        # first ref(s) with local Gemma 3 in a SEPARATE subprocess and
+        # splice the caption into the prompt. The subprocess (not an
+        # in-process load) matters here: Gemma's ~6 GB RSS is reclaimed by
+        # the OS the moment it exits — BEFORE we launch the ~24 GB Ideogram
+        # render below — so the two never coexist. The whole block is
+        # best-effort: any failure/timeout falls back to plain text-to-
+        # image with a warning and NEVER breaks the render.
+        eff_prompt = prompt
+        if config.ideogram_reference_bridge and refs and prompt.lstrip().startswith("{"):
+            # Layout-mode prompts are a serialized Ideogram JSON caption (the
+            # on-canvas editor). Appending a plain-text reference description
+            # would corrupt the JSON and mflux would silently drop the whole
+            # structured layout. Skip the bridge — the UI also hides the toggle
+            # in Layout mode, so this is a belt-and-suspenders guard.
+            if on_log is not None:
+                try: on_log("reference bridge skipped — Layout caption uses the canvas, not a reference")
+                except Exception:  # noqa: BLE001
+                    pass
+        elif config.ideogram_reference_bridge and refs:
+            try:
+                # Same interpreter that runs mflux (the venv python sits
+                # next to bin_path), mirroring the TeaCache wrap fallback.
+                bin_dir = Path(bin_path).parent
+                cap_py = bin_dir / "python3"
+                if not cap_py.is_file():
+                    cap_py = bin_dir / "python"
+                if not cap_py.is_file():
+                    cap_py = Path(sys.executable)
+                cap_helper = (Path(__file__).resolve().parent
+                              / "caption_reference_vision.py")
+                cap_cmd = [str(cap_py), str(cap_helper)]
+                for r in refs[:3]:                       # first 3 refs only
+                    cap_cmd += ["--image", str(Path(r).resolve())]
+                if on_log is not None:
+                    try: on_log("captioning reference with Gemma 3 vision…")
+                    except Exception:  # noqa: BLE001
+                        pass
+                cap_res = subprocess.run(
+                    cap_cmd, capture_output=True, text=True,
+                    env=_clean_subprocess_env(), timeout=180,
+                )
+                if cap_res.returncode != 0:
+                    raise RuntimeError(
+                        (cap_res.stderr or "captioner exited non-zero").strip())
+                # Prefer the CAPTION_JSON marker line; fall back to the
+                # last non-empty stdout line.
+                caption = ""
+                for ln in cap_res.stdout.splitlines():
+                    if ln.startswith("CAPTION_JSON:"):
+                        try:
+                            caption = json.loads(
+                                ln.split("CAPTION_JSON:", 1)[1].strip()
+                            ).get("caption", "")
+                        except Exception:  # noqa: BLE001
+                            caption = ""
+                if not caption:
+                    tail = [ln for ln in cap_res.stdout.splitlines() if ln.strip()]
+                    caption = tail[-1].strip() if tail else ""
+                if not caption:
+                    raise RuntimeError("captioner returned no caption")
+                eff_prompt = (
+                    f"{prompt}\n\nVisual reference to echo (subject, "
+                    f"composition, palette, lighting, style): {caption}")
+                if on_log is not None:
+                    try: on_log(f"reference caption: {caption[:120]}…")
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception as e:        # noqa: BLE001 — never break the render
+                if on_log is not None:
+                    try: on_log(f"reference caption failed ({e}); rendering text-only")
+                    except Exception:  # noqa: BLE001
+                        pass
+                eff_prompt = prompt
         _fd, ideogram_prompt_file = tempfile.mkstemp(
             suffix=".json", prefix="ideogram_prompt_",
         )
         with os.fdopen(_fd, "w", encoding="utf-8") as _pf:
-            _pf.write(prompt)
+            _pf.write(eff_prompt)
         cmd = [
             bin_path,
             "--model", config.mflux_model,
@@ -998,7 +1080,67 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # Register before the wait loop so /stop can find this proc.
     _register_active_proc(proc)
     try:
-        deadline = time.time() + timeout_s
+        # Activity-based (stall) timeout, NOT a fixed total deadline: the model
+        # download runs INSIDE this subprocess, and on a slow connection a
+        # 20-34 GB first-run pull can exceed any fixed render budget. The old
+        # fixed deadline killed a slow-but-progressing download mid-fetch — so a
+        # brand-new user's first generation just "failed" with a partial model.
+        # Reset the deadline on every output line (download "Fetching i/N" lines
+        # stream per file; render emits step lines every few seconds), so we
+        # only abort on a genuine STALL — no output for `stall_budget`. A
+        # generous absolute cap is the runaway backstop.
+        stall_budget = 1800.0                              # 30 min of silence = stuck
+        hard_cap = time.time() + max(timeout_s, 14400.0)   # 4 h absolute backstop
+        # The download writes to disk for many minutes while its stdout is
+        # silent OR floods \r-progress that readline() blocks on — either way
+        # the read loop below can't tick a stall clock during the pull. So
+        # liveness is owned by a DAEMON THREAD (a separate thread can't be
+        # starved by readline blocking — the GIL releases during blocking I/O):
+        # it polls the model's cache dir (growth = download alive) while the
+        # read loop stamps `_alive` on each render line (render alive). It kills
+        # the subprocess only on a GENUINE stall — neither disk nor stdout for
+        # stall_budget — and emits a GB readout. (HiDream uses the same idea.)
+        _hf_home = env.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+        dl_dir = ((Path(_hf_home) / "hub"
+                   / ("models--" + config.mflux_model.replace("/", "--")))
+                  if getattr(config, "mflux_model", None) else None)
+        def _dl_gb() -> float:
+            try:
+                if not dl_dir or not dl_dir.exists():
+                    return -1.0
+                total = 0
+                for _root, _dirs, _files in os.walk(dl_dir):
+                    for _f in _files:
+                        _fp = os.path.join(_root, _f)
+                        try:
+                            if not os.path.islink(_fp):   # skip snapshot symlinks → no double count
+                                total += os.path.getsize(_fp)
+                        except OSError:
+                            pass
+                return total / 1e9
+            except Exception:  # noqa: BLE001
+                return -1.0
+        _alive = [time.time()]
+        _wd_stop = threading.Event()
+        _wd_killed = [False]
+        def _watchdog() -> None:
+            _last = _dl_gb()
+            while not _wd_stop.wait(15.0):
+                _sz = _dl_gb()
+                if _sz > _last + 0.001:                  # >1 MB on disk → download alive
+                    _alive[0] = time.time()
+                    if _last >= 0.0 and on_log is not None:
+                        try: on_log(f"[download] model weights: {_sz:.1f} GB")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    _last = max(_last, _sz)
+                if (time.time() - _alive[0] > stall_budget) or (time.time() > hard_cap):
+                    _wd_killed[0] = True
+                    try: os.killpg(os.getpgid(proc.pid), 15)   # SIGTERM tree → readline EOFs
+                    except (OSError, ProcessLookupError):
+                        pass
+                    return
+        threading.Thread(target=_watchdog, name="mflux-dl-watchdog", daemon=True).start()
         poll_interval = 0.5
         if proc.stdout is not None:
             while True:
@@ -1021,6 +1163,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                         break
                     line = raw.rstrip("\n")
                     if line:
+                        _alive[0] = time.time()                 # render/output activity → alive
                         last_lines.append(line)
                         if on_log is not None:
                             try:
@@ -1028,11 +1171,8 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                             except Exception:        # noqa: BLE001
                                 # A buggy logger callback must not break the gen.
                                 pass
-                # Deadline check — runs every iteration whether or not
-                # the child wrote a line, so a silent stall still trips.
-                if time.time() > deadline:
-                    timed_out = True
-                    break
+                # Stall timeout is owned by the watchdog thread (it sees disk
+                # growth even while readline() above is blocked on \r-output).
                 # Child exited but we haven't seen EOF yet — flush any
                 # remaining buffered output on the next select cycle.
                 # Don't break here: select+readline above will drain
@@ -1040,6 +1180,9 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 if proc.poll() is not None and not ready:
                     # No data in this slice + child gone → drain done.
                     break
+        if _wd_killed[0]:                  # watchdog SIGTERM'd a genuine stall
+            timed_out = True
+        _wd_stop.set()                     # stop the watchdog promptly
         if timed_out:
             # SIGTERM the whole process group, give it 2s to clean up,
             # then SIGKILL if still alive. The except subprocess.TimeoutExpired
@@ -1061,21 +1204,23 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 except subprocess.TimeoutExpired:
                     pass
             raise RuntimeError(
-                f"{bin_name} timed out after {timeout_s}s on a batch of "
-                f"{n} seeds. First run downloads weights — qwen_edit Q8 "
-                f"weights are ~34 GB; give it longer or pre-pull."
+                f"{bin_name} stalled: no output for {int(stall_budget)}s "
+                f"(a hung download or a Metal deadlock). First-run weight pulls "
+                f"stream progress and keep this alive — a genuine stall tripped it."
             )
-        rc = proc.wait(timeout=max(1, deadline - time.time()))
+        rc = proc.wait(timeout=30)
     except subprocess.TimeoutExpired as e:
         try:
             proc.kill()
         except OSError:
             pass
         raise RuntimeError(
-            f"{bin_name} timed out after {timeout_s}s on a batch of {n} seeds. "
-            f"First run downloads weights; give it longer next time."
+            f"{bin_name} did not exit after its output ended "
+            f"(possible zombie / stuck cleanup)."
         ) from e
     finally:
+        try: _wd_stop.set()                # belt: stop watchdog even on early error
+        except NameError: pass
         if proc.stdout is not None:
             try:
                 proc.stdout.close()
@@ -1169,6 +1314,21 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # no per-image metadata to show / reproduce / debug. The candidates
     # below are still ordered by `seeds` so n=4 batches map to consistent
     # indices in the UI.
+    def _is_safety_placeholder(png: Path) -> bool:
+        # Ideogram's safety head returns a flat gray "Image blocked by safety
+        # filter" placeholder on some benign prompts (no mflux signal — it's
+        # baked into the model weights). A real render has high colour variance;
+        # the placeholder is uniform mid-gray. Detect it so the job fails
+        # honestly instead of reporting a gray box as a successful render.
+        try:
+            from PIL import Image, ImageStat
+            st = ImageStat.Stat(Image.open(png).convert("RGB"))
+            mean_std = sum(st.stddev) / 3.0
+            spread = max(st.mean) - min(st.mean)   # gray = channels ~equal
+            return mean_std < 15.0 and spread < 25.0
+        except Exception:  # noqa: BLE001 — detection must never break a render
+            return False
+
     results: list[dict] = []
     for i, seed in enumerate(seeds):
         # Try the templated path first (old mflux behavior + the n=1 case).
@@ -1212,7 +1372,17 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             # (Code-review P3, 2026-05-09.)
             "refs_ignored": (bool(refs) and not refs_used),
             "lora_paths": list(config.mflux_lora_paths or []),
+            "safety_blocked": (fam == "ideogram" and _is_safety_placeholder(path)),
         })
+
+    if fam == "ideogram" and results and all(r.get("safety_blocked") for r in results):
+        raise RuntimeError(
+            "Ideogram's safety filter blocked this prompt — it returned a gray "
+            "placeholder instead of a render. This is a known false-positive in "
+            "the Ideogram model itself (baked into the weights, not Phosphene) on "
+            "some perfectly benign prompts. Try rephrasing the prompt, or switch "
+            "to a Reference Edit engine."
+        )
 
     if not results:
         raise RuntimeError(
