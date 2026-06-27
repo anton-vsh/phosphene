@@ -1,6 +1,8 @@
 ## About this fork
 
-This fork adds A2V Distilled Pipeline (a2vid_distilled.py) in phosphene root for
+This fork adds audio-to-video mode for low memory pipeline.
+
+Adds A2V Distilled Pipeline (a2vid_distilled.py) in phosphene root for
 Q4-distilled audio-to-video generation. No ltx-2-mlx modifications
 required — imports from stock ltx-pipelines-mlx package.
 
